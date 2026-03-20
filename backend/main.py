@@ -94,6 +94,20 @@ async def get_profiles():
         return []
 
 
+# ── LoRAs ────────────────────────────────────────────────────
+
+@app.get("/api/loras")
+async def get_loras():
+    """List available LoRA styles for image generation."""
+    return {
+        "available": {
+            key: {"trigger": v["trigger"], "file": v["file"]}
+            for key, v in image_gen.AVAILABLE_LORAS.items()
+        },
+        "defaults": image_gen.DEFAULT_LORAS,
+    }
+
+
 # ── Projects CRUD ────────────────────────────────────────────
 
 @app.get("/api/projects")
@@ -250,6 +264,7 @@ async def run_images(project_id: str, req: RunImagesRequest):
             project_dir=pdir,
             backend=req.backend,
             style_prompt=req.style_prompt,
+            lora_keys=req.lora_keys,
         )
         script["scenes"] = scenes
         store.save_json(project_id, "script.json", script)
@@ -275,9 +290,9 @@ async def run_assemble(project_id: str, req: RunAssembleRequest):
 
     try:
         pdir = store.project_dir(project_id)
-        output = assemble_video(scenes=script["scenes"], project_dir=pdir)
+        output, duration = assemble_video(scenes=script["scenes"], project_dir=pdir)
         store.update_state(project_id, step="assembled")
-        return {"video": str(output.relative_to(pdir)), "duration": None}
+        return {"video": str(output.relative_to(pdir)), "duration": duration}
     except Exception as e:
         tb = traceback.format_exc()
         log.error(f"Assembly failed: {tb}")

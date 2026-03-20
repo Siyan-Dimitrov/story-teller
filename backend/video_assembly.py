@@ -162,10 +162,13 @@ def assemble_video(
         logger=None,
     )
 
+    # Capture duration before cleanup
+    total_duration = round(final.duration, 2)
+
     # Clean up
     final.close()
     for c in clips:
         c.close()
 
-    log.info(f"Video assembled: {output_path}")
-    return output_path
+    log.info(f"Video assembled: {output_path} ({total_duration}s)")
+    return output_path, total_duration

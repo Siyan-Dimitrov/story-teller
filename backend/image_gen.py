@@ -1,7 +1,5 @@
 """Image generation via ComfyUI API or Ollama."""
 
-import io
-import json
 import time
 import uuid
 import logging
@@ -12,67 +10,160 @@ from . import config
 
 log = logging.getLogger(__name__)
 
-# ComfyUI workflow template for SDXL text-to-image
-# This is a minimal SDXL workflow — can be extended with LoRAs
-COMFYUI_WORKFLOW = {
-    "3": {
-        "class_type": "KSampler",
-        "inputs": {
-            "seed": 0,
-            "steps": 25,
-            "cfg": 7.0,
-            "sampler_name": "euler_ancestral",
-            "scheduler": "normal",
-            "denoise": 1.0,
-            "model": ["4", 0],
-            "positive": ["6", 0],
-            "negative": ["7", 0],
-            "latent_image": ["5", 0],
-        },
+# ── Available LoRAs ─────────────────────────────────────────────
+# Each entry: filename, trigger words to prepend, strength_model, strength_clip
+AVAILABLE_LORAS = {
+    "tim_burton": {
+        "file": "Tim_Burton_Painting_Style_SDXL.safetensors",
+        "trigger": "Tim Burton Style",
+        "strength_model": 0.7,
+        "strength_clip": 0.7,
     },
-    "4": {
+    "storybook": {
+        "file": "StorybookRedmondV2.safetensors",
+        "trigger": "KidsRedmAF",
+        "strength_model": 0.6,
+        "strength_clip": 0.6,
+    },
+    "dark_gothic": {
+        "file": "dark_gothic_fantasy_xl.safetensors",
+        "trigger": "dark gothic fantasy",
+        "strength_model": 0.65,
+        "strength_clip": 0.65,
+    },
+    "mark_ryden": {
+        "file": "Mark_Ryden_Style.safetensors",
+        "trigger": "Mark Ryden Style",
+        "strength_model": 0.7,
+        "strength_clip": 0.7,
+    },
+    "dave_mckean": {
+        "file": "Dave_McKean_Style.safetensors",
+        "trigger": "Dave McKean Style",
+        "strength_model": 0.65,
+        "strength_clip": 0.65,
+    },
+}
+
+# Default LoRA combination — Tim Burton + dark gothic gives the closest
+# match to the abitfrank channel aesthetic
+DEFAULT_LORAS = ["tim_burton", "dark_gothic"]
+
+
+def _build_workflow(
+    prompt_text: str,
+    negative_text: str,
+    lora_keys: list[str] | None = None,
+    seed: int = 0,
+) -> dict:
+    """Build a ComfyUI workflow dict with optional LoRA chain.
+
+    Nodes:
+      4  -> CheckpointLoaderSimple
+      10, 11, ... -> LoraLoader chain (one per LoRA)
+      6  -> CLIPTextEncode (positive)
+      7  -> CLIPTextEncode (negative)
+      5  -> EmptyLatentImage
+      3  -> KSampler
+      8  -> VAEDecode
+      9  -> SaveImage
+    """
+    if lora_keys is None:
+        lora_keys = DEFAULT_LORAS
+
+    workflow: dict = {}
+
+    # Checkpoint loader — always node "4"
+    workflow["4"] = {
         "class_type": "CheckpointLoaderSimple",
-        "inputs": {
-            "ckpt_name": "sd_xl_base_1.0.safetensors",
-        },
-    },
-    "5": {
+        "inputs": {"ckpt_name": "sd_xl_base_1.0.safetensors"},
+    }
+
+    # Build LoRA chain: each LoraLoader takes model+clip from previous
+    # First LoRA connects to checkpoint ("4"), subsequent connect to previous LoRA node
+    lora_nodes = []
+    valid_loras = [k for k in lora_keys if k in AVAILABLE_LORAS]
+
+    prev_model_ref = ["4", 0]  # model output
+    prev_clip_ref = ["4", 1]   # clip output
+
+    for i, key in enumerate(valid_loras):
+        lora = AVAILABLE_LORAS[key]
+        node_id = str(10 + i)
+        workflow[node_id] = {
+            "class_type": "LoraLoader",
+            "inputs": {
+                "lora_name": lora["file"],
+                "strength_model": lora["strength_model"],
+                "strength_clip": lora["strength_clip"],
+                "model": prev_model_ref,
+                "clip": prev_clip_ref,
+            },
+        }
+        prev_model_ref = [node_id, 0]
+        prev_clip_ref = [node_id, 1]
+        lora_nodes.append(key)
+
+    # Collect trigger words from active LoRAs
+    triggers = ", ".join(AVAILABLE_LORAS[k]["trigger"] for k in valid_loras)
+    full_prompt = f"{triggers}, {prompt_text}" if triggers else prompt_text
+
+    # CLIP text encoders — connect to last LoRA (or checkpoint if no LoRAs)
+    workflow["6"] = {
+        "class_type": "CLIPTextEncode",
+        "inputs": {"text": full_prompt, "clip": prev_clip_ref},
+    }
+    workflow["7"] = {
+        "class_type": "CLIPTextEncode",
+        "inputs": {"text": negative_text, "clip": prev_clip_ref},
+    }
+
+    # Empty latent
+    workflow["5"] = {
         "class_type": "EmptyLatentImage",
         "inputs": {
             "width": config.IMAGE_WIDTH,
             "height": config.IMAGE_HEIGHT,
             "batch_size": 1,
         },
-    },
-    "6": {
-        "class_type": "CLIPTextEncode",
+    }
+
+    # KSampler — model from last LoRA (or checkpoint)
+    workflow["3"] = {
+        "class_type": "KSampler",
         "inputs": {
-            "text": "",  # Filled with image_prompt
-            "clip": ["4", 1],
+            "seed": seed,
+            "steps": 25,
+            "cfg": 7.0,
+            "sampler_name": "euler_ancestral",
+            "scheduler": "normal",
+            "denoise": 1.0,
+            "model": prev_model_ref,
+            "positive": ["6", 0],
+            "negative": ["7", 0],
+            "latent_image": ["5", 0],
         },
-    },
-    "7": {
-        "class_type": "CLIPTextEncode",
-        "inputs": {
-            "text": "blurry, low quality, text, watermark, signature, jpeg artifacts, deformed, ugly, modern, photograph, realistic photo",
-            "clip": ["4", 1],
-        },
-    },
-    "8": {
+    }
+
+    # VAE Decode — vae always from checkpoint node "4" output slot 2
+    workflow["8"] = {
         "class_type": "VAEDecode",
-        "inputs": {
-            "samples": ["3", 0],
-            "vae": ["4", 2],
-        },
-    },
-    "9": {
+        "inputs": {"samples": ["3", 0], "vae": ["4", 2]},
+    }
+
+    # Save image
+    workflow["9"] = {
         "class_type": "SaveImage",
-        "inputs": {
-            "filename_prefix": "storyteller",
-            "images": ["8", 0],
-        },
-    },
-}
+        "inputs": {"filename_prefix": "storyteller", "images": ["8", 0]},
+    }
+
+    return workflow
+
+
+NEGATIVE_PROMPT = (
+    "blurry, low quality, text, watermark, signature, jpeg artifacts, "
+    "deformed, ugly, modern, photograph, realistic photo, 3d render"
+)
 
 
 async def generate_image_comfyui(
@@ -80,20 +171,21 @@ async def generate_image_comfyui(
     style_prompt: str,
     output_path: Path,
     seed: int | None = None,
+    lora_keys: list[str] | None = None,
 ) -> Path:
-    """Generate an image using ComfyUI's SDXL workflow."""
-    import copy
-
-    workflow = copy.deepcopy(COMFYUI_WORKFLOW)
-
-    # Set the prompt
-    full_prompt = f"{style_prompt}, {prompt}" if style_prompt else prompt
-    workflow["6"]["inputs"]["text"] = full_prompt
-
-    # Set seed
+    """Generate an image using ComfyUI's SDXL workflow with LoRA support."""
     if seed is None:
         seed = int(time.time() * 1000) % (2**32)
-    workflow["3"]["inputs"]["seed"] = seed
+
+    # Combine style prompt with scene prompt
+    full_prompt = f"{style_prompt}, {prompt}" if style_prompt else prompt
+
+    workflow = _build_workflow(
+        prompt_text=full_prompt,
+        negative_text=NEGATIVE_PROMPT,
+        lora_keys=lora_keys,
+        seed=seed,
+    )
 
     # Unique client ID for tracking
     client_id = uuid.uuid4().hex[:8]
@@ -201,26 +293,26 @@ async def generate_all_scenes(
     project_dir: Path,
     backend: str = "comfyui",
     style_prompt: str = "dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting",
+    lora_keys: list[str] | None = None,
 ) -> list[dict]:
     """Generate images for all scenes. Returns updated scenes with image_path."""
     images_dir = project_dir / "images"
     images_dir.mkdir(exist_ok=True)
-
-    gen_fn = generate_image_comfyui if backend == "comfyui" else generate_image_ollama
 
     for scene in scenes:
         idx = scene["index"]
         output_path = images_dir / f"scene_{idx:04d}.png"
         try:
             if backend == "comfyui":
-                await gen_fn(
+                await generate_image_comfyui(
                     prompt=scene["image_prompt"],
                     style_prompt=style_prompt,
                     output_path=output_path,
                     seed=idx * 42,
+                    lora_keys=lora_keys,
                 )
             else:
-                await gen_fn(
+                await generate_image_ollama(
                     prompt=scene["image_prompt"],
                     style_prompt=style_prompt,
                     output_path=output_path,

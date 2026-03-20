@@ -76,6 +76,7 @@ class RunVoiceRequest(BaseModel):
 class RunImagesRequest(BaseModel):
     backend: str = "comfyui"  # comfyui | ollama
     style_prompt: str = "dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting"
+    lora_keys: Optional[list[str]] = None  # e.g. ["tim_burton", "dark_gothic"] — None uses defaults
 
 
 class RunAssembleRequest(BaseModel):

@@ -101,11 +101,22 @@ function del<T>(url: string): Promise<T> {
 
 // ── API ─────────────────────────────────────────────────────
 
+export interface LoraInfo {
+  trigger: string
+  file: string
+}
+
+export interface LorasResponse {
+  available: Record<string, LoraInfo>
+  defaults: string[]
+}
+
 export const api = {
   health: () => request<HealthStatus>('/api/health'),
   tales: () => request<Tale[]>('/api/tales'),
   tale: (id: string) => request<Tale>(`/api/tales/${id}`),
   profiles: () => request<VoiceProfile[]>('/api/profiles'),
+  loras: () => request<LorasResponse>('/api/loras'),
 
   listProjects: () => request<ProjectSummary[]>('/api/projects'),
   createProject: (body: { source_tale: string; custom_prompt?: string; target_minutes: number; ollama_model: string }) =>
@@ -121,7 +132,7 @@ export const api = {
   runVoice: (id: string, body: { profile_id: string; language: string }) =>
     post<{ scenes: Scene[] }>(`/api/projects/${id}/voice`, body),
 
-  runImages: (id: string, body: { backend: string; style_prompt: string }) =>
+  runImages: (id: string, body: { backend: string; style_prompt: string; lora_keys?: string[] }) =>
     post<{ scenes: Scene[] }>(`/api/projects/${id}/images`, body),
 
   runAssemble: (id: string) =>

@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { ImageIcon, Loader2, RefreshCw } from 'lucide-react'
-import type { ProjectState } from '../api'
+import type { ProjectState, LoraInfo } from '../api'
 import { api } from '../api'
 
 interface Props {
@@ -15,6 +15,15 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
   const [backend, setBackend] = useState(project.image_backend || 'comfyui')
   const [stylePrompt, setStylePrompt] = useState(DEFAULT_STYLE)
   const [generating, setGenerating] = useState(false)
+  const [availableLoras, setAvailableLoras] = useState<Record<string, LoraInfo>>({})
+  const [selectedLoras, setSelectedLoras] = useState<string[]>([])
+
+  useEffect(() => {
+    api.loras().then(data => {
+      setAvailableLoras(data.available)
+      setSelectedLoras(data.defaults)
+    }).catch(() => {})
+  }, [])
 
   const scenes = project.script?.scenes || []
   const hasImages = scenes.some(s => s.image_path)
@@ -22,7 +31,7 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
   const handleGenerate = async () => {
     setGenerating(true)
     try {
-      await api.runImages(project.project_id, { backend, style_prompt: stylePrompt })
+      await api.runImages(project.project_id, { backend, style_prompt: stylePrompt, lora_keys: selectedLoras })
       onRefresh()
     } catch (e) {
       alert('Image generation failed: ' + (e as Error).message)
@@ -68,6 +77,34 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
               />
             </div>
           </div>
+          {backend === 'comfyui' && Object.keys(availableLoras).length > 0 && (
+            <div>
+              <label className="block text-xs text-[var(--text-secondary)] mb-1.5">LoRA Styles (select one or more)</label>
+              <div className="flex flex-wrap gap-2">
+                {Object.entries(availableLoras).map(([key, lora]) => {
+                  const active = selectedLoras.includes(key)
+                  return (
+                    <button
+                      key={key}
+                      onClick={() =>
+                        setSelectedLoras(prev =>
+                          active ? prev.filter(k => k !== key) : [...prev, key]
+                        )
+                      }
+                      className={`px-3 py-1.5 rounded-lg text-xs border transition-colors ${
+                        active
+                          ? 'border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--accent)]'
+                          : 'border-[var(--border)] text-[var(--text-muted)] hover:border-[var(--border-focus)]'
+                      }`}
+                    >
+                      {key.replace(/_/g, ' ')}
+                      <span className="ml-1 opacity-60">({lora.trigger})</span>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          )}
           <div className="flex justify-end">
             <button
               onClick={handleGenerate}
