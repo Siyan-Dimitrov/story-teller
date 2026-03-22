@@ -26,7 +26,7 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
   }, [])
 
   const scenes = project.script?.scenes || []
-  const hasImages = scenes.some(s => s.image_path)
+  const hasImages = scenes.some(s => (s.image_paths && s.image_paths.length > 0) || s.image_path)
 
   const handleGenerate = async () => {
     setGenerating(true)
@@ -120,31 +120,50 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
 
       {/* Image grid */}
       {hasImages && (
-        <div className="grid grid-cols-3 gap-3">
-          {scenes.map((scene, i) => (
-            <div key={i} className="rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] overflow-hidden">
-              {scene.image_path ? (
-                <img
-                  src={api.artifactUrl(project.project_id, scene.image_path)}
-                  alt={`Scene ${i + 1}`}
-                  className="w-full aspect-video object-cover"
-                />
-              ) : (
-                <div className="w-full aspect-video bg-[var(--bg-tertiary)] flex items-center justify-center">
-                  <span className="text-xs text-[var(--text-muted)]">
-                    {scene.image_error ? 'Error' : 'No image'}
-                  </span>
-                </div>
-              )}
-              <div className="p-2">
-                <div className="flex items-center justify-between">
+        <div className="space-y-4">
+          {scenes.map((scene, i) => {
+            const paths = (scene.image_paths && scene.image_paths.length > 0)
+              ? scene.image_paths
+              : scene.image_path ? [scene.image_path] : []
+            const prompts = (scene.image_prompts && scene.image_prompts.length > 0)
+              ? scene.image_prompts
+              : scene.image_prompt ? [scene.image_prompt] : []
+
+            if (paths.length === 0 && !scene.image_error) return null
+
+            return (
+              <div key={i} className="rounded-xl border border-[var(--border)] bg-[var(--bg-secondary)] overflow-hidden">
+                <div className="px-3 py-2 border-b border-[var(--border)] flex items-center justify-between">
                   <span className="text-xs font-medium text-[var(--accent)]">Scene {i + 1}</span>
-                  <span className="text-[10px] text-[var(--text-muted)]">{scene.mood}</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-[var(--text-muted)]">{paths.length} image{paths.length !== 1 ? 's' : ''}</span>
+                    <span className="text-[10px] text-[var(--text-muted)]">{scene.mood}</span>
+                  </div>
                 </div>
-                <p className="text-[10px] text-[var(--text-muted)] mt-1 line-clamp-2">{scene.image_prompt}</p>
+                <div className="grid grid-cols-4 gap-1 p-1">
+                  {paths.map((path, j) => (
+                    <div key={j} className="relative group">
+                      <img
+                        src={api.artifactUrl(project.project_id, path)}
+                        alt={`Scene ${i + 1} - Image ${j + 1}`}
+                        className="w-full aspect-video object-cover rounded"
+                      />
+                      {prompts[j] && (
+                        <div className="absolute inset-0 bg-black/70 opacity-0 group-hover:opacity-100 transition-opacity rounded p-1.5 overflow-auto">
+                          <p className="text-[9px] text-white/80 leading-tight">{prompts[j]}</p>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  {scene.image_error && paths.length === 0 && (
+                    <div className="col-span-4 p-3 text-xs text-[var(--error)] text-center">
+                      {scene.image_error}
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
 

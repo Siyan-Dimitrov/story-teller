@@ -11,12 +11,18 @@ export interface Scene {
   index: number
   narration: string
   image_prompt: string
+  image_prompts?: string[]
   mood: string
   duration_hint: number
   audio_path?: string | null
   audio_duration?: number | null
   image_path?: string | null
+  image_paths?: string[]
   kb_effect: string
+  animation_types?: string[]
+  motion_presets?: string[]
+  depth_map_paths?: (string | null)[]
+  animatediff_clip_paths?: (string | null)[]
   voice_error?: string
   image_error?: string
 }
@@ -43,6 +49,7 @@ export interface ProjectState {
   target_minutes: number
   created_at: string
   script?: Script
+  output_dir?: string | null
 }
 
 export interface ProjectSummary {
@@ -66,6 +73,15 @@ export interface VoiceProfile {
   id: string
   name: string
   language: string
+}
+
+export interface StorySearchResult {
+  title: string
+  author: string
+  origin: string
+  synopsis: string
+  themes: string[]
+  tone_suggestion: string
 }
 
 // ── HTTP client ─────────────────────────────────────────────
@@ -119,7 +135,10 @@ export const api = {
   loras: () => request<LorasResponse>('/api/loras'),
 
   listProjects: () => request<ProjectSummary[]>('/api/projects'),
-  createProject: (body: { source_tale: string; custom_prompt?: string; target_minutes: number; ollama_model: string }) =>
+  searchStories: (query: string, count?: number) =>
+    post<{ results: StorySearchResult[] }>('/api/search-stories', { query, count: count || 6 }),
+
+  createProject: (body: { source_tale: string; custom_prompt?: string; target_minutes: number; ollama_model: string; tone?: string }) =>
     post<ProjectState>('/api/projects', body),
   getProject: (id: string) => request<ProjectState>(`/api/projects/${id}`),
   deleteProject: (id: string) => del<{ deleted: string }>(`/api/projects/${id}`),
@@ -129,14 +148,30 @@ export const api = {
   updateScript: (id: string, body: { title: string; synopsis: string; scenes: Scene[] }) =>
     put<Script>(`/api/projects/${id}/script`, body),
 
-  runVoice: (id: string, body: { profile_id: string; language: string }) =>
+  runVoice: (id: string, body: { profile_id: string; language: string; instruct?: string }) =>
     post<{ scenes: Scene[] }>(`/api/projects/${id}/voice`, body),
 
   runImages: (id: string, body: { backend: string; style_prompt: string; lora_keys?: string[] }) =>
     post<{ scenes: Scene[] }>(`/api/projects/${id}/images`, body),
 
+  runAnimate: (id: string) =>
+    post<{ status: string }>(`/api/projects/${id}/animate`, {}),
+
+  animationProgress: (id: string) =>
+    request<{ active: boolean; progress: number; phase: string; error: string | null }>(
+      `/api/projects/${id}/animation-progress`
+    ),
+
   runAssemble: (id: string) =>
-    post<{ video: string; duration: number | null }>(`/api/projects/${id}/assemble`, {}),
+    post<{ status: string }>(`/api/projects/${id}/assemble`, {}),
+
+  assemblyProgress: (id: string) =>
+    request<{ active: boolean; progress: number; phase: string; error: string | null }>(
+      `/api/projects/${id}/assembly-progress`
+    ),
+
+  cancelAssembly: (id: string) =>
+    post<{ cancelled: boolean }>(`/api/projects/${id}/assembly-cancel`, {}),
 
   artifactUrl: (projectId: string, filepath: string) =>
     `/api/projects/${projectId}/artifacts/${filepath}`,

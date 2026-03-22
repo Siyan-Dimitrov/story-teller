@@ -4,6 +4,7 @@ import asyncio
 import logging
 import shutil
 import sys
+import threading
 import traceback
 from pathlib import Path
 
@@ -15,8 +16,10 @@ import httpx
 from . import config
 from . import project_store as store
 from . import script_gen, voice_gen, image_gen
-from .video_assembly import assemble_video
+from .video_assembly import assemble_video, get_assembly_progress, cancel_assembly
+from .animation import prepare_animations, get_animation_progress
 from .grimm_tales import list_tales, get_tale
+from .export import export_project, generate_youtube_metadata
 from .models import (
     CreateProjectRequest,
     RunScriptRequest,
@@ -24,6 +27,7 @@ from .models import (
     RunVoiceRequest,
     RunImagesRequest,
     RunAssembleRequest,
+    SearchStoriesRequest,
     HealthStatus,
     ProjectSummary,
 )
@@ -83,6 +87,22 @@ async def get_tale_detail(tale_id: str):
     return tale
 
 
+# ── Story search ─────────────────────────────────────────────
+
+@app.post("/api/search-stories")
+async def search_stories(req: SearchStoriesRequest):
+    """Search for well-known stories using the LLM."""
+    try:
+        results = await script_gen.search_stories(
+            query=req.query,
+            count=req.count,
+        )
+        return {"results": results}
+    except Exception as e:
+        log.error(f"Story search failed: {e}")
+        raise HTTPException(500, f"Story search failed: {e}")
+
+
 # ── Voice profiles (proxy to VoiceBox) ──────────────────────
 
 @app.get("/api/profiles")
@@ -133,6 +153,8 @@ async def create_project(req: CreateProjectRequest):
         source_tale=req.source_tale,
         ollama_model=req.ollama_model,
         target_minutes=req.target_minutes,
+        tone=req.tone,
+        custom_prompt=req.custom_prompt,
     )
     if req.source_tale:
         tale = get_tale(req.source_tale)
@@ -174,9 +196,10 @@ async def run_script(project_id: str, req: RunScriptRequest):
     try:
         script = await script_gen.generate_script(
             source_tale=state.get("source_tale", ""),
-            custom_prompt=req.custom_prompt,
+            custom_prompt=req.custom_prompt or state.get("custom_prompt", ""),
             target_minutes=req.target_minutes or state.get("target_minutes", 5.0),
             ollama_model=req.ollama_model or state.get("ollama_model"),
+            tone=state.get("tone", ""),
         )
         store.save_json(project_id, "script.json", script)
         store.update_state(
@@ -229,6 +252,7 @@ async def run_voice(project_id: str, req: RunVoiceRequest):
             profile_id=req.profile_id,
             language=req.language,
             project_dir=pdir,
+            instruct=req.instruct,
         )
         script["scenes"] = scenes
         store.save_json(project_id, "script.json", script)
@@ -277,7 +301,58 @@ async def run_images(project_id: str, req: RunImagesRequest):
         raise HTTPException(500, str(e))
 
 
-# ── Stage 4: Video assembly ──────────────────────────────────
+# ── Stage 4: Animation preparation ───────────────────────
+
+@app.post("/api/projects/{project_id}/animate")
+async def run_animate(project_id: str):
+    state = store.load_state(project_id)
+    script = store.load_json(project_id, "script.json")
+    if not script:
+        raise HTTPException(400, "No script found")
+
+    # Check if already animating
+    progress = get_animation_progress(project_id)
+    if progress["active"]:
+        return {"status": "already_animating"}
+
+    store.update_state(project_id, step="animating", error=None)
+    pdir = store.project_dir(project_id)
+    ollama_model = state.get("ollama_model")
+
+    def _run():
+        import asyncio as _asyncio
+        loop = _asyncio.new_event_loop()
+        try:
+            scenes = loop.run_until_complete(
+                prepare_animations(
+                    scenes=script["scenes"],
+                    project_dir=pdir,
+                    ollama_model=ollama_model,
+                    project_id=project_id,
+                )
+            )
+            script["scenes"] = scenes
+            store.save_json(project_id, "script.json", script)
+            store.update_state(project_id, step="animated")
+        except Exception as e:
+            tb = traceback.format_exc()
+            log.error(f"Animation prep failed: {tb}")
+            store.update_state(project_id, step="illustrated", error=f"{e}\n{tb}")
+        finally:
+            loop.close()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+
+    return {"status": "animating"}
+
+
+@app.get("/api/projects/{project_id}/animation-progress")
+async def animation_progress(project_id: str):
+    return get_animation_progress(project_id)
+
+
+# ── Stage 5: Video assembly ──────────────────────────────────
 
 @app.post("/api/projects/{project_id}/assemble")
 async def run_assemble(project_id: str, req: RunAssembleRequest):
@@ -286,18 +361,84 @@ async def run_assemble(project_id: str, req: RunAssembleRequest):
     if not script:
         raise HTTPException(400, "No script found")
 
-    store.update_state(project_id, step="assembling", error=None)
+    # Check if already assembling
+    progress = get_assembly_progress(project_id)
+    if progress["active"]:
+        return {"status": "already_assembling"}
 
-    try:
-        pdir = store.project_dir(project_id)
-        output, duration = assemble_video(scenes=script["scenes"], project_dir=pdir)
-        store.update_state(project_id, step="assembled")
-        return {"video": str(output.relative_to(pdir)), "duration": duration}
-    except Exception as e:
-        tb = traceback.format_exc()
-        log.error(f"Assembly failed: {tb}")
-        store.update_state(project_id, step="illustrated", error=f"{e}\n{tb}")
-        raise HTTPException(500, str(e))
+    store.update_state(project_id, step="assembling", error=None)
+    pdir = store.project_dir(project_id)
+
+    def _run():
+        try:
+            output, duration = assemble_video(
+                scenes=script["scenes"],
+                project_dir=pdir,
+                project_id=project_id,
+            )
+            store.update_state(project_id, step="assembled")
+
+            # Export to output folder with YouTube metadata
+            try:
+                title = script.get("title", state.get("title", ""))
+                synopsis = script.get("synopsis", "")
+                tone = state.get("tone", "dark")
+                themes = []
+                for s in script.get("scenes", []):
+                    mood = s.get("mood", "")
+                    if mood and mood not in themes:
+                        themes.append(mood)
+
+                # Generate YouTube metadata via LLM (run async in new event loop)
+                import asyncio as _asyncio
+                loop = _asyncio.new_event_loop()
+                metadata = loop.run_until_complete(
+                    generate_youtube_metadata(
+                        title=title,
+                        synopsis=synopsis,
+                        tone=tone,
+                        themes=themes,
+                        scene_count=len(script.get("scenes", [])),
+                        ollama_model=state.get("ollama_model"),
+                    )
+                )
+                loop.close()
+
+                out_dir = export_project(
+                    project_dir=pdir,
+                    title=title,
+                    project_id=project_id,
+                    metadata_text=metadata,
+                )
+                store.update_state(project_id, output_dir=str(out_dir))
+                log.info(f"Export complete: {out_dir}")
+            except Exception as ex:
+                log.error(f"Export/metadata failed (video still OK): {ex}")
+        except Exception as e:
+            tb = traceback.format_exc()
+            log.error(f"Assembly failed: {tb}")
+            # Fall back to animated if depth maps exist, else illustrated
+            fallback = "animated" if (pdir / "depth_maps").exists() else "illustrated"
+            store.update_state(project_id, step=fallback, error=f"{e}\n{tb}")
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+
+    return {"status": "assembling"}
+
+
+@app.get("/api/projects/{project_id}/assembly-progress")
+async def assembly_progress(project_id: str):
+    return get_assembly_progress(project_id)
+
+
+@app.post("/api/projects/{project_id}/assembly-cancel")
+async def assembly_cancel_endpoint(project_id: str):
+    cancelled = cancel_assembly(project_id)
+    if cancelled:
+        fallback = "animated"  # preserve animation data on cancel
+        store.update_state(project_id, step=fallback, error="Assembly cancelled")
+    return {"cancelled": cancelled}
 
 
 # ── File serving ─────────────────────────────────────────────

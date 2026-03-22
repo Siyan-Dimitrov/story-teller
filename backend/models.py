@@ -11,13 +11,20 @@ class Scene(BaseModel):
     index: int = 0
     narration: str = ""
     image_prompt: str = ""
+    image_prompts: list[str] = Field(default_factory=list)  # Multiple prompts per scene
     mood: str = "neutral"
     duration_hint: float = 10.0
     # Populated after generation
     audio_path: Optional[str] = None
     audio_duration: Optional[float] = None
-    image_path: Optional[str] = None
-    kb_effect: str = "zoom_in"  # Ken Burns effect type
+    image_path: Optional[str] = None  # First image (backward compat)
+    image_paths: list[str] = Field(default_factory=list)  # All images for this scene
+    kb_effect: str = "zoom_in"  # Ken Burns effect type (legacy fallback)
+    # Animation fields (populated by /animate step)
+    animation_types: list[str] = Field(default_factory=list)  # per-image: "depthflow", "portrait", or "animatediff"
+    motion_presets: list[str] = Field(default_factory=list)  # per-image motion preset name
+    depth_map_paths: list[str] = Field(default_factory=list)  # per-image depth map file paths
+    animatediff_clip_paths: list[str] = Field(default_factory=list)  # per-image AnimateDiff output dirs
 
 
 # ── Script ───────────────────────────────────────────────────
@@ -35,7 +42,7 @@ class Script(BaseModel):
 
 class ProjectState(BaseModel):
     project_id: str = ""
-    step: str = "created"  # created | scripted | voiced | illustrated | assembled
+    step: str = "created"  # created | scripted | voiced | illustrated | animated | assembled
     error: Optional[str] = None
     title: str = ""
     source_tale: str = ""
@@ -54,6 +61,7 @@ class CreateProjectRequest(BaseModel):
     custom_prompt: str = ""
     target_minutes: float = 5.0
     ollama_model: str = "kimi-k2.5:cloud"
+    tone: str = ""  # e.g. "dark", "humorous", "gothic noir"
 
 
 class RunScriptRequest(BaseModel):
@@ -68,15 +76,37 @@ class UpdateScriptRequest(BaseModel):
     scenes: list[Scene]
 
 
+DEFAULT_VOICE_INSTRUCT = (
+    "Speak slowly and deliberately like a storyteller narrating a dark fairy tale. "
+    "Use a calm, measured pace with dramatic pauses between sentences. "
+    "Deep, atmospheric tone."
+)
+
+
 class RunVoiceRequest(BaseModel):
     profile_id: str
     language: str = "en"
+    instruct: str = DEFAULT_VOICE_INSTRUCT
 
 
 class RunImagesRequest(BaseModel):
     backend: str = "comfyui"  # comfyui | ollama
     style_prompt: str = "dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting"
     lora_keys: Optional[list[str]] = None  # e.g. ["tim_burton", "dark_gothic"] — None uses defaults
+
+
+class SearchStoriesRequest(BaseModel):
+    query: str = ""  # e.g. "revenge", "transformation", "brothers grimm"
+    count: int = 6
+
+
+class StorySearchResult(BaseModel):
+    title: str
+    author: str
+    origin: str  # e.g. "German folklore", "French fairy tale"
+    synopsis: str
+    themes: list[str] = Field(default_factory=list)
+    tone_suggestion: str = "dark"
 
 
 class RunAssembleRequest(BaseModel):

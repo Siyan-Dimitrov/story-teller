@@ -9,10 +9,16 @@ interface Props {
   onNext: () => void
 }
 
+const DEFAULT_INSTRUCT =
+  'Speak slowly and deliberately like a storyteller narrating a dark fairy tale. ' +
+  'Use a calm, measured pace with dramatic pauses between sentences. ' +
+  'Deep, atmospheric tone.'
+
 export default function VoicePanel({ project, onRefresh, onNext }: Props) {
   const [profiles, setProfiles] = useState<VoiceProfile[]>([])
   const [selectedProfile, setSelectedProfile] = useState(project.voice_profile_id || '')
   const [language, setLanguage] = useState(project.voice_language || 'en')
+  const [instruct, setInstruct] = useState(DEFAULT_INSTRUCT)
   const [generating, setGenerating] = useState(false)
   const [playingScene, setPlayingScene] = useState<number | null>(null)
 
@@ -33,6 +39,7 @@ export default function VoicePanel({ project, onRefresh, onNext }: Props) {
       await api.runVoice(project.project_id, {
         profile_id: selectedProfile,
         language,
+        instruct: instruct || undefined,
       })
       onRefresh()
     } catch (e) {
@@ -63,7 +70,7 @@ export default function VoicePanel({ project, onRefresh, onNext }: Props) {
   return (
     <div className="space-y-4">
       {/* Voice settings */}
-      <div className="p-4 rounded-xl border border-[var(--border)] bg-[var(--bg-secondary)]">
+      <div className="p-4 rounded-xl border border-[var(--border)] bg-[var(--bg-secondary)] space-y-3">
         <div className="flex items-end gap-4">
           <div className="flex-1">
             <label className="block text-xs text-[var(--text-secondary)] mb-1.5">Voice Profile</label>
@@ -90,6 +97,20 @@ export default function VoicePanel({ project, onRefresh, onNext }: Props) {
               ))}
             </select>
           </div>
+        </div>
+        <div>
+          <label className="block text-xs text-[var(--text-secondary)] mb-1.5">
+            Voice Direction <span className="text-[var(--text-muted)]">(how the voice should sound)</span>
+          </label>
+          <textarea
+            value={instruct}
+            onChange={e => setInstruct(e.target.value)}
+            rows={2}
+            className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)] resize-none"
+            placeholder="e.g. Speak slowly with dramatic pauses, like a dark fairy tale narrator..."
+          />
+        </div>
+        <div className="flex justify-end">
           <button
             onClick={handleGenerate}
             disabled={generating || !selectedProfile}

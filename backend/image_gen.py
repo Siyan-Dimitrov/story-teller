@@ -133,10 +133,10 @@ def _build_workflow(
         "class_type": "KSampler",
         "inputs": {
             "seed": seed,
-            "steps": 25,
-            "cfg": 7.0,
-            "sampler_name": "euler_ancestral",
-            "scheduler": "normal",
+            "steps": 40,
+            "cfg": 7.5,
+            "sampler_name": "dpmpp_2m",
+            "scheduler": "karras",
             "denoise": 1.0,
             "model": prev_model_ref,
             "positive": ["6", 0],
@@ -295,43 +295,57 @@ async def generate_all_scenes(
     style_prompt: str = "dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting",
     lora_keys: list[str] | None = None,
 ) -> list[dict]:
-    """Generate images for all scenes. Returns updated scenes with image_path."""
+    """Generate images for all scenes. Returns updated scenes with image_paths."""
     images_dir = project_dir / "images"
     images_dir.mkdir(exist_ok=True)
 
     for scene in scenes:
         idx = scene["index"]
-        output_path = images_dir / f"scene_{idx:04d}.png"
-        try:
-            if backend == "comfyui":
-                await generate_image_comfyui(
-                    prompt=scene["image_prompt"],
-                    style_prompt=style_prompt,
-                    output_path=output_path,
-                    seed=idx * 42,
-                    lora_keys=lora_keys,
-                )
-            else:
-                await generate_image_ollama(
-                    prompt=scene["image_prompt"],
-                    style_prompt=style_prompt,
-                    output_path=output_path,
-                )
-            scene["image_path"] = str(output_path.relative_to(project_dir))
-        except Exception as e:
-            log.error(f"Image generation failed for scene {idx}: {e}")
-            # Fallback to text placeholder
+        # Use image_prompts list if available, fall back to single image_prompt
+        prompts = scene.get("image_prompts") or []
+        if not prompts:
+            single = scene.get("image_prompt", "")
+            prompts = [single] if single else []
+
+        scene["image_paths"] = []
+
+        for img_idx, prompt in enumerate(prompts):
+            output_path = images_dir / f"scene_{idx:04d}_img_{img_idx}.png"
             try:
-                await generate_image_ollama(
-                    prompt=scene["image_prompt"],
-                    style_prompt="",
-                    output_path=output_path,
-                )
-                scene["image_path"] = str(output_path.relative_to(project_dir))
-            except Exception as e2:
-                log.error(f"Placeholder also failed for scene {idx}: {e2}")
-                scene["image_path"] = None
-                scene["image_error"] = str(e)
+                if backend == "comfyui":
+                    await generate_image_comfyui(
+                        prompt=prompt,
+                        style_prompt=style_prompt,
+                        output_path=output_path,
+                        seed=idx * 1000 + img_idx * 42,
+                        lora_keys=lora_keys,
+                    )
+                else:
+                    await generate_image_ollama(
+                        prompt=prompt,
+                        style_prompt=style_prompt,
+                        output_path=output_path,
+                    )
+                rel = str(output_path.relative_to(project_dir))
+                scene["image_paths"].append(rel)
+                log.info(f"Scene {idx} image {img_idx + 1}/{len(prompts)} done")
+            except Exception as e:
+                log.error(f"Image generation failed for scene {idx} img {img_idx}: {e}")
+                # Fallback to text placeholder
+                try:
+                    await generate_image_ollama(
+                        prompt=prompt,
+                        style_prompt="",
+                        output_path=output_path,
+                    )
+                    rel = str(output_path.relative_to(project_dir))
+                    scene["image_paths"].append(rel)
+                except Exception as e2:
+                    log.error(f"Placeholder also failed for scene {idx} img {img_idx}: {e2}")
+                    scene["image_error"] = str(e)
+
+        # Backward compat: set image_path to first image
+        scene["image_path"] = scene["image_paths"][0] if scene["image_paths"] else None
 
     return scenes
 

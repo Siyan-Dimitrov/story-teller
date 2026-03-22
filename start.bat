@@ -52,8 +52,53 @@ if not exist "venv\Scripts\activate.bat" (
     pip install -r requirements.txt
 ) else (
     call venv\Scripts\activate.bat
+    pip install -r requirements.txt --quiet --upgrade 2>nul
 )
 echo [OK] Python venv active
+
+:: ── Start ComfyUI ───────────────────────────────
+set "COMFYUI_DIR=C:\Dev\ComfyUI"
+curl -s http://127.0.0.1:8188/system_stats >nul 2>&1
+if %errorlevel% equ 0 (
+    echo [OK] ComfyUI already running
+) else (
+    if exist "%COMFYUI_DIR%\venv\Scripts\activate.bat" (
+        echo [START] ComfyUI on port 8188...
+        start "ComfyUI" cmd /k "cd /d %COMFYUI_DIR% && venv\Scripts\activate.bat && python main.py --listen 127.0.0.1 --port 8188"
+        echo Waiting for ComfyUI...
+        :wait_comfyui
+        curl -s http://127.0.0.1:8188/system_stats >nul 2>&1
+        if %errorlevel% neq 0 (
+            timeout /t 2 /nobreak >nul
+            goto :wait_comfyui
+        )
+        echo [OK] ComfyUI ready
+    ) else (
+        echo [WARN] ComfyUI not found at %COMFYUI_DIR%. Image generation will not work.
+    )
+)
+
+:: ── Start VoiceBox backend ──────────────────────
+set "VOICEBOX_DIR=C:\Dev\voice_box\voicebox-temp\voicebox"
+curl -s http://localhost:17493/health >nul 2>&1
+if %errorlevel% equ 0 (
+    echo [OK] VoiceBox already running
+) else (
+    if exist "%VOICEBOX_DIR%\backend\venv\Scripts\activate.bat" (
+        echo [START] VoiceBox on port 17493...
+        start "VoiceBox Backend" cmd /k "cd /d %VOICEBOX_DIR% && backend\venv\Scripts\activate.bat && uvicorn backend.main:app --host 127.0.0.1 --port 17493"
+        echo Waiting for VoiceBox...
+        :wait_voicebox
+        curl -s http://localhost:17493/health >nul 2>&1
+        if %errorlevel% neq 0 (
+            timeout /t 1 /nobreak >nul
+            goto :wait_voicebox
+        )
+        echo [OK] VoiceBox ready
+    ) else (
+        echo [WARN] VoiceBox not found at %VOICEBOX_DIR%. Voice generation will not work.
+    )
+)
 
 :: ── Start Backend ───────────────────────────────
 echo [START] Backend on port 8102...
@@ -78,8 +123,10 @@ start http://localhost:5191
 
 echo.
 echo  Story Teller is running!
-echo  Frontend: http://localhost:5191
-echo  Backend:  http://localhost:8102
+echo  Frontend:  http://localhost:5191
+echo  Backend:   http://localhost:8102
+echo  ComfyUI:   http://127.0.0.1:8188
+echo  VoiceBox:  http://localhost:17493
 echo.
 echo  Close this window to stop all services.
 pause

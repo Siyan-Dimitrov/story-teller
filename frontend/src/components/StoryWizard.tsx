@@ -1,12 +1,13 @@
 import { useState } from 'react'
 import {
-  Scroll, Mic, ImageIcon, Film,
+  Scroll, Mic, ImageIcon, Sparkles, Film,
   Check, Loader2, AlertCircle,
 } from 'lucide-react'
 import type { ProjectState } from '../api'
 import ScriptPanel from './ScriptPanel'
 import VoicePanel from './VoicePanel'
 import ImagePanel from './ImagePanel'
+import AnimationPanel from './AnimationPanel'
 import VideoPanel from './VideoPanel'
 
 interface Props {
@@ -18,6 +19,7 @@ const STEPS = [
   { key: 'script', label: 'Script', icon: Scroll },
   { key: 'voice', label: 'Voice', icon: Mic },
   { key: 'images', label: 'Images', icon: ImageIcon },
+  { key: 'animate', label: 'Animate', icon: Sparkles },
   { key: 'video', label: 'Video', icon: Film },
 ] as const
 
@@ -31,8 +33,10 @@ const STEP_ORDER: Record<string, number> = {
   generating_voice: 1,
   illustrated: 3,
   generating_images: 2,
-  assembled: 4,
-  assembling: 3,
+  animating: 3,
+  animated: 4,
+  assembled: 5,
+  assembling: 4,
 }
 
 function stepDone(projectStep: string, tabIndex: number): boolean {
@@ -43,7 +47,7 @@ function stepDone(projectStep: string, tabIndex: number): boolean {
 function stepActive(projectStep: string, tabIndex: number): boolean {
   const order = STEP_ORDER[projectStep] ?? 0
   return order === tabIndex && (
-    projectStep.startsWith('generating') || projectStep === 'assembling'
+    projectStep.startsWith('generating') || projectStep === 'assembling' || projectStep === 'animating'
   )
 }
 
@@ -109,7 +113,10 @@ export default function StoryWizard({ project, onRefresh }: Props) {
         <VoicePanel project={project} onRefresh={onRefresh} onNext={() => setActiveTab('images')} />
       )}
       {activeTab === 'images' && (
-        <ImagePanel project={project} onRefresh={onRefresh} onNext={() => setActiveTab('video')} />
+        <ImagePanel project={project} onRefresh={onRefresh} onNext={() => setActiveTab('animate')} />
+      )}
+      {activeTab === 'animate' && (
+        <AnimationPanel project={project} onRefresh={onRefresh} onNext={() => setActiveTab('video')} />
       )}
       {activeTab === 'video' && (
         <VideoPanel project={project} onRefresh={onRefresh} />
