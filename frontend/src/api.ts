@@ -19,6 +19,8 @@ export interface Scene {
   image_path?: string | null
   image_paths?: string[]
   kb_effect: string
+  qc_results?: { image_index: number; passed: boolean; scores: Record<string, number>; average_score: number; reasoning: string; attempts: number }[]
+  qc_passed?: boolean
   animation_types?: string[]
   motion_presets?: string[]
   depth_map_paths?: (string | null)[]
@@ -153,6 +155,22 @@ export const api = {
 
   runImages: (id: string, body: { backend: string; style_prompt: string; lora_keys?: string[] }) =>
     post<{ scenes: Scene[] }>(`/api/projects/${id}/images`, body),
+
+  runQC: (id: string, body: { vision_model?: string; pass_threshold?: number; style_prompt?: string; targets?: { scene_index: number; image_index: number }[] }) =>
+    post<{ status: string }>(`/api/projects/${id}/qc`, body),
+
+  regenerateQC: (id: string, body: { targets: { scene_index: number; image_index: number }[]; style_prompt?: string; lora_keys?: string[] }) =>
+    post<{ status: string }>(`/api/projects/${id}/qc-regenerate`, body),
+
+  qcProgress: (id: string) =>
+    request<{ active: boolean; progress: number; phase: string; error: string | null }>(
+      `/api/projects/${id}/qc-progress`
+    ),
+
+  retryQCImage: (id: string, sceneIndex: number, imageIndex: number) =>
+    post<{ scores: Record<string, number>; average_score: number; reasoning: string }>(
+      `/api/projects/${id}/qc-retry/${sceneIndex}/${imageIndex}`, {}
+    ),
 
   runAnimate: (id: string) =>
     post<{ status: string }>(`/api/projects/${id}/animate`, {}),

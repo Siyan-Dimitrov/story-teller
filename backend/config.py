@@ -51,6 +51,12 @@ ANIMATEDIFF_DEFAULT_FRAMES = 16
 ANIMATEDIFF_DEFAULT_FPS = 8
 ANIMATEDIFF_TIMEOUT_SECONDS = 300.0
 
+# ── Image QC ────────────────────────────────────────────────
+OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "llava:7b")
+QC_PASS_THRESHOLD = float(os.getenv("QC_PASS_THRESHOLD", "3.0"))
+QC_MAX_RETRIES = int(os.getenv("QC_MAX_RETRIES", "2"))
+QC_TIMEOUT_SECONDS = float(os.getenv("QC_TIMEOUT_SECONDS", "300.0"))
+
 # ── Ken Burns defaults ───────────────────────────────────────
 KB_ZOOM_RANGE = (1.0, 1.15)  # start/end zoom range
 KB_DIRECTIONS = ["zoom_in", "zoom_out", "pan_left", "pan_right"]

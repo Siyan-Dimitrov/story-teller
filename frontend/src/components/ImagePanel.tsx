@@ -174,7 +174,7 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
             onClick={onNext}
             className="px-4 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-sm font-medium transition-colors"
           >
-            Next: Video Assembly
+            Next: Quality Check
           </button>
         </div>
       )}

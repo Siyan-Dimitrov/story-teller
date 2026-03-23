@@ -8,6 +8,24 @@ echo   Story Teller - Dark Fairy Tales for Adults
 echo  ============================================
 echo.
 
+:: ── Kill existing processes ───────────────────
+echo [CLEANUP] Stopping any existing services...
+
+:: Kill backend on port 8102
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8102 " ^| findstr "LISTENING" 2^>nul') do (
+    echo   Killing old backend (PID %%a)
+    taskkill /F /PID %%a >nul 2>&1
+)
+
+:: Kill frontend on port 5191
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":5191 " ^| findstr "LISTENING" 2^>nul') do (
+    echo   Killing old frontend (PID %%a)
+    taskkill /F /PID %%a >nul 2>&1
+)
+
+:: Small pause to let ports free up
+timeout /t 1 /nobreak >nul
+
 :: ── Find Python ─────────────────────────────────
 set "PYTHON="
 for %%P in (
@@ -100,13 +118,19 @@ if %errorlevel% equ 0 (
     )
 )
 
-:: ── Start Backend ───────────────────────────────
-echo [START] Backend on port 8102...
-start "StoryTeller Backend" cmd /k "cd /d %~dp0 && venv\Scripts\activate.bat && python -m uvicorn backend.main:app --host 127.0.0.1 --port 8102"
+:: ── Start Backend (with --reload for dev) ──────
+echo [START] Backend on port 8102 (with hot-reload)...
+start "StoryTeller Backend" cmd /k "cd /d %~dp0 && venv\Scripts\activate.bat && python -m uvicorn backend.main:app --host 127.0.0.1 --port 8102 --reload"
 
 :: ── Wait for backend ────────────────────────────
 echo Waiting for backend...
-timeout /t 3 /nobreak >nul
+:wait_backend
+curl -s http://127.0.0.1:8102/api/health >nul 2>&1
+if %errorlevel% neq 0 (
+    timeout /t 2 /nobreak >nul
+    goto :wait_backend
+)
+echo [OK] Backend ready
 
 :: ── Start Frontend ──────────────────────────────
 cd /d "%~dp0\frontend"
