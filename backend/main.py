@@ -71,6 +71,7 @@ async def health() -> HealthStatus:
             status.comfyui = r.status_code == 200
         except Exception:
             pass
+    status.replicate = bool(config.REPLICATE_API_TOKEN)
     status.ffmpeg = shutil.which("ffmpeg") is not None or Path(config.FFMPEG_PATH).exists()
     return status
 
@@ -124,7 +125,13 @@ async def get_loras():
     """List available LoRA styles for image generation."""
     return {
         "available": {
-            key: {"trigger": v["trigger"], "file": v["file"]}
+            key: {
+                "trigger": v["trigger"],
+                "file": v["file"],
+                "has_flux": v.get("flux_lora_key") is not None
+                    and (v["flux_lora_key"] in config.FLUX_LORA_URLS
+                         or v["flux_lora_key"] in config.FLUX_LORA_ALTERNATIVES),
+            }
             for key, v in image_gen.AVAILABLE_LORAS.items()
         },
         "defaults": image_gen.DEFAULT_LORAS,
@@ -221,10 +228,20 @@ async def run_script(project_id: str, req: RunScriptRequest):
 @app.put("/api/projects/{project_id}/script")
 async def update_script(project_id: str, req: UpdateScriptRequest):
     store.load_state(project_id)  # Verify exists
+    scenes = []
+    for s in req.scenes:
+        d = s.model_dump()
+        # Normalize: ensure image_prompts is populated from image_prompt if empty
+        if not d.get("image_prompts") and d.get("image_prompt"):
+            d["image_prompts"] = [d["image_prompt"]]
+        # Sync image_prompt backward-compat field with first prompt
+        if d.get("image_prompts"):
+            d["image_prompt"] = d["image_prompts"][0]
+        scenes.append(d)
     script = {
         "title": req.title,
         "synopsis": req.synopsis,
-        "scenes": [s.model_dump() for s in req.scenes],
+        "scenes": scenes,
     }
     store.save_json(project_id, "script.json", script)
     store.update_state(project_id, step="scripted", title=req.title)

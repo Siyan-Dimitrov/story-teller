@@ -75,6 +75,7 @@ function StatusDots({ health }: { health: HealthStatus }) {
     { name: 'Ollama', ok: health.ollama },
     { name: 'VoiceBox', ok: health.voicebox },
     { name: 'ComfyUI', ok: health.comfyui },
+    { name: 'Replicate', ok: health.replicate },
     { name: 'FFmpeg', ok: health.ffmpeg },
   ]
   return (

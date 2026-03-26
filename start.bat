@@ -74,6 +74,15 @@ if not exist "venv\Scripts\activate.bat" (
 )
 echo [OK] Python venv active
 
+:: ── Replicate API token (cloud image generation) ──
+if defined REPLICATE_API_TOKEN (
+    echo [OK] Replicate API token set
+) else (
+    echo [WARN] REPLICATE_API_TOKEN not set. Cloud image generation will not work.
+    echo        Get a token at: https://replicate.com/account/api-tokens
+    echo        Then set it:    set REPLICATE_API_TOKEN=r8_YourTokenHere
+)
+
 :: ── Start ComfyUI ───────────────────────────────
 set "COMFYUI_DIR=C:\Dev\ComfyUI"
 curl -s http://127.0.0.1:8188/system_stats >nul 2>&1
@@ -94,6 +103,24 @@ if %errorlevel% equ 0 (
     ) else (
         echo [WARN] ComfyUI not found at %COMFYUI_DIR%. Image generation will not work.
     )
+)
+
+:: ── Ensure SoX is in PATH (required by Qwen TTS) ──
+where sox >nul 2>&1
+if %errorlevel% neq 0 (
+    for /d %%D in ("%LOCALAPPDATA%\Microsoft\WinGet\Packages\ChrisBagwell.SoX*") do (
+        if exist "%%D\sox-14.4.2\sox.exe" (
+            set "PATH=%%D\sox-14.4.2;%PATH%"
+            echo [OK] SoX found via winget
+        )
+    )
+    where sox >nul 2>&1
+    if %errorlevel% neq 0 (
+        echo [WARN] SoX not found. Voice generation will fail.
+        echo        Install with: winget install sox
+    )
+) else (
+    echo [OK] SoX found
 )
 
 :: ── Start VoiceBox backend ──────────────────────

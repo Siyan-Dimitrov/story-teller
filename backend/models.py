@@ -53,7 +53,7 @@ class ProjectState(BaseModel):
     voice_profile_id: Optional[str] = None
     voice_language: str = "en"
     ollama_model: str = "kimi-k2.5:cloud"
-    image_backend: str = "comfyui"  # comfyui | ollama
+    image_backend: str = "comfyui"  # comfyui | ollama | replicate
     target_minutes: float = 5.0
     created_at: str = ""
 
@@ -94,9 +94,11 @@ class RunVoiceRequest(BaseModel):
 
 
 class RunImagesRequest(BaseModel):
-    backend: str = "comfyui"  # comfyui | ollama
+    backend: str = "comfyui"  # comfyui | ollama | replicate
     style_prompt: str = "dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting"
-    lora_keys: Optional[list[str]] = None  # e.g. ["tim_burton", "dark_gothic"] — None uses defaults
+    lora_keys: Optional[list[str]] = None  # e.g. ["tim_burton", "dark_fantasy"] - None uses defaults for backend
+    # For Replicate: Uses FLUX LoRA URLs from config.FLUX_LORA_URLS
+    # For ComfyUI: Uses local .safetensors files from AVAILABLE_LORAS
 
 
 class SearchStoriesRequest(BaseModel):
@@ -143,6 +145,7 @@ class HealthStatus(BaseModel):
     ollama: bool = False
     voicebox: bool = False
     comfyui: bool = False
+    replicate: bool = False
     ffmpeg: bool = False
 
 

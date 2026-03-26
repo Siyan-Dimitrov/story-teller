@@ -16,12 +16,14 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
   const [stylePrompt, setStylePrompt] = useState(DEFAULT_STYLE)
   const [generating, setGenerating] = useState(false)
   const [availableLoras, setAvailableLoras] = useState<Record<string, LoraInfo>>({})
-  const [selectedLoras, setSelectedLoras] = useState<string[]>([])
+  const [primaryLora, setPrimaryLora] = useState('')
+  const [secondaryLora, setSecondaryLora] = useState('')
 
   useEffect(() => {
     api.loras().then(data => {
       setAvailableLoras(data.available)
-      setSelectedLoras(data.defaults)
+      if (data.defaults.length > 0) setPrimaryLora(data.defaults[0])
+      if (data.defaults.length > 1) setSecondaryLora(data.defaults[1])
     }).catch(() => {})
   }, [])
 
@@ -31,7 +33,8 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
   const handleGenerate = async () => {
     setGenerating(true)
     try {
-      await api.runImages(project.project_id, { backend, style_prompt: stylePrompt, lora_keys: selectedLoras })
+      const lora_keys = [primaryLora, secondaryLora].filter(Boolean)
+      await api.runImages(project.project_id, { backend, style_prompt: stylePrompt, lora_keys })
       onRefresh()
     } catch (e) {
       alert('Image generation failed: ' + (e as Error).message)
@@ -64,6 +67,7 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
                 className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
               >
                 <option value="comfyui">ComfyUI (Local)</option>
+                <option value="replicate">Replicate Flux (Cloud)</option>
                 <option value="ollama">Ollama (Placeholder)</option>
               </select>
             </div>
@@ -77,34 +81,52 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
               />
             </div>
           </div>
-          {backend === 'comfyui' && Object.keys(availableLoras).length > 0 && (
-            <div>
-              <label className="block text-xs text-[var(--text-secondary)] mb-1.5">LoRA Styles (select one or more)</label>
-              <div className="flex flex-wrap gap-2">
-                {Object.entries(availableLoras).map(([key, lora]) => {
-                  const active = selectedLoras.includes(key)
-                  return (
-                    <button
-                      key={key}
-                      onClick={() =>
-                        setSelectedLoras(prev =>
-                          active ? prev.filter(k => k !== key) : [...prev, key]
-                        )
-                      }
-                      className={`px-3 py-1.5 rounded-lg text-xs border transition-colors ${
-                        active
-                          ? 'border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--accent)]'
-                          : 'border-[var(--border)] text-[var(--text-muted)] hover:border-[var(--border-focus)]'
-                      }`}
-                    >
-                      {key.replace(/_/g, ' ')}
-                      <span className="ml-1 opacity-60">({lora.trigger})</span>
-                    </button>
-                  )
-                })}
+          {(backend === 'comfyui' || backend === 'replicate') && Object.keys(availableLoras).length > 0 && (() => {
+            const loraEntries = Object.entries(availableLoras).filter(([, lora]) =>
+              backend === 'replicate' ? lora.has_flux : true
+            )
+            if (loraEntries.length === 0) return null
+            return (
+              <div className="flex items-end gap-4">
+                <div className="flex-1">
+                  <label className="block text-xs text-[var(--text-secondary)] mb-1.5">
+                    Primary LoRA Style
+                    {backend === 'replicate' && <span className="ml-1 text-[var(--text-muted)]">— FLUX LoRA</span>}
+                  </label>
+                  <select
+                    value={primaryLora}
+                    onChange={e => setPrimaryLora(e.target.value)}
+                    className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
+                  >
+                    <option value="">None</option>
+                    {loraEntries.map(([key, lora]) => (
+                      <option key={key} value={key} disabled={key === secondaryLora}>
+                        {key.replace(/_/g, ' ')} ({lora.trigger})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex-1">
+                  <label className="block text-xs text-[var(--text-secondary)] mb-1.5">
+                    Secondary LoRA Style
+                    <span className="ml-1 text-[var(--text-muted)]">— optional</span>
+                  </label>
+                  <select
+                    value={secondaryLora}
+                    onChange={e => setSecondaryLora(e.target.value)}
+                    className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
+                  >
+                    <option value="">None</option>
+                    {loraEntries.map(([key, lora]) => (
+                      <option key={key} value={key} disabled={key === primaryLora}>
+                        {key.replace(/_/g, ' ')} ({lora.trigger})
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
-            </div>
-          )}
+            )
+          })()}
           <div className="flex justify-end">
             <button
               onClick={handleGenerate}

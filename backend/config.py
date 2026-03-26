@@ -22,6 +22,64 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "kimi-k2.5:cloud")
 COMFYUI_URL = os.getenv("COMFYUI_URL", "http://127.0.0.1:8188")
 
+# ── Replicate (cloud image generation) ──────────────────────
+REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN", "")
+# Use LoRA-enabled models for style control
+REPLICATE_MODEL = os.getenv("REPLICATE_MODEL", "black-forest-labs/flux-dev-lora")  # or flux-schnell-lora
+REPLICATE_TIMEOUT_SECONDS = float(os.getenv("REPLICATE_TIMEOUT_SECONDS", "120.0"))
+REPLICATE_DELAY_SECONDS = float(os.getenv("REPLICATE_DELAY_SECONDS", "11.0"))  # delay between API calls (6/min rate limit with <$5 credit)
+REPLICATE_MAX_RETRIES = int(os.getenv("REPLICATE_MAX_RETRIES", "3"))  # retries on rate-limit / transient errors
+
+# FLUX LoRA URLs (public HuggingFace safetensors URLs)
+# These are loaded dynamically via Replicate's lora_weights parameter
+# All URLs verified working (HTTP 200, no auth required) as of 2026-03-25
+FLUX_LORA_URLS = {
+    # Victorian Gothic Horror — sepia-toned, aged, haunting aesthetic (trigger: "vicgoth")
+    # Closest match for Tim Burton's dark whimsical gothic style
+    "tim_burton": os.getenv(
+        "FLUX_LORA_TIM_BURTON",
+        "https://huggingface.co/Keltezaa/victorian-gothic-horror/resolve/main/victoriangothic_v50_rank64_bf16-step01500.safetensors"
+    ),
+    # Dark Fantasy Illustration — dark fantasy retro illustrations (no trigger word, strength 1.2)
+    "dark_gothic": os.getenv(
+        "FLUX_LORA_DARK_GOTHIC",
+        "https://huggingface.co/nerijs/dark-fantasy-illustration-flux/resolve/main/darkfantasy_illustration_v2.safetensors"
+    ),
+    # Shakker-Labs Dark Fantasy — fantasy creatures, metallic textures, magical light (no trigger, strength 0.6-0.8)
+    "dark_fantasy": os.getenv(
+        "FLUX_LORA_DARK_FANTASY",
+        "https://huggingface.co/Shakker-Labs/FLUX.1-dev-LoRA-Dark-Fantasy/resolve/main/FLUX.1-dev-lora-Dark-Fantasy.safetensors"
+    ),
+    # Doodle Toon — whimsical storybook illustration with marker/pencil textures (trigger: "d00dlet00n")
+    "storybook": os.getenv(
+        "FLUX_LORA_STORYBOOK",
+        "https://huggingface.co/renderartist/doodletoonflux/resolve/main/d00dlet00n_Flux_v2_renderartist.safetensors"
+    ),
+    # Flux Surrealism — surrealist/dreamlike art with sci-fi elements (trigger: "evangsurreal")
+    # Closest match for Mark Ryden pop surrealism style
+    "mark_ryden": os.getenv(
+        "FLUX_LORA_MARK_RYDEN",
+        "https://huggingface.co/brushpenbob/Flux-surrealism/resolve/main/Flux_surrealism.safetensors"
+    ),
+}
+
+# Additional verified FLUX LoRA URLs (alternatives)
+FLUX_LORA_ALTERNATIVES = {
+    # Omarito Dark Fantasy — atmospheric dark fantasy paintings (trigger: long prompt prefix)
+    "dark_fantasy_alt": "https://huggingface.co/Omarito2412/Dark-Fantasy-Flux/resolve/main/dark_fantasy_flux.safetensors",
+    # Dark Creature — gothic dark creatures (trigger: "Dark Creature") — still in training
+    "dark_creature": "https://huggingface.co/prithivMLmods/Dark-Thing-Flux-LoRA/resolve/main/Dark_Creature.safetensors",
+    # Weird Things — surrealism + psychedelia blend (trigger: "w3irdth1ngs")
+    "weird_surreal": "https://huggingface.co/renderartist/weirdthingsflux/resolve/main/Weird_Things_Flux_v1_renderartist.safetensors",
+    # Ghibsky Illustration — Ghibli + Shinkai whimsical landscapes (trigger: "GHIBSKY style")
+    "ghibsky": "https://huggingface.co/aleksa-codes/flux-ghibsky-illustration/resolve/main/lora.safetensors",
+    # Children Simple Sketch — stick-figure, pastel, hand-drawn (trigger: "sketched style")
+    "children_sketch": "https://huggingface.co/Shakker-Labs/FLUX.1-dev-LoRA-Children-Simple-Sketch/resolve/main/FLUX-dev-lora-children-simple-sketch.safetensors",
+}
+
+# ── CivitAI (optional, for gated model URLs) ─────────────────
+CIVITAI_API_TOKEN = os.getenv("CIVITAI_API_TOKEN", "")
+
 # ── Video output ─────────────────────────────────────────────
 VIDEO_WIDTH = 1920
 VIDEO_HEIGHT = 1080

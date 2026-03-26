@@ -1,5 +1,6 @@
 """Voice generation via VoiceBox API."""
 
+import asyncio
 import logging
 from pathlib import Path
 import httpx
@@ -27,12 +28,12 @@ async def generate_voice(
     language: str,
     output_path: Path,
     instruct: str = "",
+    client: httpx.AsyncClient | None = None,
 ) -> float:
     """Generate speech for text, save to output_path. Returns duration in seconds."""
     log.info(f"Generating voice for {len(text)} chars, profile={profile_id}")
 
-    async with httpx.AsyncClient(timeout=config.VOICE_TIMEOUT_SECONDS) as client:
-        # Generate speech
+    async def _do(c: httpx.AsyncClient) -> float:
         body: dict = {
             "profile_id": profile_id,
             "text": text,
@@ -41,7 +42,7 @@ async def generate_voice(
         if instruct:
             body["instruct"] = instruct
 
-        resp = await client.post(
+        resp = await c.post(
             f"{config.VOICEBOX_URL}/generate",
             json=body,
         )
@@ -51,10 +52,9 @@ async def generate_voice(
             raise RuntimeError(f"VoiceBox returned {resp.status_code}: {error_body}")
         gen = resp.json()
         generation_id = gen["id"]
-        duration = gen.get("duration", 0.0)
+        dur = gen.get("duration", 0.0)
 
-        # Download audio file
-        audio_resp = await client.get(f"{config.VOICEBOX_URL}/audio/{generation_id}")
+        audio_resp = await c.get(f"{config.VOICEBOX_URL}/audio/{generation_id}")
         if audio_resp.status_code != 200:
             error_body = audio_resp.text
             log.error(f"VoiceBox audio download error {audio_resp.status_code}: {error_body}")
@@ -62,6 +62,13 @@ async def generate_voice(
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(audio_resp.content)
+        return dur
+
+    if client:
+        duration = await _do(client)
+    else:
+        async with httpx.AsyncClient(timeout=config.VOICE_TIMEOUT_SECONDS) as c:
+            duration = await _do(c)
 
     log.info(f"Voice saved to {output_path}, duration={duration:.1f}s")
     return duration
@@ -78,23 +85,30 @@ async def generate_all_scenes(
     audio_dir = project_dir / "audio"
     audio_dir.mkdir(exist_ok=True)
 
-    for scene in scenes:
-        idx = scene["index"]
-        output_path = audio_dir / f"scene_{idx:04d}.wav"
-        try:
-            duration = await generate_voice(
-                text=scene["narration"],
-                profile_id=profile_id,
-                language=language,
-                output_path=output_path,
-                instruct=instruct,
-            )
-            scene["audio_path"] = str(output_path.relative_to(project_dir))
-            scene["audio_duration"] = duration
-        except Exception as e:
-            log.error(f"Voice generation failed for scene {idx}: {e}")
-            scene["audio_path"] = None
-            scene["audio_duration"] = scene.get("duration_hint", 10.0)
-            scene["voice_error"] = str(e)
+    async with httpx.AsyncClient(timeout=config.VOICE_TIMEOUT_SECONDS) as client:
+        for i, scene in enumerate(scenes):
+            idx = scene["index"]
+            output_path = audio_dir / f"scene_{idx:04d}.wav"
+            try:
+                duration = await generate_voice(
+                    text=scene["narration"],
+                    profile_id=profile_id,
+                    language=language,
+                    output_path=output_path,
+                    instruct=instruct,
+                    client=client,
+                )
+                scene["audio_path"] = str(output_path.relative_to(project_dir))
+                scene["audio_duration"] = duration
+                scene.pop("voice_error", None)
+            except Exception as e:
+                log.error(f"Voice generation failed for scene {idx}: {e}")
+                scene["audio_path"] = None
+                scene["audio_duration"] = scene.get("duration_hint", 10.0)
+                scene["voice_error"] = str(e)
+
+            # Brief pause between scenes to avoid overwhelming VoiceBox's DB pool
+            if i < len(scenes) - 1:
+                await asyncio.sleep(1.0)
 
     return scenes

@@ -4,6 +4,7 @@ export interface HealthStatus {
   ollama: boolean
   voicebox: boolean
   comfyui: boolean
+  replicate: boolean
   ffmpeg: boolean
 }
 
@@ -122,6 +123,7 @@ function del<T>(url: string): Promise<T> {
 export interface LoraInfo {
   trigger: string
   file: string
+  has_flux: boolean
 }
 
 export interface LorasResponse {
