@@ -87,6 +87,36 @@ export interface StorySearchResult {
   tone_suggestion: string
 }
 
+export interface GutenbergAuthor {
+  name: string
+  birth_year: number | null
+  death_year: number | null
+}
+
+export interface GutenbergBook {
+  gutenberg_id: number
+  title: string
+  authors: GutenbergAuthor[]
+  subjects: string[]
+  bookshelves: string[]
+  languages: string[]
+  download_count: number
+  text_url: string | null
+}
+
+export interface GutenbergSearchResponse {
+  count: number
+  next: string | null
+  previous: string | null
+  results: GutenbergBook[]
+}
+
+export interface GutenbergTextResponse {
+  text: string
+  total_chars: number
+  truncated: boolean
+}
+
 // ── HTTP client ─────────────────────────────────────────────
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
@@ -139,8 +169,14 @@ export const api = {
   loras: () => request<LorasResponse>('/api/loras'),
 
   listProjects: () => request<ProjectSummary[]>('/api/projects'),
-  searchStories: (query: string, count?: number) =>
-    post<{ results: StorySearchResult[] }>('/api/search-stories', { query, count: count || 6 }),
+  searchStories: (query: string, count?: number, ollama_model?: string) =>
+    post<{ results: StorySearchResult[] }>('/api/search-stories', { query, count: count || 6, ...(ollama_model && { ollama_model }) }),
+
+  gutenbergSearch: (query: string, page?: number, topic?: string, languages?: string) =>
+    post<GutenbergSearchResponse>('/api/gutenberg/search', { query, page: page || 1, topic: topic || '', languages: languages || '' }),
+
+  gutenbergText: (text_url: string, max_chars?: number) =>
+    post<GutenbergTextResponse>('/api/gutenberg/text', { text_url, max_chars: max_chars ?? 2000 }),
 
   createProject: (body: { source_tale: string; custom_prompt?: string; target_minutes: number; ollama_model: string; tone?: string }) =>
     post<ProjectState>('/api/projects', body),

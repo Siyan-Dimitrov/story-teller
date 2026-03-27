@@ -73,7 +73,7 @@ async def search_stories(
 
     log.info(f"Searching stories: query={query!r}, model={model}")
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=config.LLM_TIMEOUT_SECONDS) as client:
         resp = await client.post(
             f"{base_url}/api/chat",
             json={

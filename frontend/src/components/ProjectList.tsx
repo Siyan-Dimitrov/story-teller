@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
-import { Plus, BookOpen, Trash2, Clock, ChevronRight, Search, Loader2 } from 'lucide-react'
-import type { ProjectSummary, Tale, StorySearchResult } from '../api'
+import { Plus, BookOpen, Trash2, Clock, ChevronRight, Search, Loader2, Globe } from 'lucide-react'
+import type { ProjectSummary, Tale, StorySearchResult, GutenbergBook } from '../api'
 import { api } from '../api'
 
 const ADAPTATION_TONES = [
@@ -12,6 +12,40 @@ const ADAPTATION_TONES = [
   { value: 'tragic', label: 'Tragic' },
   { value: 'satirical', label: 'Satirical' },
   { value: 'romantic gothic', label: 'Romantic Gothic' },
+]
+
+const GUTENBERG_QUICK_TAGS = [
+  'fairy tales', 'folklore', 'gothic fiction', 'mythology',
+  'horror', 'fables', 'legends', 'ghost stories', 'fantasy',
+  'dark romance', 'adventure', 'poetry',
+]
+
+const GUTENBERG_TOPICS = [
+  { value: '', label: 'All topics' },
+  { value: 'children', label: 'Children' },
+  { value: 'crime', label: 'Crime & Mystery' },
+  { value: 'fantasy', label: 'Fantasy' },
+  { value: 'fiction', label: 'Fiction' },
+  { value: 'horror', label: 'Horror' },
+  { value: 'humor', label: 'Humor' },
+  { value: 'mythology', label: 'Mythology' },
+  { value: 'poetry', label: 'Poetry' },
+  { value: 'romance', label: 'Romance' },
+  { value: 'science fiction', label: 'Science Fiction' },
+]
+
+const GUTENBERG_LANGUAGES = [
+  { value: 'en', label: 'English' },
+  { value: '', label: 'All languages' },
+  { value: 'de', label: 'German' },
+  { value: 'fr', label: 'French' },
+  { value: 'it', label: 'Italian' },
+  { value: 'es', label: 'Spanish' },
+  { value: 'pt', label: 'Portuguese' },
+  { value: 'nl', label: 'Dutch' },
+  { value: 'fi', label: 'Finnish' },
+  { value: 'zh', label: 'Chinese' },
+  { value: 'ja', label: 'Japanese' },
 ]
 
 const STEP_LABELS: Record<string, string> = {
@@ -26,7 +60,7 @@ const STEP_LABELS: Record<string, string> = {
   assembling: 'Assembling...',
 }
 
-type SourceMode = 'grimm' | 'search' | 'custom'
+type SourceMode = 'grimm' | 'search' | 'online' | 'custom'
 
 export default function ProjectList({ onSelect }: { onSelect: (id: string) => void }) {
   const [projects, setProjects] = useState<ProjectSummary[]>([])
@@ -39,11 +73,28 @@ export default function ProjectList({ onSelect }: { onSelect: (id: string) => vo
   const [tone, setTone] = useState('dark')
   const [creating, setCreating] = useState(false)
 
+  // Custom story state
+  const [customPrompt, setCustomPrompt] = useState('')
+
   // Story search state
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState<StorySearchResult[]>([])
   const [searching, setSearching] = useState(false)
   const [selectedSearch, setSelectedSearch] = useState<StorySearchResult | null>(null)
+
+  // Gutenberg online search state
+  const [onlineQuery, setOnlineQuery] = useState('')
+  const [onlineResults, setOnlineResults] = useState<GutenbergBook[]>([])
+  const [onlineSearching, setOnlineSearching] = useState(false)
+  const [onlineResultCount, setOnlineResultCount] = useState(0)
+  const [onlinePage, setOnlinePage] = useState(1)
+  const [selectedOnline, setSelectedOnline] = useState<GutenbergBook | null>(null)
+  const [onlinePreview, setOnlinePreview] = useState('')
+  const [onlinePreviewTotal, setOnlinePreviewTotal] = useState(0)
+  const [loadingPreview, setLoadingPreview] = useState(false)
+  const [loadingFullText, setLoadingFullText] = useState(false)
+  const [onlineTopic, setOnlineTopic] = useState('')
+  const [onlineLanguage, setOnlineLanguage] = useState('en')
 
   const refresh = () => {
     api.listProjects().then(setProjects).catch(() => {})
@@ -59,12 +110,61 @@ export default function ProjectList({ onSelect }: { onSelect: (id: string) => vo
     setSearching(true)
     setSelectedSearch(null)
     try {
-      const res = await api.searchStories(searchQuery)
+      const res = await api.searchStories(searchQuery, 6, ollamaModel)
       setSearchResults(res.results)
     } catch (e) {
       alert('Search failed: ' + (e as Error).message)
     } finally {
       setSearching(false)
+    }
+  }
+
+  const handleOnlineSearch = async (page = 1, queryOverride?: string) => {
+    const q = queryOverride ?? onlineQuery
+    if (!q.trim()) return
+    setOnlineSearching(true)
+    setSelectedOnline(null)
+    setOnlinePreview('')
+    try {
+      const res = await api.gutenbergSearch(q, page, onlineTopic, onlineLanguage)
+      setOnlineResults(res.results)
+      setOnlineResultCount(res.count)
+      setOnlinePage(page)
+    } catch (e) {
+      alert('Gutenberg search failed: ' + (e as Error).message)
+    } finally {
+      setOnlineSearching(false)
+    }
+  }
+
+  const handleSelectOnlineBook = async (book: GutenbergBook) => {
+    setSelectedOnline(book)
+    if (book.text_url) {
+      setLoadingPreview(true)
+      setOnlinePreview('')
+      try {
+        const res = await api.gutenbergText(book.text_url, 2000)
+        setOnlinePreview(res.text)
+        setOnlinePreviewTotal(res.total_chars)
+      } catch {
+        setOnlinePreview('Failed to load preview.')
+      } finally {
+        setLoadingPreview(false)
+      }
+    }
+  }
+
+  const handleUseFullText = async () => {
+    if (!selectedOnline?.text_url) return
+    setLoadingFullText(true)
+    try {
+      const res = await api.gutenbergText(selectedOnline.text_url, 0)
+      setCustomPrompt(res.text)
+      setSourceMode('custom')
+    } catch (e) {
+      alert('Failed to fetch full text: ' + (e as Error).message)
+    } finally {
+      setLoadingFullText(false)
     }
   }
 
@@ -79,6 +179,11 @@ export default function ProjectList({ onSelect }: { onSelect: (id: string) => vo
       } else if (sourceMode === 'search' && selectedSearch) {
         // Pass the searched story as a custom prompt with full synopsis
         custom_prompt = `Adapt this well-known story: "${selectedSearch.title}" by ${selectedSearch.author} (${selectedSearch.origin}).\n\nSynopsis: ${selectedSearch.synopsis}`
+      } else if (sourceMode === 'online' && selectedOnline) {
+        const authorStr = selectedOnline.authors.map(a => a.name).join(', ') || 'Unknown'
+        custom_prompt = `Adapt this public domain story from Project Gutenberg: "${selectedOnline.title}" by ${authorStr}.\n\nSubjects: ${selectedOnline.subjects.join(', ')}\n\nText preview:\n${onlinePreview}`
+      } else if (sourceMode === 'custom') {
+        custom_prompt = customPrompt
       }
 
       const proj = await api.createProject({
@@ -125,7 +230,8 @@ export default function ProjectList({ onSelect }: { onSelect: (id: string) => vo
             <div className="flex gap-1 p-1 rounded-lg bg-[var(--bg-tertiary)]">
               {([
                 ['grimm', 'Grimm Tales'],
-                ['search', 'Search Stories'],
+                ['search', 'AI Suggestions'],
+                ['online', 'Search Online'],
                 ['custom', 'Custom / Original'],
               ] as [SourceMode, string][]).map(([mode, label]) => (
                 <button
@@ -239,13 +345,205 @@ export default function ProjectList({ onSelect }: { onSelect: (id: string) => vo
               </div>
             )}
 
+            {/* Gutenberg online search */}
+            {sourceMode === 'online' && (
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-xs text-[var(--text-secondary)] mb-1.5">
+                    <Globe size={12} className="inline mr-1" />
+                    Search Project Gutenberg
+                  </label>
+                  <p className="text-xs text-[var(--text-muted)] mb-2">
+                    Search 70,000+ free public domain books — fairy tales, folklore, classic fiction, and more.
+                  </p>
+
+                  {/* Quick-search tags */}
+                  <div className="flex flex-wrap gap-1.5 mb-2">
+                    {GUTENBERG_QUICK_TAGS.map(tag => (
+                      <button
+                        key={tag}
+                        onClick={() => { setOnlineQuery(tag); handleOnlineSearch(1, tag) }}
+                        className={`text-[10px] px-2 py-1 rounded-full border transition-colors ${
+                          onlineQuery === tag
+                            ? 'border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--accent)]'
+                            : 'border-[var(--border)] bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:border-[var(--accent)] hover:text-[var(--text-secondary)]'
+                        }`}
+                      >
+                        {tag}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={onlineQuery}
+                      onChange={e => setOnlineQuery(e.target.value)}
+                      onKeyDown={e => e.key === 'Enter' && handleOnlineSearch()}
+                      placeholder="e.g. fairy tale, grimm, andersen, gothic horror..."
+                      className="flex-1 bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
+                    />
+                    <button
+                      onClick={() => handleOnlineSearch()}
+                      disabled={onlineSearching || !onlineQuery.trim()}
+                      className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[var(--bg-tertiary)] border border-[var(--border)] text-sm text-[var(--text-primary)] hover:border-[var(--accent)] transition-colors disabled:opacity-50"
+                    >
+                      {onlineSearching ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
+                      Search
+                    </button>
+                  </div>
+
+                  {/* Topic + Language filters */}
+                  <div className="flex gap-2 mt-2">
+                    <select
+                      value={onlineTopic}
+                      onChange={e => setOnlineTopic(e.target.value)}
+                      className="flex-1 bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-2 py-1.5 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
+                    >
+                      {GUTENBERG_TOPICS.map(t => (
+                        <option key={t.value} value={t.value}>{t.label}</option>
+                      ))}
+                    </select>
+                    <select
+                      value={onlineLanguage}
+                      onChange={e => setOnlineLanguage(e.target.value)}
+                      className="flex-1 bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-2 py-1.5 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
+                    >
+                      {GUTENBERG_LANGUAGES.map(l => (
+                        <option key={l.value} value={l.value}>{l.label}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {onlineResultCount > 0 && (
+                    <div className="text-[10px] text-[var(--text-muted)] mt-1">
+                      {onlineResultCount.toLocaleString()} results found
+                    </div>
+                  )}
+                </div>
+
+                {/* Results list */}
+                {onlineResults.length > 0 && (
+                  <div className="space-y-2 max-h-64 overflow-y-auto">
+                    {onlineResults.map(book => (
+                      <button
+                        key={book.gutenberg_id}
+                        onClick={() => handleSelectOnlineBook(book)}
+                        className={`w-full text-left p-3 rounded-lg border transition-colors ${
+                          selectedOnline?.gutenberg_id === book.gutenberg_id
+                            ? 'border-[var(--accent)] bg-[var(--accent)]/10'
+                            : 'border-[var(--border)] bg-[var(--bg-tertiary)] hover:border-[var(--border-focus)]'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium truncate">{book.title}</div>
+                            <div className="text-xs text-[var(--text-muted)] mt-0.5">
+                              {book.authors.map(a => a.name).join(', ') || 'Unknown'}
+                              {book.authors[0]?.birth_year && ` (${book.authors[0].birth_year}\u2013${book.authors[0].death_year || '?'})`}
+                            </div>
+                          </div>
+                          <span className="shrink-0 text-[10px] px-2 py-0.5 rounded-full bg-[var(--bg-secondary)] text-[var(--text-muted)]">
+                            {book.download_count.toLocaleString()} downloads
+                          </span>
+                        </div>
+                        {book.subjects.length > 0 && (
+                          <div className="flex gap-1 mt-1.5 flex-wrap">
+                            {book.subjects.slice(0, 4).map(s => (
+                              <span key={s} className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--bg-secondary)] text-[var(--text-muted)]">
+                                {s}
+                              </span>
+                            ))}
+                            {book.subjects.length > 4 && (
+                              <span className="text-[10px] text-[var(--text-muted)]">
+                                +{book.subjects.length - 4} more
+                              </span>
+                            )}
+                          </div>
+                        )}
+                        {!book.text_url && (
+                          <div className="text-[10px] text-[var(--warning)] mt-1">No plain text available</div>
+                        )}
+                      </button>
+                    ))}
+
+                    {/* Pagination */}
+                    {onlineResultCount > 32 && (
+                      <div className="flex items-center justify-between pt-2">
+                        <button
+                          disabled={onlinePage <= 1}
+                          onClick={() => handleOnlineSearch(onlinePage - 1)}
+                          className="text-xs px-3 py-1 rounded bg-[var(--bg-tertiary)] border border-[var(--border)] text-[var(--text-secondary)] hover:border-[var(--accent)] transition-colors disabled:opacity-30"
+                        >
+                          Previous
+                        </button>
+                        <span className="text-xs text-[var(--text-muted)]">Page {onlinePage}</span>
+                        <button
+                          onClick={() => handleOnlineSearch(onlinePage + 1)}
+                          className="text-xs px-3 py-1 rounded bg-[var(--bg-tertiary)] border border-[var(--border)] text-[var(--text-secondary)] hover:border-[var(--accent)] transition-colors"
+                        >
+                          Next
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Preview panel */}
+                {selectedOnline && (
+                  <div className="p-3 rounded-lg border border-[var(--accent)]/30 bg-[var(--accent)]/5">
+                    <div className="text-xs text-[var(--accent)] font-medium mb-1">
+                      Selected: {selectedOnline.title}
+                    </div>
+                    {loadingPreview ? (
+                      <div className="flex items-center gap-2 text-xs text-[var(--text-muted)] py-2">
+                        <Loader2 size={12} className="animate-spin" /> Loading preview...
+                      </div>
+                    ) : onlinePreview ? (
+                      <>
+                        <p className="text-xs text-[var(--text-secondary)] leading-relaxed whitespace-pre-wrap max-h-32 overflow-y-auto">
+                          {onlinePreview}{onlinePreviewTotal > 2000 && '...'}
+                        </p>
+                        <div className="flex items-center justify-between mt-2">
+                          <span className="text-[10px] text-[var(--text-muted)]">
+                            {onlinePreviewTotal.toLocaleString()} characters total
+                          </span>
+                          <button
+                            onClick={handleUseFullText}
+                            disabled={loadingFullText}
+                            className="text-[10px] px-2 py-1 rounded bg-[var(--bg-tertiary)] border border-[var(--border)] text-[var(--text-primary)] hover:border-[var(--accent)] transition-colors disabled:opacity-50"
+                          >
+                            {loadingFullText ? 'Loading...' : 'Edit Full Text in Custom Tab'}
+                          </button>
+                        </div>
+                      </>
+                    ) : !selectedOnline.text_url ? (
+                      <p className="text-xs text-[var(--text-muted)]">No plain text available for this book.</p>
+                    ) : null}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Custom prompt */}
             {sourceMode === 'custom' && (
               <div>
-                <label className="block text-xs text-[var(--text-secondary)] mb-1.5">Story Idea</label>
+                <label className="block text-xs text-[var(--text-secondary)] mb-1.5">Story Text or Idea</label>
                 <p className="text-xs text-[var(--text-muted)] mb-2">
-                  Leave empty for a completely original story, or describe your idea.
+                  Paste a full story text and the LLM will break it into scenes, or describe an idea for an original story. Leave empty for a completely AI-generated tale.
                 </p>
+                <textarea
+                  value={customPrompt}
+                  onChange={e => setCustomPrompt(e.target.value)}
+                  placeholder="Paste your story here, or describe an idea...&#10;&#10;e.g. a full fairy tale text, a plot outline, or just a theme like 'a story about a cursed mirror that shows the truth'"
+                  rows={8}
+                  className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)] resize-y leading-relaxed"
+                />
+                {customPrompt.length > 0 && (
+                  <div className="mt-1.5 text-[10px] text-[var(--text-muted)]">
+                    {customPrompt.length.toLocaleString()} characters
+                  </div>
+                )}
               </div>
             )}
 
@@ -288,7 +586,7 @@ export default function ProjectList({ onSelect }: { onSelect: (id: string) => vo
 
             <button
               onClick={handleCreate}
-              disabled={creating || (sourceMode === 'search' && !selectedSearch)}
+              disabled={creating || (sourceMode === 'search' && !selectedSearch) || (sourceMode === 'online' && !selectedOnline)}
               className="px-4 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-sm font-medium transition-colors disabled:opacity-50"
             >
               {creating ? 'Creating...' : 'Create Project'}

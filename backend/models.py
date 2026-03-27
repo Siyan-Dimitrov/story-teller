@@ -104,6 +104,7 @@ class RunImagesRequest(BaseModel):
 class SearchStoriesRequest(BaseModel):
     query: str = ""  # e.g. "revenge", "transformation", "brothers grimm"
     count: int = 6
+    ollama_model: Optional[str] = None  # Uses config default if not specified
 
 
 class StorySearchResult(BaseModel):
@@ -113,6 +114,37 @@ class StorySearchResult(BaseModel):
     synopsis: str
     themes: list[str] = Field(default_factory=list)
     tone_suggestion: str = "dark"
+
+
+# ── Gutenberg search ────────────────────────────────────────
+
+class GutenbergAuthor(BaseModel):
+    name: str = ""
+    birth_year: Optional[int] = None
+    death_year: Optional[int] = None
+
+
+class GutenbergBookResult(BaseModel):
+    gutenberg_id: int
+    title: str = ""
+    authors: list[GutenbergAuthor] = Field(default_factory=list)
+    subjects: list[str] = Field(default_factory=list)
+    bookshelves: list[str] = Field(default_factory=list)
+    languages: list[str] = Field(default_factory=list)
+    download_count: int = 0
+    text_url: Optional[str] = None
+
+
+class GutenbergSearchRequest(BaseModel):
+    query: str = ""
+    topic: str = ""
+    languages: str = ""  # e.g. "en", "de", "fr" — comma-separated for multiple
+    page: int = 1
+
+
+class GutenbergTextRequest(BaseModel):
+    text_url: str
+    max_chars: int = 2000  # 0 for full text
 
 
 class RunQCRequest(BaseModel):

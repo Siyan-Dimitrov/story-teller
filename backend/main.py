@@ -15,7 +15,7 @@ import httpx
 
 from . import config
 from . import project_store as store
-from . import script_gen, voice_gen, image_gen
+from . import script_gen, voice_gen, image_gen, gutenberg
 from .video_assembly import assemble_video, get_assembly_progress, cancel_assembly
 from .animation import prepare_animations, get_animation_progress
 from .grimm_tales import list_tales, get_tale
@@ -30,6 +30,8 @@ from .models import (
     RegenerateQCRequest,
     RunAssembleRequest,
     SearchStoriesRequest,
+    GutenbergSearchRequest,
+    GutenbergTextRequest,
     HealthStatus,
     ProjectSummary,
 )
@@ -100,11 +102,44 @@ async def search_stories(req: SearchStoriesRequest):
         results = await script_gen.search_stories(
             query=req.query,
             count=req.count,
+            ollama_model=req.ollama_model,
         )
         return {"results": results}
     except Exception as e:
         log.error(f"Story search failed: {e}")
         raise HTTPException(500, f"Story search failed: {e}")
+
+
+# ── Gutenberg online search ──────────────────────────────────
+
+@app.post("/api/gutenberg/search")
+async def gutenberg_search(req: GutenbergSearchRequest):
+    """Search Project Gutenberg for public domain books."""
+    try:
+        results = await gutenberg.search_gutenberg(
+            query=req.query,
+            page=req.page,
+            topic=req.topic,
+            languages=req.languages,
+        )
+        return results
+    except Exception as e:
+        log.error(f"Gutenberg search failed: {e}")
+        raise HTTPException(502, f"Gutenberg search failed: {e}")
+
+
+@app.post("/api/gutenberg/text")
+async def gutenberg_text(req: GutenbergTextRequest):
+    """Fetch plain text of a Gutenberg book."""
+    try:
+        result = await gutenberg.fetch_gutenberg_text(
+            text_url=req.text_url,
+            max_chars=req.max_chars,
+        )
+        return result
+    except Exception as e:
+        log.error(f"Gutenberg text fetch failed: {e}")
+        raise HTTPException(502, f"Gutenberg text fetch failed: {e}")
 
 
 # ── Voice profiles (proxy to VoiceBox) ──────────────────────
