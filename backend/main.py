@@ -15,7 +15,7 @@ import httpx
 
 from . import config
 from . import project_store as store
-from . import script_gen, voice_gen, image_gen, gutenberg
+from . import script_gen, voice_gen, image_gen, gutenberg, batch
 from .video_assembly import assemble_video, get_assembly_progress, cancel_assembly
 from .animation import prepare_animations, get_animation_progress
 from .grimm_tales import list_tales, get_tale
@@ -34,6 +34,9 @@ from .models import (
     GutenbergTextRequest,
     HealthStatus,
     ProjectSummary,
+    AnalyzeChaptersRequest,
+    BatchCreateRequest,
+    BatchRunRequest,
 )
 from .image_qc import run_qc_for_project, regenerate_and_evaluate, get_qc_progress, evaluate_single_image
 
@@ -142,6 +145,100 @@ async def gutenberg_text(req: GutenbergTextRequest):
         raise HTTPException(502, f"Gutenberg text fetch failed: {e}")
 
 
+# ── Batch chapter analysis ───────────────────────────────────
+
+@app.post("/api/analyze-chapters")
+async def analyze_chapters(req: AnalyzeChaptersRequest):
+    """Analyze book text and detect chapters via LLM."""
+    if not req.text.strip():
+        raise HTTPException(400, "No text provided")
+    try:
+        result = await batch.analyze_chapters(
+            text=req.text,
+            book_title=req.book_title,
+            ollama_model=req.ollama_model,
+        )
+        return result
+    except Exception as e:
+        log.error(f"Chapter analysis failed: {e}")
+        raise HTTPException(500, f"Chapter analysis failed: {e}")
+
+
+@app.post("/api/batch/create")
+async def batch_create(req: BatchCreateRequest):
+    """Create one project per chapter, linked by a book group ID."""
+    if not req.chapters:
+        raise HTTPException(400, "No chapters provided")
+    try:
+        group_id, project_ids = batch.create_batch_projects(
+            book_title=req.book_title,
+            chapters=[ch.model_dump() for ch in req.chapters],
+            ollama_model=req.ollama_model,
+            voice_profile_id=req.voice_profile_id,
+            voice_language=req.voice_language,
+            image_backend=req.image_backend,
+        )
+        return {"book_group_id": group_id, "project_ids": project_ids}
+    except Exception as e:
+        log.error(f"Batch creation failed: {e}")
+        raise HTTPException(500, f"Batch creation failed: {e}")
+
+
+@app.post("/api/batch/{group_id}/run")
+async def batch_run(group_id: str, req: BatchRunRequest):
+    """Start sequential pipeline processing for a batch group."""
+    # Find all projects in this group
+    projects = store.list_projects()
+    group_projects = [
+        p for p in projects
+        if p.get("book_group_id") == group_id
+    ]
+    if not group_projects:
+        raise HTTPException(404, f"No projects found for group {group_id}")
+
+    group_projects.sort(key=lambda p: p.get("chapter_index", 0))
+    project_ids = [p["project_id"] for p in group_projects]
+
+    # Check if already running
+    existing = batch.get_batch_progress(group_id)
+    if not existing.get("finished", True):
+        return {"status": "already_running"}
+
+    # Launch in background thread
+    def _run():
+        import asyncio as _asyncio
+        loop = _asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(
+                batch.run_batch_pipeline(
+                    group_id=group_id,
+                    project_ids=project_ids,
+                    steps=req.steps,
+                    voice_profile_id=req.voice_profile_id,
+                    voice_language=req.voice_language,
+                    voice_instruct=req.voice_instruct,
+                    image_backend=req.image_backend,
+                    style_prompt=req.style_prompt,
+                    lora_keys=req.lora_keys,
+                )
+            )
+        except Exception as e:
+            log.error(f"Batch pipeline error: {e}")
+        finally:
+            loop.close()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+
+    return {"status": "running"}
+
+
+@app.get("/api/batch/{group_id}/progress")
+async def batch_progress(group_id: str):
+    """Get batch processing progress."""
+    return batch.get_batch_progress(group_id)
+
+
 # ── Voice profiles (proxy to VoiceBox) ──────────────────────
 
 @app.get("/api/profiles")
@@ -185,6 +282,8 @@ async def list_projects():
             step=p.get("step", "created"),
             source_tale=p.get("source_tale", ""),
             created_at=p.get("created_at", ""),
+            book_group_id=p.get("book_group_id"),
+            chapter_index=p.get("chapter_index"),
         )
         for p in projects
     ]

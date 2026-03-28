@@ -56,6 +56,9 @@ class ProjectState(BaseModel):
     image_backend: str = "comfyui"  # comfyui | ollama | replicate
     target_minutes: float = 5.0
     created_at: str = ""
+    # Batch chapter fields
+    book_group_id: Optional[str] = None
+    chapter_index: Optional[int] = None
 
 
 # ── API requests ─────────────────────────────────────────────
@@ -187,9 +190,77 @@ class ProjectSummary(BaseModel):
     step: str
     source_tale: str
     created_at: str
+    book_group_id: Optional[str] = None
+    chapter_index: Optional[int] = None
 
 
 class VoiceProfile(BaseModel):
     id: str
     name: str
     language: str
+
+
+# ── Batch chapter analysis ──────────────────────────────────
+
+class AnalyzeChaptersRequest(BaseModel):
+    text: str
+    book_title: str = ""
+    ollama_model: Optional[str] = None
+
+
+class AnalyzedChapter(BaseModel):
+    title: str = ""
+    text: str = ""
+    suggested_tone: str = "dark"
+    estimated_duration: float = 5.0
+    char_count: int = 0
+
+
+class AnalyzeChaptersResponse(BaseModel):
+    book_title: str = ""
+    chapters: list[AnalyzedChapter] = Field(default_factory=list)
+
+
+class BatchCreateRequest(BaseModel):
+    book_title: str = ""
+    chapters: list[AnalyzedChapter] = Field(default_factory=list)
+    ollama_model: str = "kimi-k2.5:cloud"
+    voice_profile_id: Optional[str] = None
+    voice_language: str = "en"
+    image_backend: str = "comfyui"
+
+
+class BatchCreateResponse(BaseModel):
+    book_group_id: str
+    project_ids: list[str] = Field(default_factory=list)
+
+
+class BatchRunRequest(BaseModel):
+    steps: list[str] = Field(default_factory=lambda: ["script", "voice", "images", "assemble"])
+    voice_profile_id: str = ""
+    voice_language: str = "en"
+    voice_instruct: str = DEFAULT_VOICE_INSTRUCT
+    image_backend: str = "comfyui"
+    style_prompt: str = "dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting"
+    lora_keys: Optional[list[str]] = None
+
+
+class ChapterProgress(BaseModel):
+    project_id: str
+    chapter_index: int = 0
+    title: str = ""
+    status: str = "pending"  # pending | running | completed | failed
+    current_step: Optional[str] = None
+    failed_step: Optional[str] = None
+    error: Optional[str] = None
+
+
+class BatchProgress(BaseModel):
+    group_id: str
+    total: int = 0
+    completed: int = 0
+    failed: int = 0
+    current_chapter: Optional[int] = None
+    current_step: Optional[str] = None
+    chapters: list[ChapterProgress] = Field(default_factory=list)
+    finished: bool = False

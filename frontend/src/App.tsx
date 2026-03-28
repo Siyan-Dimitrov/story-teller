@@ -4,10 +4,12 @@ import type { HealthStatus, ProjectState } from './api'
 import { api } from './api'
 import ProjectList from './components/ProjectList'
 import StoryWizard from './components/StoryWizard'
+import BatchProgress from './components/BatchProgress'
 
 export default function App() {
   const [health, setHealth] = useState<HealthStatus | null>(null)
   const [activeProject, setActiveProject] = useState<string | null>(null)
+  const [activeBatch, setActiveBatch] = useState<string | null>(null)
   const [project, setProject] = useState<ProjectState | null>(null)
 
   useEffect(() => {
@@ -39,9 +41,9 @@ export default function App() {
           <span className="text-xs text-[var(--text-muted)]">dark fairy tales for grown-ups</span>
         </div>
         <div className="flex items-center gap-4">
-          {activeProject && (
+          {(activeProject || activeBatch) && (
             <button
-              onClick={() => setActiveProject(null)}
+              onClick={() => { setActiveProject(null); setActiveBatch(null) }}
               className="text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
             >
               All Projects
@@ -55,8 +57,17 @@ export default function App() {
       <main className="flex-1 max-w-6xl mx-auto w-full px-6 py-6">
         {activeProject && project ? (
           <StoryWizard project={project} onRefresh={refreshProject} />
+        ) : activeBatch ? (
+          <BatchProgress
+            groupId={activeBatch}
+            onBack={() => setActiveBatch(null)}
+            onSelectProject={(id) => { setActiveBatch(null); setActiveProject(id) }}
+          />
         ) : (
-          <ProjectList onSelect={setActiveProject} />
+          <ProjectList
+            onSelect={setActiveProject}
+            onBatchStart={(groupId) => setActiveBatch(groupId)}
+          />
         )}
       </main>
 

@@ -61,6 +61,8 @@ export interface ProjectSummary {
   step: string
   source_tale: string
   created_at: string
+  book_group_id?: string | null
+  chapter_index?: number | null
 }
 
 export interface Tale {
@@ -115,6 +117,47 @@ export interface GutenbergTextResponse {
   text: string
   total_chars: number
   truncated: boolean
+}
+
+// ── Batch chapter types ──────────────────────────────────────
+
+export interface AnalyzedChapter {
+  title: string
+  text: string
+  suggested_tone: string
+  estimated_duration: number
+  char_count: number
+}
+
+export interface AnalyzeChaptersResponse {
+  book_title: string
+  chapters: AnalyzedChapter[]
+}
+
+export interface BatchCreateResponse {
+  book_group_id: string
+  project_ids: string[]
+}
+
+export interface ChapterProgress {
+  project_id: string
+  chapter_index: number
+  title: string
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  current_step?: string | null
+  failed_step?: string | null
+  error?: string | null
+}
+
+export interface BatchProgress {
+  group_id: string
+  total: number
+  completed: number
+  failed: number
+  current_chapter?: number | null
+  current_step?: string | null
+  chapters: ChapterProgress[]
+  finished: boolean
 }
 
 // ── HTTP client ─────────────────────────────────────────────
@@ -177,6 +220,31 @@ export const api = {
 
   gutenbergText: (text_url: string, max_chars?: number) =>
     post<GutenbergTextResponse>('/api/gutenberg/text', { text_url, max_chars: max_chars ?? 2000 }),
+
+  analyzeChapters: (text: string, book_title?: string, ollama_model?: string) =>
+    post<AnalyzeChaptersResponse>('/api/analyze-chapters', { text, book_title: book_title || '', ...(ollama_model && { ollama_model }) }),
+
+  batchCreate: (body: {
+    book_title: string
+    chapters: AnalyzedChapter[]
+    ollama_model: string
+    voice_profile_id?: string
+    voice_language?: string
+    image_backend?: string
+  }) => post<BatchCreateResponse>('/api/batch/create', body),
+
+  batchRun: (groupId: string, body: {
+    steps: string[]
+    voice_profile_id: string
+    voice_language?: string
+    voice_instruct?: string
+    image_backend?: string
+    style_prompt?: string
+    lora_keys?: string[]
+  }) => post<{ status: string }>(`/api/batch/${groupId}/run`, body),
+
+  batchProgress: (groupId: string) =>
+    request<BatchProgress>(`/api/batch/${groupId}/progress`),
 
   createProject: (body: { source_tale: string; custom_prompt?: string; target_minutes: number; ollama_model: string; tone?: string }) =>
     post<ProjectState>('/api/projects', body),

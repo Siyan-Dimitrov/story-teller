@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
-import { Plus, BookOpen, Trash2, Clock, ChevronRight, Search, Loader2, Globe } from 'lucide-react'
-import type { ProjectSummary, Tale, StorySearchResult, GutenbergBook } from '../api'
+import { Plus, BookOpen, Trash2, Clock, ChevronRight, Search, Loader2, Globe, ChevronDown, Layers, Play, Palette } from 'lucide-react'
+import type { ProjectSummary, Tale, StorySearchResult, GutenbergBook, AnalyzedChapter, VoiceProfile } from '../api'
 import { api } from '../api'
 
 const ADAPTATION_TONES = [
@@ -48,6 +48,16 @@ const GUTENBERG_LANGUAGES = [
   { value: 'ja', label: 'Japanese' },
 ]
 
+const STYLE_PRESETS = [
+  { label: 'Tim Burton Gothic', prompt: 'Tim Burton style, dark whimsical illustration, exaggerated proportions, stark contrasts, eerie charm, spiral motifs, gothic fairy tale', loras: ['tim_burton'] },
+  { label: 'Dark Fantasy', prompt: 'dark fantasy illustration, dramatic lighting, rich shadows, mythical atmosphere, intricate detail, oil painting style', loras: ['dark_fantasy'] },
+  { label: 'Gothic Horror', prompt: 'dark gothic horror illustration, Victorian atmosphere, candlelit shadows, decaying grandeur, haunting beauty, sepia undertones', loras: ['dark_gothic'] },
+  { label: 'Dark Storybook', prompt: 'dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting, pen and ink with watercolor', loras: ['storybook'] },
+  { label: 'Surreal Macabre', prompt: 'Mark Ryden style, pop surrealism, porcelain skin, unsettling beauty, meat and roses, wide-eyed figures, hyper-detailed oil painting', loras: ['mark_ryden'] },
+  { label: 'Ghibli Dark', prompt: 'Studio Ghibli style, dark fairy tale mood, lush environments, melancholic atmosphere, hand-painted animation aesthetic', loras: [] },
+  { label: 'No Style (default)', prompt: '', loras: [] },
+]
+
 const STEP_LABELS: Record<string, string> = {
   created: 'New',
   scripted: 'Script Ready',
@@ -62,7 +72,7 @@ const STEP_LABELS: Record<string, string> = {
 
 type SourceMode = 'grimm' | 'search' | 'online' | 'custom'
 
-export default function ProjectList({ onSelect }: { onSelect: (id: string) => void }) {
+export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id: string) => void; onBatchStart?: (groupId: string) => void }) {
   const [projects, setProjects] = useState<ProjectSummary[]>([])
   const [tales, setTales] = useState<Tale[]>([])
   const [showCreate, setShowCreate] = useState(false)
@@ -96,6 +106,26 @@ export default function ProjectList({ onSelect }: { onSelect: (id: string) => vo
   const [onlineTopic, setOnlineTopic] = useState('')
   const [onlineLanguage, setOnlineLanguage] = useState('en')
 
+  // Chapter analysis state
+  const [analyzedChapters, setAnalyzedChapters] = useState<AnalyzedChapter[]>([])
+  const [analyzingChapters, setAnalyzingChapters] = useState(false)
+  const [selectedChapters, setSelectedChapters] = useState<Set<number>>(new Set())
+  const [batchSteps, setBatchSteps] = useState({ qc: false, animate: false })
+  const [showChapterPanel, setShowChapterPanel] = useState(false)
+  const [bookTitle, setBookTitle] = useState('')
+  const [creatingBatch, setCreatingBatch] = useState(false)
+  const [voiceProfiles, setVoiceProfiles] = useState<VoiceProfile[]>([])
+  const [batchVoiceProfile, setBatchVoiceProfile] = useState('')
+  const [batchImageBackend, setBatchImageBackend] = useState('replicate')
+  const [batchStylePrompt, setBatchStylePrompt] = useState(STYLE_PRESETS[0].prompt)
+  const [batchLoraKeys, setBatchLoraKeys] = useState<string[]>(STYLE_PRESETS[0].loras)
+  const [selectedPreset, setSelectedPreset] = useState(0)
+
+  // Collapsible book groups
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
+  const [runConfigGroup, setRunConfigGroup] = useState<string | null>(null)
+  const [runningGroup, setRunningGroup] = useState(false)
+
   const refresh = () => {
     api.listProjects().then(setProjects).catch(() => {})
   }
@@ -103,6 +133,10 @@ export default function ProjectList({ onSelect }: { onSelect: (id: string) => vo
   useEffect(() => {
     refresh()
     api.tales().then(setTales).catch(() => {})
+    api.profiles().then(p => {
+      setVoiceProfiles(p)
+      if (p.length > 0) setBatchVoiceProfile(p[0].id)
+    }).catch(() => {})
   }, [])
 
   const handleSearch = async () => {
@@ -166,6 +200,132 @@ export default function ProjectList({ onSelect }: { onSelect: (id: string) => vo
     } finally {
       setLoadingFullText(false)
     }
+  }
+
+  const handleAnalyzeChapters = async () => {
+    if (!selectedOnline?.text_url) return
+    setAnalyzingChapters(true)
+    setAnalyzedChapters([])
+    setShowChapterPanel(false)
+    try {
+      // Fetch full text first
+      const textRes = await api.gutenbergText(selectedOnline.text_url, 0)
+      // Send to LLM for analysis
+      const res = await api.analyzeChapters(textRes.text, selectedOnline.title, ollamaModel)
+      setAnalyzedChapters(res.chapters)
+      setBookTitle(res.book_title)
+      setSelectedChapters(new Set(res.chapters.map((_, i) => i)))
+      setShowChapterPanel(true)
+    } catch (e) {
+      alert('Chapter analysis failed: ' + (e as Error).message)
+    } finally {
+      setAnalyzingChapters(false)
+    }
+  }
+
+  const handleSaveBatch = async () => {
+    if (selectedChapters.size === 0) return
+    setCreatingBatch(true)
+    try {
+      const chaptersToCreate = analyzedChapters.filter((_, i) => selectedChapters.has(i))
+      await api.batchCreate({
+        book_title: bookTitle,
+        chapters: chaptersToCreate,
+        ollama_model: ollamaModel,
+        voice_profile_id: batchVoiceProfile || undefined,
+        voice_language: 'en',
+        image_backend: batchImageBackend,
+      })
+      setShowChapterPanel(false)
+      setAnalyzedChapters([])
+      setShowCreate(false)
+      refresh()
+    } catch (e) {
+      alert('Batch save failed: ' + (e as Error).message)
+    } finally {
+      setCreatingBatch(false)
+    }
+  }
+
+  const handleCreateBatch = async () => {
+    if (selectedChapters.size === 0) return
+    setCreatingBatch(true)
+    try {
+      const chaptersToCreate = analyzedChapters.filter((_, i) => selectedChapters.has(i))
+      const steps = ['script', 'voice', 'images', ...(batchSteps.qc ? ['qc'] : []), ...(batchSteps.animate ? ['animate'] : []), 'assemble']
+
+      const createRes = await api.batchCreate({
+        book_title: bookTitle,
+        chapters: chaptersToCreate,
+        ollama_model: ollamaModel,
+        voice_profile_id: batchVoiceProfile || undefined,
+        voice_language: 'en',
+        image_backend: batchImageBackend,
+      })
+
+      await api.batchRun(createRes.book_group_id, {
+        steps,
+        voice_profile_id: batchVoiceProfile,
+        voice_language: 'en',
+        image_backend: batchImageBackend,
+        ...(batchStylePrompt && { style_prompt: batchStylePrompt }),
+        ...(batchLoraKeys.length > 0 && { lora_keys: batchLoraKeys }),
+      })
+
+      if (onBatchStart) {
+        onBatchStart(createRes.book_group_id)
+      }
+
+      setShowChapterPanel(false)
+      setAnalyzedChapters([])
+      setShowCreate(false)
+      refresh()
+    } catch (e) {
+      alert('Batch creation failed: ' + (e as Error).message)
+    } finally {
+      setCreatingBatch(false)
+    }
+  }
+
+  const handleRunGroup = async (groupId: string) => {
+    setRunningGroup(true)
+    try {
+      const steps = ['script', 'voice', 'images', ...(batchSteps.qc ? ['qc'] : []), ...(batchSteps.animate ? ['animate'] : []), 'assemble']
+      await api.batchRun(groupId, {
+        steps,
+        voice_profile_id: batchVoiceProfile,
+        voice_language: 'en',
+        image_backend: batchImageBackend,
+        ...(batchStylePrompt && { style_prompt: batchStylePrompt }),
+        ...(batchLoraKeys.length > 0 && { lora_keys: batchLoraKeys }),
+      })
+      setRunConfigGroup(null)
+      if (onBatchStart) {
+        onBatchStart(groupId)
+      }
+    } catch (e) {
+      alert('Batch run failed: ' + (e as Error).message)
+    } finally {
+      setRunningGroup(false)
+    }
+  }
+
+  const toggleChapter = (index: number) => {
+    setSelectedChapters(prev => {
+      const next = new Set(prev)
+      if (next.has(index)) next.delete(index)
+      else next.add(index)
+      return next
+    })
+  }
+
+  const toggleGroup = (groupId: string) => {
+    setExpandedGroups(prev => {
+      const next = new Set(prev)
+      if (next.has(groupId)) next.delete(groupId)
+      else next.add(groupId)
+      return next
+    })
   }
 
   const handleCreate = async () => {
@@ -508,18 +668,209 @@ export default function ProjectList({ onSelect }: { onSelect: (id: string) => vo
                           <span className="text-[10px] text-[var(--text-muted)]">
                             {onlinePreviewTotal.toLocaleString()} characters total
                           </span>
-                          <button
-                            onClick={handleUseFullText}
-                            disabled={loadingFullText}
-                            className="text-[10px] px-2 py-1 rounded bg-[var(--bg-tertiary)] border border-[var(--border)] text-[var(--text-primary)] hover:border-[var(--accent)] transition-colors disabled:opacity-50"
-                          >
-                            {loadingFullText ? 'Loading...' : 'Edit Full Text in Custom Tab'}
-                          </button>
+                          <div className="flex gap-2">
+                            {onlinePreviewTotal > 5000 && (
+                              <button
+                                onClick={handleAnalyzeChapters}
+                                disabled={analyzingChapters}
+                                className="flex items-center gap-1 text-[10px] px-2 py-1 rounded bg-[var(--accent)]/10 border border-[var(--accent)]/30 text-[var(--accent)] hover:bg-[var(--accent)]/20 transition-colors disabled:opacity-50"
+                              >
+                                {analyzingChapters ? <Loader2 size={10} className="animate-spin" /> : <Layers size={10} />}
+                                {analyzingChapters ? 'Analyzing...' : 'Analyze Chapters'}
+                              </button>
+                            )}
+                            <button
+                              onClick={handleUseFullText}
+                              disabled={loadingFullText}
+                              className="text-[10px] px-2 py-1 rounded bg-[var(--bg-tertiary)] border border-[var(--border)] text-[var(--text-primary)] hover:border-[var(--accent)] transition-colors disabled:opacity-50"
+                            >
+                              {loadingFullText ? 'Loading...' : 'Edit Full Text in Custom Tab'}
+                            </button>
+                          </div>
                         </div>
                       </>
                     ) : !selectedOnline.text_url ? (
                       <p className="text-xs text-[var(--text-muted)]">No plain text available for this book.</p>
                     ) : null}
+                  </div>
+                )}
+
+                {/* Chapter analysis results */}
+                {showChapterPanel && analyzedChapters.length > 0 && (
+                  <div className="p-4 rounded-lg border border-[var(--border)] bg-[var(--bg-tertiary)]">
+                    <div className="flex items-center justify-between mb-3">
+                      <div>
+                        <h4 className="text-sm font-medium">{bookTitle}</h4>
+                        <p className="text-[10px] text-[var(--text-muted)]">
+                          {analyzedChapters.length} chapters detected &middot; {selectedChapters.size} selected
+                        </p>
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => setSelectedChapters(new Set(analyzedChapters.map((_, i) => i)))}
+                          className="text-[10px] px-2 py-0.5 rounded bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+                        >
+                          Select all
+                        </button>
+                        <button
+                          onClick={() => setSelectedChapters(new Set())}
+                          className="text-[10px] px-2 py-0.5 rounded bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+                        >
+                          Deselect all
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Chapter list */}
+                    <div className="space-y-1.5 max-h-64 overflow-y-auto mb-3">
+                      {analyzedChapters.map((ch, i) => (
+                        <label
+                          key={i}
+                          className={`flex items-start gap-2.5 p-2 rounded-lg border cursor-pointer transition-colors ${
+                            selectedChapters.has(i)
+                              ? 'border-[var(--accent)]/40 bg-[var(--accent)]/5'
+                              : 'border-transparent bg-[var(--bg-secondary)]'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={selectedChapters.has(i)}
+                            onChange={() => toggleChapter(i)}
+                            className="mt-0.5 accent-[var(--accent)]"
+                          />
+                          <div className="flex-1 min-w-0">
+                            <div className="text-xs font-medium truncate">{ch.title}</div>
+                            <div className="flex items-center gap-3 mt-0.5 text-[10px] text-[var(--text-muted)]">
+                              <span>{ch.char_count.toLocaleString()} chars</span>
+                              <span>~{ch.estimated_duration} min</span>
+                              <span className="capitalize">{ch.suggested_tone}</span>
+                            </div>
+                          </div>
+                        </label>
+                      ))}
+                    </div>
+
+                    {/* Pipeline step toggles */}
+                    <div className="flex items-center gap-4 mb-3 p-2 rounded bg-[var(--bg-secondary)]">
+                      <span className="text-[10px] text-[var(--text-muted)] font-medium">Pipeline:</span>
+                      <span className="text-[10px] text-[var(--text-secondary)]">Script</span>
+                      <span className="text-[10px] text-[var(--text-muted)]">&rarr;</span>
+                      <span className="text-[10px] text-[var(--text-secondary)]">Voice</span>
+                      <span className="text-[10px] text-[var(--text-muted)]">&rarr;</span>
+                      <span className="text-[10px] text-[var(--text-secondary)]">Images</span>
+                      <span className="text-[10px] text-[var(--text-muted)]">&rarr;</span>
+                      <label className="flex items-center gap-1 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={batchSteps.qc}
+                          onChange={e => setBatchSteps(s => ({ ...s, qc: e.target.checked }))}
+                          className="accent-[var(--accent)]"
+                        />
+                        <span className={`text-[10px] ${batchSteps.qc ? 'text-[var(--text-secondary)]' : 'text-[var(--text-muted)]'}`}>QC</span>
+                      </label>
+                      <span className="text-[10px] text-[var(--text-muted)]">&rarr;</span>
+                      <label className="flex items-center gap-1 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={batchSteps.animate}
+                          onChange={e => setBatchSteps(s => ({ ...s, animate: e.target.checked }))}
+                          className="accent-[var(--accent)]"
+                        />
+                        <span className={`text-[10px] ${batchSteps.animate ? 'text-[var(--text-secondary)]' : 'text-[var(--text-muted)]'}`}>Animate</span>
+                      </label>
+                      <span className="text-[10px] text-[var(--text-muted)]">&rarr;</span>
+                      <span className="text-[10px] text-[var(--text-secondary)]">Assemble</span>
+                    </div>
+
+                    {/* Batch settings */}
+                    <div className="grid grid-cols-2 gap-2 mb-3">
+                      <div>
+                        <label className="block text-[10px] text-[var(--text-muted)] mb-1">Voice Profile</label>
+                        <select
+                          value={batchVoiceProfile}
+                          onChange={e => setBatchVoiceProfile(e.target.value)}
+                          className="w-full bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
+                        >
+                          <option value="">Select voice...</option>
+                          {voiceProfiles.map(p => (
+                            <option key={p.id} value={p.id}>{p.name} ({p.language})</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-[var(--text-muted)] mb-1">Image Backend</label>
+                        <select
+                          value={batchImageBackend}
+                          onChange={e => setBatchImageBackend(e.target.value)}
+                          className="w-full bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
+                        >
+                          <option value="replicate">Replicate (FLUX)</option>
+                          <option value="comfyui">ComfyUI (local)</option>
+                          <option value="ollama">Ollama (local)</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    {/* Image style prompt */}
+                    <div className="mb-3">
+                      <label className="flex items-center gap-1.5 text-[10px] text-[var(--text-muted)] font-medium mb-1.5">
+                        <Palette size={10} /> Image Style
+                      </label>
+                      <div className="flex flex-wrap gap-1 mb-2">
+                        {STYLE_PRESETS.map((preset, i) => (
+                          <button
+                            key={preset.label}
+                            onClick={() => { setSelectedPreset(i); setBatchStylePrompt(preset.prompt); setBatchLoraKeys(preset.loras) }}
+                            className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors ${
+                              selectedPreset === i
+                                ? 'border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--accent)]'
+                                : 'border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:border-[var(--border-focus)]'
+                            }`}
+                          >
+                            {preset.label}
+                          </button>
+                        ))}
+                      </div>
+                      <textarea
+                        value={batchStylePrompt}
+                        onChange={e => { setBatchStylePrompt(e.target.value); setSelectedPreset(-1) }}
+                        placeholder="Custom style prompt for image generation..."
+                        rows={2}
+                        className="w-full bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-2 py-1.5 text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--border-focus)] resize-none"
+                      />
+                      {batchLoraKeys.length > 0 && (
+                        <p className="text-[10px] text-[var(--text-muted)] mt-1">LoRA: {batchLoraKeys.join(', ')}</p>
+                      )}
+                    </div>
+
+                    {/* Save / Save & Run buttons */}
+                    <div className="flex gap-2">
+                      <button
+                        onClick={handleSaveBatch}
+                        disabled={creatingBatch || selectedChapters.size === 0}
+                        className="flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-lg border border-[var(--accent)] text-[var(--accent)] text-sm font-medium transition-colors hover:bg-[var(--accent)]/10 disabled:opacity-50"
+                      >
+                        {creatingBatch ? (
+                          <><Loader2 size={14} className="animate-spin" /> Saving...</>
+                        ) : (
+                          <><Layers size={14} /> Save {selectedChapters.size} Chapters</>
+                        )}
+                      </button>
+                      <button
+                        onClick={handleCreateBatch}
+                        disabled={creatingBatch || selectedChapters.size === 0 || !batchVoiceProfile}
+                        className="flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-sm font-medium transition-colors disabled:opacity-50"
+                      >
+                        {creatingBatch ? (
+                          <><Loader2 size={14} className="animate-spin" /> Creating...</>
+                        ) : (
+                          <><Play size={14} /> Save & Run {selectedChapters.size}</>
+                        )}
+                      </button>
+                    </div>
+                    {!batchVoiceProfile && (
+                      <p className="text-[10px] text-[var(--warning)] mt-1">Select a voice profile to run immediately</p>
+                    )}
                   </div>
                 )}
               </div>
@@ -603,39 +954,193 @@ export default function ProjectList({ onSelect }: { onSelect: (id: string) => vo
             <p>No stories yet. Create your first dark fairy tale.</p>
           </div>
         )}
-        {projects.map(p => (
-          <button
-            key={p.project_id}
-            onClick={() => onSelect(p.project_id)}
-            className="w-full flex items-center gap-4 p-4 rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] hover:bg-[var(--bg-hover)] transition-colors text-left"
-          >
-            <BookOpen size={18} className="text-[var(--accent)] shrink-0" />
-            <div className="flex-1 min-w-0">
-              <div className="font-medium text-sm truncate">{p.title || 'Untitled'}</div>
-              <div className="flex items-center gap-3 mt-0.5 text-xs text-[var(--text-muted)]">
-                <span>{p.source_tale || 'custom'}</span>
-                <span className="flex items-center gap-1">
-                  <Clock size={10} />
-                  {new Date(p.created_at).toLocaleDateString()}
-                </span>
-              </div>
-            </div>
-            <span className={`shrink-0 text-xs px-2 py-0.5 rounded-full ${
-              p.step === 'assembled' ? 'bg-[var(--success)]/15 text-[var(--success)]' :
-              p.step.includes('generating') || p.step === 'assembling' ? 'bg-[var(--warning)]/15 text-[var(--warning)]' :
-              'bg-[var(--bg-tertiary)] text-[var(--text-muted)]'
-            }`}>
-              {STEP_LABELS[p.step] || p.step}
-            </span>
+        {(() => {
+          // Group projects: book groups first, then standalone projects
+          const groups = new Map<string, ProjectSummary[]>()
+          const standalone: ProjectSummary[] = []
+          for (const p of projects) {
+            if (p.book_group_id) {
+              const list = groups.get(p.book_group_id) || []
+              list.push(p)
+              groups.set(p.book_group_id, list)
+            } else {
+              standalone.push(p)
+            }
+          }
+          // Sort chapters within each group
+          for (const list of groups.values()) {
+            list.sort((a, b) => (a.chapter_index ?? 0) - (b.chapter_index ?? 0))
+          }
+
+          const renderProject = (p: ProjectSummary, indent = false) => (
             <button
-              onClick={e => handleDelete(e, p.project_id)}
-              className="shrink-0 p-1 rounded text-[var(--text-muted)] hover:text-[var(--error)] transition-colors"
+              key={p.project_id}
+              onClick={() => onSelect(p.project_id)}
+              className={`w-full flex items-center gap-4 p-4 rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] hover:bg-[var(--bg-hover)] transition-colors text-left ${indent ? 'ml-6' : ''}`}
             >
-              <Trash2 size={14} />
+              <BookOpen size={18} className="text-[var(--accent)] shrink-0" />
+              <div className="flex-1 min-w-0">
+                <div className="font-medium text-sm truncate">
+                  {indent && p.chapter_index != null && <span className="text-[var(--text-muted)] mr-1.5">Ch. {p.chapter_index + 1}</span>}
+                  {p.title || 'Untitled'}
+                </div>
+                <div className="flex items-center gap-3 mt-0.5 text-xs text-[var(--text-muted)]">
+                  <span>{p.source_tale || 'custom'}</span>
+                  <span className="flex items-center gap-1">
+                    <Clock size={10} />
+                    {new Date(p.created_at).toLocaleDateString()}
+                  </span>
+                </div>
+              </div>
+              <span className={`shrink-0 text-xs px-2 py-0.5 rounded-full ${
+                p.step === 'assembled' ? 'bg-[var(--success)]/15 text-[var(--success)]' :
+                p.step.includes('generating') || p.step === 'assembling' ? 'bg-[var(--warning)]/15 text-[var(--warning)]' :
+                'bg-[var(--bg-tertiary)] text-[var(--text-muted)]'
+              }`}>
+                {STEP_LABELS[p.step] || p.step}
+              </span>
+              <button
+                onClick={e => handleDelete(e, p.project_id)}
+                className="shrink-0 p-1 rounded text-[var(--text-muted)] hover:text-[var(--error)] transition-colors"
+              >
+                <Trash2 size={14} />
+              </button>
+              <ChevronRight size={14} className="text-[var(--text-muted)] shrink-0" />
             </button>
-            <ChevronRight size={14} className="text-[var(--text-muted)] shrink-0" />
-          </button>
-        ))}
+          )
+
+          return (
+            <>
+              {/* Book groups */}
+              {[...groups.entries()].map(([groupId, chapters]) => {
+                const expanded = expandedGroups.has(groupId)
+                const completedCount = chapters.filter(c => c.step === 'assembled').length
+                const unprocessedCount = chapters.filter(c => c.step === 'created').length
+                const groupTitle = chapters[0]?.source_tale || chapters[0]?.title || 'Book'
+                const showRunConfig = runConfigGroup === groupId
+                return (
+                  <div key={groupId} className="rounded-xl border border-[var(--border)] overflow-hidden">
+                    <button
+                      onClick={() => toggleGroup(groupId)}
+                      className="w-full flex items-center gap-3 p-4 bg-[var(--bg-secondary)] hover:bg-[var(--bg-hover)] transition-colors text-left"
+                    >
+                      <Layers size={18} className="text-[var(--accent)] shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <div className="font-medium text-sm truncate">{groupTitle}</div>
+                        <div className="text-xs text-[var(--text-muted)] mt-0.5">
+                          {chapters.length} chapters &middot; {completedCount} complete{unprocessedCount > 0 && ` · ${unprocessedCount} saved`}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0" onClick={e => e.stopPropagation()}>
+                        {unprocessedCount > 0 && (
+                          <button
+                            onClick={() => setRunConfigGroup(showRunConfig ? null : groupId)}
+                            className="text-[10px] px-2.5 py-1 rounded-full bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)] transition-colors"
+                          >
+                            Start Processing
+                          </button>
+                        )}
+                        {onBatchStart && completedCount < chapters.length && (
+                          <button
+                            onClick={() => onBatchStart(groupId)}
+                            className="text-[10px] px-2.5 py-1 rounded-full bg-[var(--accent)]/10 text-[var(--accent)] hover:bg-[var(--accent)]/20 transition-colors"
+                          >
+                            View Progress
+                          </button>
+                        )}
+                      </div>
+                      <ChevronDown size={16} className={`text-[var(--text-muted)] shrink-0 transition-transform ${expanded ? '' : '-rotate-90'}`} />
+                    </button>
+
+                    {/* Run config panel */}
+                    {showRunConfig && (
+                      <div className="p-4 border-t border-[var(--border)] bg-[var(--bg-secondary)] space-y-3">
+                        <div className="flex items-center gap-4 p-2 rounded bg-[var(--bg-tertiary)]">
+                          <span className="text-[10px] text-[var(--text-muted)] font-medium">Pipeline:</span>
+                          <span className="text-[10px] text-[var(--text-secondary)]">Script → Voice → Images →</span>
+                          <label className="flex items-center gap-1 cursor-pointer">
+                            <input type="checkbox" checked={batchSteps.qc} onChange={e => setBatchSteps(s => ({ ...s, qc: e.target.checked }))} className="accent-[var(--accent)]" />
+                            <span className={`text-[10px] ${batchSteps.qc ? 'text-[var(--text-secondary)]' : 'text-[var(--text-muted)]'}`}>QC</span>
+                          </label>
+                          <span className="text-[10px] text-[var(--text-muted)]">→</span>
+                          <label className="flex items-center gap-1 cursor-pointer">
+                            <input type="checkbox" checked={batchSteps.animate} onChange={e => setBatchSteps(s => ({ ...s, animate: e.target.checked }))} className="accent-[var(--accent)]" />
+                            <span className={`text-[10px] ${batchSteps.animate ? 'text-[var(--text-secondary)]' : 'text-[var(--text-muted)]'}`}>Animate</span>
+                          </label>
+                          <span className="text-[10px] text-[var(--text-muted)]">→ Assemble</span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="block text-[10px] text-[var(--text-muted)] mb-1">Voice Profile</label>
+                            <select value={batchVoiceProfile} onChange={e => setBatchVoiceProfile(e.target.value)} className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]">
+                              <option value="">Select voice...</option>
+                              {voiceProfiles.map(p => <option key={p.id} value={p.id}>{p.name} ({p.language})</option>)}
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-[10px] text-[var(--text-muted)] mb-1">Image Backend</label>
+                            <select value={batchImageBackend} onChange={e => setBatchImageBackend(e.target.value)} className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]">
+                              <option value="replicate">Replicate (FLUX)</option>
+                              <option value="comfyui">ComfyUI (local)</option>
+                              <option value="ollama">Ollama (local)</option>
+                            </select>
+                          </div>
+                        </div>
+                        {/* Image style prompt */}
+                        <div>
+                          <label className="flex items-center gap-1.5 text-[10px] text-[var(--text-muted)] font-medium mb-1.5">
+                            <Palette size={10} /> Image Style
+                          </label>
+                          <div className="flex flex-wrap gap-1 mb-2">
+                            {STYLE_PRESETS.map((preset, i) => (
+                              <button
+                                key={preset.label}
+                                onClick={() => { setSelectedPreset(i); setBatchStylePrompt(preset.prompt); setBatchLoraKeys(preset.loras) }}
+                                className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors ${
+                                  selectedPreset === i
+                                    ? 'border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--accent)]'
+                                    : 'border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:border-[var(--border-focus)]'
+                                }`}
+                              >
+                                {preset.label}
+                              </button>
+                            ))}
+                          </div>
+                          <textarea
+                            value={batchStylePrompt}
+                            onChange={e => { setBatchStylePrompt(e.target.value); setSelectedPreset(-1) }}
+                            placeholder="Custom style prompt for image generation..."
+                            rows={2}
+                            className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-2 py-1.5 text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--border-focus)] resize-none"
+                          />
+                          {batchLoraKeys.length > 0 && (
+                            <p className="text-[10px] text-[var(--text-muted)] mt-1">LoRA: {batchLoraKeys.join(', ')}</p>
+                          )}
+                        </div>
+                        <button
+                          onClick={() => handleRunGroup(groupId)}
+                          disabled={runningGroup || !batchVoiceProfile}
+                          className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-sm font-medium transition-colors disabled:opacity-50"
+                        >
+                          {runningGroup ? <><Loader2 size={14} className="animate-spin" /> Starting...</> : <><Play size={14} /> Run {chapters.length} Chapters</>}
+                        </button>
+                        {!batchVoiceProfile && <p className="text-[10px] text-[var(--warning)]">Select a voice profile to continue</p>}
+                      </div>
+                    )}
+
+                    {expanded && (
+                      <div className="space-y-1 p-2 bg-[var(--bg-tertiary)]">
+                        {chapters.map(p => renderProject(p, true))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+              {/* Standalone projects */}
+              {standalone.map(p => renderProject(p))}
+            </>
+          )
+        })()}
       </div>
     </div>
   )

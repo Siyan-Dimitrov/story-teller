@@ -95,6 +95,11 @@ LLM_TIMEOUT_SECONDS = 300.0
 LLM_TEMPERATURE = 0.8
 LLM_MAX_TOKENS = 16000
 
+# ── Batch chapter analysis ───────────────────────────────────
+CHAPTER_ANALYSIS_TIMEOUT_SECONDS = 600.0
+CHAPTER_ANALYSIS_MAX_TOKENS = 32000
+BATCH_NARRATION_RATE = 800  # characters per minute for duration estimation
+
 # ── Voice ────────────────────────────────────────────────────
 VOICE_TIMEOUT_SECONDS = 180.0
 
