@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import uuid
 from typing import Optional
 
@@ -73,33 +74,138 @@ def _reconstruct_progress(group_id: str) -> dict:
     }
 
 
-# ── Chapter analysis via LLM ────────────────────────────────
+# ── Chapter analysis: two-stage (regex split → LLM classify) ─
 
-CHAPTER_ANALYSIS_PROMPT = """You are a literary analyst. Given a book's full text, identify all chapters, parts, stories, or tales within it.
+# Patterns that indicate chapter boundaries, ordered by specificity
+_CHAPTER_PATTERNS = [
+    # "CHAPTER I", "Chapter 1", "CHAPTER THE FIRST", etc.
+    re.compile(r"^\s*(CHAPTER|Chapter)\s+[\dIVXLCDMivxlcdm]+\.?(?:\s*[.:\-—]\s*.*)?$", re.MULTILINE),
+    # "CHAPTER I. Title Text" or "CHAPTER 1 — Title"
+    re.compile(r"^\s*(CHAPTER|Chapter)\s+\w+.*$", re.MULTILINE),
+    # "Part I", "PART ONE", "Part 1"
+    re.compile(r"^\s*(PART|Part)\s+[\dIVXLCDMivxlcdm]+\.?\s*$", re.MULTILINE),
+    # Bare Roman numerals on their own line: "I.", "II.", "III.", "IV." (at least "I.")
+    re.compile(r"^\s*[IVXLCDM]{1,6}\.?\s*$", re.MULTILINE),
+    # Story collections: all-caps title lines surrounded by blank lines
+    re.compile(r"\n\n\s*([A-Z][A-Z\s\-':,]{4,}[A-Z])\s*\n\n", re.MULTILINE),
+]
 
-Return ONLY valid JSON (no markdown fences). Use this exact structure:
+# Minimum chapter length in characters — skip tiny fragments
+_MIN_CHAPTER_CHARS = 500
+
+# How many chars of each chapter to send to the LLM for classification
+_CLASSIFY_EXCERPT_CHARS = 2000
+
+CHAPTER_CLASSIFY_PROMPT = """You are a literary analyst. Given the TITLE LINE and OPENING EXCERPT of one chapter from a book, return metadata about it.
+
+Return ONLY valid JSON (no markdown fences):
 {
-  "book_title": "The detected or confirmed book title",
-  "chapters": [
-    {
-      "title": "Chapter/story title",
-      "start_marker": "First unique phrase of this chapter (10-20 words, must appear exactly in the text)",
-      "end_marker": "Last unique phrase of this chapter (10-20 words, must appear exactly in the text) or __END__ if last chapter",
-      "suggested_tone": "dark, whimsical, tragic, gothic, humorous, romantic, etc.",
-      "summary": "1-2 sentence summary of what happens in this chapter"
-    }
-  ]
+  "title": "A clean chapter title (e.g. 'The Juniper Tree', not 'CHAPTER IV')",
+  "suggested_tone": "dark, whimsical, tragic, gothic, humorous, romantic, etc.",
+  "summary": "1-2 sentence summary of what this chapter/story is about based on the excerpt"
 }
 
 Guidelines:
-- Detect chapters by headings like "CHAPTER I", "Part One", "I.", story titles, or narrative breaks
-- For story collections (e.g. "Ghost Stories"), each individual story/tale is a separate chapter
-- The start_marker must be a unique phrase that appears EXACTLY in the source text — use the first sentence or first distinctive phrase of the chapter
-- The end_marker must be a unique phrase near the END of the chapter — use the last sentence or last distinctive phrase. Use __END__ only for the very last chapter
-- suggested_tone should reflect the mood of that specific chapter
-- Order chapters as they appear in the text
-- Do NOT include prefaces, introductions, appendices, or table of contents as chapters
+- If the heading is just "CHAPTER IV" with no subtitle, infer a title from the content
+- suggested_tone should reflect the mood of the excerpt
+- The summary should capture the key premise or opening situation
 """
+
+
+def _split_chapters_by_pattern(text: str) -> list[dict]:
+    """Stage 1: Use regex to find chapter boundaries in the raw text.
+
+    Returns a list of {"heading": str, "start": int, "end": int} dicts.
+    """
+    for pattern in _CHAPTER_PATTERNS:
+        matches = list(pattern.finditer(text))
+        if len(matches) >= 2:
+            chapters = []
+            for i, m in enumerate(matches):
+                start = m.start()
+                end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+                body = text[start:end].strip()
+                if len(body) < _MIN_CHAPTER_CHARS:
+                    continue
+                chapters.append({
+                    "heading": m.group(0).strip(),
+                    "start": start,
+                    "end": end,
+                })
+            if len(chapters) >= 2:
+                log.info(f"Chapter split: pattern {pattern.pattern!r} found {len(chapters)} chapters")
+                return chapters
+    return []
+
+
+def _split_chapters_by_blanks(text: str) -> list[dict]:
+    """Fallback: split on large gaps of whitespace (3+ blank lines)."""
+    parts = re.split(r"\n\s*\n\s*\n\s*\n", text)
+    chapters = []
+    offset = 0
+    for part in parts:
+        part_stripped = part.strip()
+        if len(part_stripped) >= _MIN_CHAPTER_CHARS:
+            start = text.find(part_stripped[:80], offset)
+            if start < 0:
+                start = offset
+            end = start + len(part_stripped)
+            # Use the first line as heading
+            first_line = part_stripped.split("\n", 1)[0].strip()
+            chapters.append({
+                "heading": first_line[:120],
+                "start": start,
+                "end": end,
+            })
+            offset = end
+    return chapters
+
+
+async def _classify_chapter(
+    heading: str,
+    excerpt: str,
+    book_title: str,
+    model: str,
+    base_url: str,
+) -> dict:
+    """Stage 2: Send a short excerpt to the LLM to get title, tone, and summary."""
+    user_prompt = f"Book: {book_title}\nHeading: {heading}\n\nExcerpt:\n{excerpt}"
+
+    try:
+        async with httpx.AsyncClient(timeout=config.LLM_TIMEOUT_SECONDS) as client:
+            resp = await client.post(
+                f"{base_url}/api/chat",
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": CHAPTER_CLASSIFY_PROMPT},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.3,
+                        "num_predict": 1000,
+                    },
+                },
+            )
+        if resp.status_code != 200:
+            log.warning(f"LLM classify failed ({resp.status_code}), using defaults")
+            return {}
+
+        data = resp.json()
+        content = script_gen._extract_llm_content(data)
+        if not content.strip():
+            return {}
+
+        if content.startswith("```"):
+            lines = content.split("\n")
+            lines = [l for l in lines if not l.strip().startswith("```")]
+            content = "\n".join(lines)
+
+        return json.loads(content)
+    except Exception as exc:
+        log.warning(f"LLM classify error for '{heading[:50]}': {exc}")
+        return {}
 
 
 async def analyze_chapters(
@@ -107,125 +213,67 @@ async def analyze_chapters(
     book_title: str = "",
     ollama_model: str | None = None,
 ) -> dict:
-    """Send book text to LLM and get chapter breakdown with boundaries."""
+    """Two-stage chapter analysis: regex split then LLM classify.
+
+    Stage 1 — scan the raw text for chapter headings using regex patterns.
+              No LLM call, works on any size book instantly.
+    Stage 2 — for each detected chapter, send only the heading + first ~2000
+              chars to the LLM for title/tone/summary classification.
+              Small, fast, reliable calls.
+    """
     model = ollama_model or config.OLLAMA_MODEL
     base_url = config.OLLAMA_URL
 
-    user_prompt = f"Analyze this book and identify all chapters/stories/tales.\n"
-    if book_title:
-        user_prompt += f"Book title: {book_title}\n"
-    user_prompt += f"\nFull text ({len(text)} characters):\n\n{text}"
-
     log.info(f"Analyzing chapters: title={book_title!r}, model={model}, text_len={len(text)}")
 
-    async with httpx.AsyncClient(timeout=config.CHAPTER_ANALYSIS_TIMEOUT_SECONDS) as client:
-        resp = await client.post(
-            f"{base_url}/api/chat",
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": CHAPTER_ANALYSIS_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "stream": False,
-                "options": {
-                    "temperature": 0.3,  # Low temp for structured analysis
-                    "num_predict": config.CHAPTER_ANALYSIS_MAX_TOKENS,
-                },
-            },
-        )
-        if resp.status_code != 200:
-            body = resp.text
-            log.error(f"Ollama error {resp.status_code}: {body}")
-            raise RuntimeError(f"Ollama returned {resp.status_code}: {body}")
+    # Stage 1: regex-based chapter splitting
+    raw_chapters = _split_chapters_by_pattern(text)
+    if not raw_chapters:
+        log.info("No chapter pattern matched, trying blank-line split")
+        raw_chapters = _split_chapters_by_blanks(text)
 
-    data = resp.json()
-    content = script_gen._extract_llm_content(data)
+    if not raw_chapters:
+        # Last resort: treat the entire text as one chapter
+        log.warning("Could not detect chapters, treating entire text as one chapter")
+        raw_chapters = [{"heading": book_title or "Full Text", "start": 0, "end": len(text)}]
 
-    # Strip markdown fences if present
-    if content.startswith("```"):
-        lines = content.split("\n")
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        content = "\n".join(lines)
-
-    parsed = json.loads(content)
-
-    # Extract actual chapter text using markers
+    # Stage 2: LLM classification of each chapter excerpt
     chapters = []
-    raw_chapters = parsed.get("chapters", [])
-
     for i, ch in enumerate(raw_chapters):
-        start_marker = ch.get("start_marker", "")
-        end_marker = ch.get("end_marker", "")
+        chapter_text = text[ch["start"]:ch["end"]].strip()
+        excerpt = chapter_text[:_CLASSIFY_EXCERPT_CHARS]
 
-        # Find chapter boundaries in the source text
-        chapter_text = _extract_chapter_text(text, start_marker, end_marker, raw_chapters, i)
+        meta = await _classify_chapter(
+            heading=ch["heading"],
+            excerpt=excerpt,
+            book_title=book_title,
+            model=model,
+            base_url=base_url,
+        )
 
         char_count = len(chapter_text)
-        estimated_duration = estimate_duration(char_count)
+        # Clean up heading for fallback title
+        fallback_title = ch["heading"][:80].strip()
+        if not fallback_title or fallback_title.upper() == fallback_title and len(fallback_title) < 15:
+            fallback_title = f"Chapter {i + 1}"
 
         chapters.append({
-            "title": ch.get("title", f"Chapter {i + 1}"),
+            "title": meta.get("title", fallback_title),
             "text": chapter_text,
-            "suggested_tone": ch.get("suggested_tone", "dark"),
-            "estimated_duration": estimated_duration,
+            "suggested_tone": meta.get("suggested_tone", "dark"),
+            "summary": meta.get("summary", ""),
+            "estimated_duration": estimate_duration(char_count),
             "char_count": char_count,
         })
+        log.info(f"Chapter {i + 1}/{len(raw_chapters)}: '{chapters[-1]['title']}' ({char_count} chars)")
 
-    result_title = parsed.get("book_title", book_title or "Unknown")
+    result_title = book_title or "Unknown"
     log.info(f"Chapter analysis complete: {len(chapters)} chapters detected in '{result_title}'")
 
     return {
         "book_title": result_title,
         "chapters": chapters,
     }
-
-
-def _extract_chapter_text(
-    full_text: str,
-    start_marker: str,
-    end_marker: str,
-    all_chapters: list[dict],
-    chapter_index: int,
-) -> str:
-    """Extract chapter text between start and end markers."""
-    # Find start position
-    start_pos = 0
-    if start_marker:
-        idx = full_text.find(start_marker)
-        if idx >= 0:
-            start_pos = idx
-        else:
-            # Try case-insensitive partial match
-            lower_text = full_text.lower()
-            lower_marker = start_marker.lower()
-            idx = lower_text.find(lower_marker)
-            if idx >= 0:
-                start_pos = idx
-
-    # Find end position
-    end_pos = len(full_text)
-    if end_marker and end_marker != "__END__":
-        idx = full_text.find(end_marker, start_pos)
-        if idx >= 0:
-            end_pos = idx + len(end_marker)
-        else:
-            # Try case-insensitive
-            lower_text = full_text.lower()
-            lower_marker = end_marker.lower()
-            idx = lower_text.find(lower_marker, start_pos)
-            if idx >= 0:
-                end_pos = idx + len(end_marker)
-            else:
-                # Fallback: use next chapter's start marker
-                if chapter_index + 1 < len(all_chapters):
-                    next_start = all_chapters[chapter_index + 1].get("start_marker", "")
-                    if next_start:
-                        idx = full_text.find(next_start, start_pos + 1)
-                        if idx >= 0:
-                            end_pos = idx
-
-    return full_text[start_pos:end_pos].strip()
 
 
 def estimate_duration(char_count: int) -> float:

@@ -118,10 +118,8 @@ Respond ONLY with valid JSON (no markdown fences). Use this exact structure:
     {
       "narration": "The narrator's text for this scene (2-4 paragraphs, spoken aloud)",
       "image_prompts": [
-        "First visual moment: detailed description for AI image generation with style cues",
-        "Second visual moment: a different angle, close-up, or progression of the action",
-        "Third visual moment: another key visual beat from this scene",
-        "Fourth visual moment: dramatic reaction, landscape, or detail shot"
+        "First image prompt — must depict a specific moment from the narration",
+        "Second image prompt — must depict a different specific moment from the narration"
       ],
       "mood": "one word mood: dark, tense, whimsical, melancholy, horrifying, peaceful, ominous, triumphant",
       "duration_hint": 15.0
@@ -132,10 +130,15 @@ Respond ONLY with valid JSON (no markdown fences). Use this exact structure:
 Guidelines:
 - Each scene's narration should be 60-120 words for short videos (3-5 min total), 100-200 words for longer ones
 - duration_hint is approximate seconds — will be overridden by actual voice audio length
-- Each scene needs exactly 4 image_prompts — each captures a different visual moment within the scene
-- Think of image_prompts like storyboard panels: wide establishing shot, character focus, action beat, emotional close-up
-- Every image_prompt should include style cues: "dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting"
-- Vary the composition across prompts: wide shots, close-ups, overhead views, detail shots
+- Each scene needs exactly 2 image_prompts
+- CRITICAL — image prompts must be grounded in the narration text:
+  1. Read the narration you wrote for the scene
+  2. Identify the two most visually striking moments or images described in it
+  3. Write each prompt as a literal depiction of that moment: name the specific characters, objects, setting, and action happening
+  4. Do NOT write generic prompts like "a dark forest" — instead write "the woodcutter's daughter kneeling beside the severed juniper branch, blood on her hands, moonlight through bare trees"
+- Each prompt must include: WHO (specific character/creature), WHAT (specific action), WHERE (specific setting detail), and style cues
+- Append style cues to every prompt: "dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting"
+- Vary composition between the two prompts (e.g. one wide shot, one close-up)
 - Aim for the number of scenes that fits the target length (roughly 1 scene per 30-60 seconds)
 - The narration should be vivid and engaging when read aloud — this is a voiceover script
 - Never break the fourth wall or reference that this is a video/script

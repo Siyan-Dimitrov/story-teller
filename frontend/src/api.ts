@@ -125,6 +125,7 @@ export interface AnalyzedChapter {
   title: string
   text: string
   suggested_tone: string
+  summary: string
   estimated_duration: number
   char_count: number
 }
@@ -235,6 +236,7 @@ export const api = {
 
   batchRun: (groupId: string, body: {
     steps: string[]
+    project_ids?: string[]
     voice_profile_id: string
     voice_language?: string
     voice_instruct?: string

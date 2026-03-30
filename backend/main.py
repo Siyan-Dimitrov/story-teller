@@ -197,6 +197,14 @@ async def batch_run(group_id: str, req: BatchRunRequest):
         raise HTTPException(404, f"No projects found for group {group_id}")
 
     group_projects.sort(key=lambda p: p.get("chapter_index", 0))
+
+    # If specific chapters requested, filter to those
+    if req.project_ids:
+        allowed = set(req.project_ids)
+        group_projects = [p for p in group_projects if p["project_id"] in allowed]
+        if not group_projects:
+            raise HTTPException(400, "None of the requested project_ids belong to this group")
+
     project_ids = [p["project_id"] for p in group_projects]
 
     # Check if already running

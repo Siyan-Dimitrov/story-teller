@@ -125,6 +125,8 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
   const [runConfigGroup, setRunConfigGroup] = useState<string | null>(null)
   const [runningGroup, setRunningGroup] = useState(false)
+  // Per-group chapter selection for batch run (group_id → set of project_ids)
+  const [selectedRunChapters, setSelectedRunChapters] = useState<Map<string, Set<string>>>(new Map())
 
   const refresh = () => {
     api.listProjects().then(setProjects).catch(() => {})
@@ -287,12 +289,38 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
     }
   }
 
+  const openRunConfig = (groupId: string | null, chapters?: ProjectSummary[]) => {
+    setRunConfigGroup(groupId)
+    if (groupId && chapters) {
+      // Default: select all non-completed chapters
+      const ids = new Set(chapters.filter(c => c.step !== 'assembled').map(c => c.project_id))
+      setSelectedRunChapters(prev => new Map(prev).set(groupId, ids))
+    }
+  }
+
+  const toggleRunChapter = (groupId: string, projectId: string) => {
+    setSelectedRunChapters(prev => {
+      const next = new Map(prev)
+      const set = new Set(next.get(groupId) || [])
+      if (set.has(projectId)) set.delete(projectId)
+      else set.add(projectId)
+      next.set(groupId, set)
+      return next
+    })
+  }
+
   const handleRunGroup = async (groupId: string) => {
+    const selected = selectedRunChapters.get(groupId)
+    if (!selected || selected.size === 0) {
+      alert('Select at least one chapter to run')
+      return
+    }
     setRunningGroup(true)
     try {
       const steps = ['script', 'voice', 'images', ...(batchSteps.qc ? ['qc'] : []), ...(batchSteps.animate ? ['animate'] : []), 'assemble']
       await api.batchRun(groupId, {
         steps,
+        project_ids: [...selected],
         voice_profile_id: batchVoiceProfile,
         voice_language: 'en',
         image_backend: batchImageBackend,
@@ -740,6 +768,9 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                           />
                           <div className="flex-1 min-w-0">
                             <div className="text-xs font-medium truncate">{ch.title}</div>
+                            {ch.summary && (
+                              <div className="text-[10px] text-[var(--text-secondary)] mt-0.5 line-clamp-2">{ch.summary}</div>
+                            )}
                             <div className="flex items-center gap-3 mt-0.5 text-[10px] text-[var(--text-muted)]">
                               <span>{ch.char_count.toLocaleString()} chars</span>
                               <span>~{ch.estimated_duration} min</span>
@@ -1032,9 +1063,9 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                         </div>
                       </div>
                       <div className="flex items-center gap-2 shrink-0" onClick={e => e.stopPropagation()}>
-                        {unprocessedCount > 0 && (
+                        {completedCount < chapters.length && (
                           <button
-                            onClick={() => setRunConfigGroup(showRunConfig ? null : groupId)}
+                            onClick={() => openRunConfig(showRunConfig ? null : groupId, chapters)}
                             className="text-[10px] px-2.5 py-1 rounded-full bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)] transition-colors"
                           >
                             Start Processing
@@ -1055,6 +1086,31 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                     {/* Run config panel */}
                     {showRunConfig && (
                       <div className="p-4 border-t border-[var(--border)] bg-[var(--bg-secondary)] space-y-3">
+                        {/* Chapter selection */}
+                        {(() => {
+                          const sel = selectedRunChapters.get(groupId) || new Set<string>()
+                          return (
+                            <div>
+                              <div className="flex items-center justify-between mb-1.5">
+                                <span className="text-[10px] text-[var(--text-muted)] font-medium">Chapters to process ({sel.size}/{chapters.length})</span>
+                                <div className="flex gap-2">
+                                  <button onClick={() => setSelectedRunChapters(prev => new Map(prev).set(groupId, new Set(chapters.map(c => c.project_id))))} className="text-[10px] text-[var(--accent)] hover:underline">All</button>
+                                  <button onClick={() => setSelectedRunChapters(prev => new Map(prev).set(groupId, new Set()))} className="text-[10px] text-[var(--accent)] hover:underline">None</button>
+                                </div>
+                              </div>
+                              <div className="space-y-1 max-h-48 overflow-y-auto rounded border border-[var(--border)] p-1.5 bg-[var(--bg-tertiary)]">
+                                {chapters.map(ch => (
+                                  <label key={ch.project_id} className={`flex items-center gap-2 p-1.5 rounded cursor-pointer transition-colors ${sel.has(ch.project_id) ? 'bg-[var(--accent)]/5' : ''}`}>
+                                    <input type="checkbox" checked={sel.has(ch.project_id)} onChange={() => toggleRunChapter(groupId, ch.project_id)} className="accent-[var(--accent)]" />
+                                    <span className="text-[10px] text-[var(--text-muted)]">Ch. {(ch.chapter_index ?? 0) + 1}</span>
+                                    <span className="text-xs truncate flex-1">{ch.title?.replace(/^.*?\s—\s/, '') || 'Untitled'}</span>
+                                    <span className={`text-[10px] px-1.5 py-0.5 rounded-full shrink-0 ${ch.step === 'assembled' ? 'bg-[var(--success)]/15 text-[var(--success)]' : 'bg-[var(--bg-secondary)] text-[var(--text-muted)]'}`}>{STEP_LABELS[ch.step] || ch.step}</span>
+                                  </label>
+                                ))}
+                              </div>
+                            </div>
+                          )
+                        })()}
                         <div className="flex items-center gap-4 p-2 rounded bg-[var(--bg-tertiary)]">
                           <span className="text-[10px] text-[var(--text-muted)] font-medium">Pipeline:</span>
                           <span className="text-[10px] text-[var(--text-secondary)]">Script → Voice → Images →</span>
@@ -1117,13 +1173,18 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                             <p className="text-[10px] text-[var(--text-muted)] mt-1">LoRA: {batchLoraKeys.join(', ')}</p>
                           )}
                         </div>
-                        <button
-                          onClick={() => handleRunGroup(groupId)}
-                          disabled={runningGroup || !batchVoiceProfile}
-                          className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-sm font-medium transition-colors disabled:opacity-50"
-                        >
-                          {runningGroup ? <><Loader2 size={14} className="animate-spin" /> Starting...</> : <><Play size={14} /> Run {chapters.length} Chapters</>}
-                        </button>
+                        {(() => {
+                          const selectedCount = (selectedRunChapters.get(groupId) ?? new Set()).size;
+                          return (
+                            <button
+                              onClick={() => handleRunGroup(groupId)}
+                              disabled={runningGroup || !batchVoiceProfile || selectedCount === 0}
+                              className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-sm font-medium transition-colors disabled:opacity-50"
+                            >
+                              {runningGroup ? <><Loader2 size={14} className="animate-spin" /> Starting...</> : <><Play size={14} /> Run {selectedCount} Chapter{selectedCount !== 1 ? 's' : ''}</>}
+                            </button>
+                          );
+                        })()}
                         {!batchVoiceProfile && <p className="text-[10px] text-[var(--warning)]">Select a voice profile to continue</p>}
                       </div>
                     )}

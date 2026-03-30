@@ -212,6 +212,7 @@ class AnalyzedChapter(BaseModel):
     title: str = ""
     text: str = ""
     suggested_tone: str = "dark"
+    summary: str = ""
     estimated_duration: float = 5.0
     char_count: int = 0
 
@@ -237,6 +238,7 @@ class BatchCreateResponse(BaseModel):
 
 class BatchRunRequest(BaseModel):
     steps: list[str] = Field(default_factory=lambda: ["script", "voice", "images", "assemble"])
+    project_ids: Optional[list[str]] = None  # if set, only run these chapters
     voice_profile_id: str = ""
     voice_language: str = "en"
     voice_instruct: str = DEFAULT_VOICE_INSTRUCT
