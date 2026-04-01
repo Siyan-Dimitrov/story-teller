@@ -247,6 +247,51 @@ async def batch_progress(group_id: str):
     return batch.get_batch_progress(group_id)
 
 
+@app.post("/api/batch/{group_id}/pause")
+async def batch_pause(group_id: str):
+    """Pause a running batch pipeline after the current chapter completes."""
+    ok = batch.pause_batch(group_id)
+    if not ok:
+        raise HTTPException(400, "Batch is not currently running")
+    return {"status": "pausing"}
+
+
+@app.post("/api/batch/{group_id}/resume")
+async def batch_resume(group_id: str):
+    """Resume a paused batch pipeline from where it left off."""
+    run_config = batch.resume_batch(group_id)
+    if not run_config:
+        raise HTTPException(400, "No stored config found for this batch")
+
+    project_ids = run_config["project_ids"]
+
+    def _run():
+        import asyncio as _asyncio
+        loop = _asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(
+                batch.run_batch_pipeline(
+                    group_id=group_id,
+                    project_ids=project_ids,
+                    steps=run_config["steps"],
+                    voice_profile_id=run_config["voice_profile_id"],
+                    voice_language=run_config["voice_language"],
+                    voice_instruct=run_config["voice_instruct"],
+                    image_backend=run_config["image_backend"],
+                    style_prompt=run_config["style_prompt"],
+                    lora_keys=run_config["lora_keys"],
+                )
+            )
+        except Exception as e:
+            log.error(f"Batch resume error: {e}")
+        finally:
+            loop.close()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    return {"status": "resumed"}
+
+
 # ── Voice profiles (proxy to VoiceBox) ──────────────────────
 
 @app.get("/api/profiles")
@@ -714,6 +759,7 @@ async def run_assemble(project_id: str, req: RunAssembleRequest):
                         themes=themes,
                         scene_count=len(script.get("scenes", [])),
                         ollama_model=state.get("ollama_model"),
+                        book_title=state.get("book_title", ""),
                     )
                 )
                 loop.close()

@@ -19,6 +19,8 @@ log = logging.getLogger(__name__)
 # ── In-memory batch progress tracking ────────────────────────
 
 _batch_progress: dict[str, dict] = {}
+_batch_paused: dict[str, bool] = {}
+_batch_run_config: dict[str, dict] = {}
 
 
 def get_batch_progress(group_id: str) -> dict:
@@ -71,6 +73,7 @@ def _reconstruct_progress(group_id: str) -> dict:
         "current_step": None,
         "chapters": chapters,
         "finished": True,
+        "paused": False,
     }
 
 
@@ -277,9 +280,14 @@ async def analyze_chapters(
 
 
 def estimate_duration(char_count: int) -> float:
-    """Estimate narration duration in minutes from character count."""
+    """Estimate narration duration in minutes from character count.
+
+    Calculates based on BATCH_NARRATION_RATE (characters per minute).
+    Minimum duration is 1 minute to avoid impossibly short targets.
+    No maximum cap — long chapters can have extended durations.
+    """
     minutes = char_count / config.BATCH_NARRATION_RATE
-    return max(1.0, min(15.0, round(minutes, 1)))
+    return max(1.0, round(minutes, 1))
 
 
 # ── Batch project creation ───────────────────────────────────
@@ -301,17 +309,23 @@ def create_batch_projects(
 
         chapter_title = f"{book_title} — {ch['title']}" if book_title else ch["title"]
 
+        full_text = ch.get("text", "")
         store.update_state(
             pid,
             title=chapter_title,
             book_group_id=book_group_id,
+            book_title=book_title,
             chapter_index=i,
             ollama_model=ollama_model,
             target_minutes=ch.get("estimated_duration", 5.0),
             tone=ch.get("suggested_tone", "dark"),
-            custom_prompt=ch.get("text", ""),
+            custom_prompt=full_text,
             image_backend=image_backend,
         )
+        # Also save full text to a file for reference/debugging
+        if full_text:
+            (pdir / "source_text.txt").write_text(full_text, encoding="utf-8")
+            log.info(f"Chapter {i}: saved {len(full_text):,} chars to source_text.txt")
         if voice_profile_id:
             store.update_state(pid, voice_profile_id=voice_profile_id, voice_language=voice_language)
 
@@ -366,6 +380,20 @@ async def run_batch_pipeline(
         "current_step": None,
         "chapters": chapters_progress,
         "finished": False,
+        "paused": False,
+    }
+
+    # Store run config for pause/resume
+    _batch_paused[group_id] = False
+    _batch_run_config[group_id] = {
+        "steps": steps,
+        "project_ids": project_ids,
+        "voice_profile_id": voice_profile_id,
+        "voice_language": voice_language,
+        "voice_instruct": voice_instruct,
+        "image_backend": image_backend,
+        "style_prompt": style_prompt,
+        "lora_keys": lora_keys,
     }
 
     for i, pid in enumerate(project_ids):
@@ -375,6 +403,14 @@ async def run_batch_pipeline(
         if progress["chapters"][i]["status"] == "completed":
             log.info(f"Batch {group_id}: chapter {i} ({pid}) already completed, skipping")
             continue
+
+        # Check for pause request
+        if _batch_paused.get(group_id, False):
+            progress["current_chapter"] = None
+            progress["current_step"] = None
+            progress["paused"] = True
+            log.info(f"Batch {group_id}: paused before chapter {i}")
+            return
 
         progress["current_chapter"] = i
         progress["chapters"][i]["status"] = "running"
@@ -405,6 +441,7 @@ async def run_batch_pipeline(
     progress = _batch_progress[group_id]
     progress["current_chapter"] = None
     progress["current_step"] = None
+    progress["paused"] = False
     progress["finished"] = True
     log.info(
         f"Batch {group_id} finished: {progress['completed']}/{progress['total']} completed, "
@@ -543,6 +580,7 @@ async def _run_chapter_pipeline(
                 themes=themes,
                 scene_count=len(script.get("scenes", [])),
                 ollama_model=state.get("ollama_model"),
+                book_title=state.get("book_title", ""),
             )
             out_dir = export_project(
                 project_dir=pdir,
@@ -553,3 +591,25 @@ async def _run_chapter_pipeline(
             store.update_state(project_id, output_dir=str(out_dir))
         except Exception as ex:
             log.error(f"Export failed for {project_id} (video OK): {ex}")
+
+
+# ── Pause / resume helpers ─────────────────────────────────
+
+def pause_batch(group_id: str) -> bool:
+    """Request the batch pipeline to pause after the current chapter."""
+    if group_id not in _batch_progress:
+        return False
+    if _batch_progress[group_id].get("finished", True):
+        return False
+    _batch_paused[group_id] = True
+    return True
+
+
+def resume_batch(group_id: str) -> dict | None:
+    """Clear pause flag and return stored config so the endpoint can re-launch."""
+    _batch_paused[group_id] = False
+    progress = _batch_progress.get(group_id)
+    if progress:
+        progress["paused"] = False
+        progress["finished"] = False
+    return _batch_run_config.get(group_id)

@@ -159,6 +159,7 @@ export interface BatchProgress {
   current_step?: string | null
   chapters: ChapterProgress[]
   finished: boolean
+  paused: boolean
 }
 
 // ── HTTP client ─────────────────────────────────────────────
@@ -247,6 +248,12 @@ export const api = {
 
   batchProgress: (groupId: string) =>
     request<BatchProgress>(`/api/batch/${groupId}/progress`),
+
+  batchPause: (groupId: string) =>
+    post<{ status: string }>(`/api/batch/${groupId}/pause`, {}),
+
+  batchResume: (groupId: string) =>
+    post<{ status: string }>(`/api/batch/${groupId}/resume`, {}),
 
   createProject: (body: { source_tale: string; custom_prompt?: string; target_minutes: number; ollama_model: string; tone?: string }) =>
     post<ProjectState>('/api/projects', body),

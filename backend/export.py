@@ -30,6 +30,7 @@ Synopsis: {synopsis}
 Tone: {tone}
 Themes: {themes}
 Number of scenes: {scene_count}
+Book/Series: {book_title}
 
 Respond ONLY with plain text in this exact format (no markdown fences, no JSON):
 
@@ -48,6 +49,8 @@ CATEGORY: [One of: Entertainment, Film & Animation, Education]
 
 Guidelines:
 - Title should create curiosity without clickbait
+- If the story is part of a book or series, reference the book name in the title and description
+- Include the book/series name as a tag if applicable
 - Description first 2 lines appear in search results — make them count
 - Tags should include long-tail keywords for discoverability
 - Include tags for related/similar stories viewers might search for
@@ -62,6 +65,7 @@ async def generate_youtube_metadata(
     themes: list[str],
     scene_count: int,
     ollama_model: str | None = None,
+    book_title: str = "",
 ) -> str:
     """Generate YouTube-optimized metadata using the LLM."""
     model = ollama_model or config.OLLAMA_MODEL
@@ -73,6 +77,7 @@ async def generate_youtube_metadata(
         tone=tone or "dark, gothic",
         themes=", ".join(themes) if themes else "fairy tale, dark fantasy",
         scene_count=scene_count,
+        book_title=book_title or "N/A (standalone story)",
     )
 
     log.info(f"Generating YouTube metadata for: {title}")

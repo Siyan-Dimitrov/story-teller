@@ -172,7 +172,15 @@ async def generate_script(
         parts.append(f"\nAdaptation tone: {tone}. Infuse the story with this tone throughout.\n")
 
     if custom_prompt:
-        parts.append(f"\nAdditional direction: {custom_prompt}\n")
+        # Warn if text is very long (might exceed LLM context)
+        if len(custom_prompt) > 8000:
+            log.warning(f"Custom prompt is {len(custom_prompt):,} chars - may exceed LLM context. Consider shorter chapters.")
+        # Truncate extremely long text to prevent API errors
+        max_prompt_len = 12000
+        if len(custom_prompt) > max_prompt_len:
+            parts.append(f"\nSource material (truncated from {len(custom_prompt):,} chars):\n{custom_prompt[:max_prompt_len]}...\n")
+        else:
+            parts.append(f"\nAdditional direction: {custom_prompt}\n")
 
     scene_count = max(5, int(target_minutes * 1.5))
     parts.append(f"\nTarget length: approximately {target_minutes} minutes when narrated aloud.")

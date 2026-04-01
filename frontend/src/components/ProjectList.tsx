@@ -114,6 +114,10 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
   const [showChapterPanel, setShowChapterPanel] = useState(false)
   const [bookTitle, setBookTitle] = useState('')
   const [creatingBatch, setCreatingBatch] = useState(false)
+  // Custom target minutes per chapter (index -> override value)
+  const [chapterTargetOverrides, setChapterTargetOverrides] = useState<Map<number, number>>(new Map())
+  // Custom tone per chapter (index -> override value)
+  const [chapterToneOverrides, setChapterToneOverrides] = useState<Map<number, string>>(new Map())
   const [voiceProfiles, setVoiceProfiles] = useState<VoiceProfile[]>([])
   const [batchVoiceProfile, setBatchVoiceProfile] = useState('')
   const [batchImageBackend, setBatchImageBackend] = useState('replicate')
@@ -208,6 +212,8 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
     if (!selectedOnline?.text_url) return
     setAnalyzingChapters(true)
     setAnalyzedChapters([])
+    setChapterTargetOverrides(new Map())  // Clear overrides on new analysis
+    setChapterToneOverrides(new Map())
     setShowChapterPanel(false)
     try {
       // Fetch full text first
@@ -225,11 +231,47 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
     }
   }
 
+  const updateChapterTarget = (index: number, minutes: number) => {
+    setChapterTargetOverrides(prev => {
+      const next = new Map(prev)
+      if (minutes > 0) {
+        next.set(index, minutes)
+      } else {
+        next.delete(index)  // Remove override if invalid
+      }
+      return next
+    })
+  }
+
+  const getChapterTarget = (ch: AnalyzedChapter, index: number): number => {
+    return chapterTargetOverrides.get(index) ?? ch.estimated_duration
+  }
+
+  const getChapterTone = (ch: AnalyzedChapter, index: number): string => {
+    return chapterToneOverrides.get(index) ?? ch.suggested_tone
+  }
+
+  const updateChapterTone = (index: number, tone: string) => {
+    setChapterToneOverrides(prev => {
+      const next = new Map(prev)
+      next.set(index, tone)
+      return next
+    })
+  }
+
   const handleSaveBatch = async () => {
     if (selectedChapters.size === 0) return
     setCreatingBatch(true)
     try {
-      const chaptersToCreate = analyzedChapters.filter((_, i) => selectedChapters.has(i))
+      // Apply target duration and tone overrides
+      const chaptersToCreate = analyzedChapters
+        .map((ch, i) => ({ ch, i }))
+        .filter(({ i }) => selectedChapters.has(i))
+        .map(({ ch, i }) => {
+          const target = getChapterTarget(ch, i)
+          const tone = getChapterTone(ch, i)
+          return { ...ch, estimated_duration: target, suggested_tone: tone }
+        })
       await api.batchCreate({
         book_title: bookTitle,
         chapters: chaptersToCreate,
@@ -240,6 +282,8 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
       })
       setShowChapterPanel(false)
       setAnalyzedChapters([])
+      setChapterTargetOverrides(new Map())
+      setChapterToneOverrides(new Map())
       setShowCreate(false)
       refresh()
     } catch (e) {
@@ -253,7 +297,15 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
     if (selectedChapters.size === 0) return
     setCreatingBatch(true)
     try {
-      const chaptersToCreate = analyzedChapters.filter((_, i) => selectedChapters.has(i))
+      // Apply target duration and tone overrides
+      const chaptersToCreate = analyzedChapters
+        .map((ch, i) => ({ ch, i }))
+        .filter(({ i }) => selectedChapters.has(i))
+        .map(({ ch, i }) => {
+          const target = getChapterTarget(ch, i)
+          const tone = getChapterTone(ch, i)
+          return { ...ch, estimated_duration: target, suggested_tone: tone }
+        })
       const steps = ['script', 'voice', 'images', ...(batchSteps.qc ? ['qc'] : []), ...(batchSteps.animate ? ['animate'] : []), 'assemble']
 
       const createRes = await api.batchCreate({
@@ -280,6 +332,8 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
 
       setShowChapterPanel(false)
       setAnalyzedChapters([])
+      setChapterTargetOverrides(new Map())
+      setChapterToneOverrides(new Map())
       setShowCreate(false)
       refresh()
     } catch (e) {
@@ -731,6 +785,15 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                         <h4 className="text-sm font-medium">{bookTitle}</h4>
                         <p className="text-[10px] text-[var(--text-muted)]">
                           {analyzedChapters.length} chapters detected &middot; {selectedChapters.size} selected
+                          {selectedChapters.size > 0 && (
+                            <>
+                              {' '}· {' '}
+                              <strong className="text-[var(--text-primary)]">
+                                {Array.from(selectedChapters).reduce((sum, idx) => sum + getChapterTarget(analyzedChapters[idx], idx), 0).toFixed(1)} min
+                              </strong>
+                              {' '}total
+                            </>
+                          )}
                         </p>
                       </div>
                       <div className="flex gap-2">
@@ -745,6 +808,20 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                           className="text-[10px] px-2 py-0.5 rounded bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
                         >
                           Deselect all
+                        </button>
+                        <button
+                          onClick={() => setChapterTargetOverrides(new Map())}
+                          disabled={chapterTargetOverrides.size === 0}
+                          className="text-[10px] px-2 py-0.5 rounded bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          Reset targets
+                        </button>
+                        <button
+                          onClick={() => setChapterToneOverrides(new Map())}
+                          disabled={chapterToneOverrides.size === 0}
+                          className="text-[10px] px-2 py-0.5 rounded bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          Reset tones
                         </button>
                       </div>
                     </div>
@@ -773,8 +850,33 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                             )}
                             <div className="flex items-center gap-3 mt-0.5 text-[10px] text-[var(--text-muted)]">
                               <span>{ch.char_count.toLocaleString()} chars</span>
-                              <span>~{ch.estimated_duration} min</span>
-                              <span className="capitalize">{ch.suggested_tone}</span>
+                              <span className="flex items-center gap-1">
+                                Target:
+                                <input
+                                  type="number"
+                                  min="1"
+                                  step="0.5"
+                                  value={getChapterTarget(ch, i)}
+                                  onChange={(e) => updateChapterTarget(i, parseFloat(e.target.value))}
+                                  onClick={(e) => e.stopPropagation()}  // Prevent toggling checkbox
+                                  className="w-12 bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-1 py-0 text-[10px] text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
+                                />
+                                min
+                              </span>
+                              <select
+                                value={getChapterTone(ch, i)}
+                                onChange={(e) => { e.stopPropagation(); updateChapterTone(i, e.target.value) }}
+                                onClick={(e) => e.stopPropagation()}
+                                className="bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-1 py-0 text-[10px] text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)] capitalize"
+                              >
+                                {/* If LLM suggested a tone not in presets, show it as first option */}
+                                {!ADAPTATION_TONES.some(t => t.value === ch.suggested_tone) && (
+                                  <option value={ch.suggested_tone}>{ch.suggested_tone}</option>
+                                )}
+                                {ADAPTATION_TONES.map(t => (
+                                  <option key={t.value} value={t.value}>{t.label}</option>
+                                ))}
+                              </select>
                             </div>
                           </div>
                         </label>

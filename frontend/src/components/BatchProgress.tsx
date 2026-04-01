@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { CheckCircle, XCircle, Loader2, Clock, ArrowLeft, Play } from 'lucide-react'
+import { CheckCircle, XCircle, Loader2, Clock, ArrowLeft, Play, Pause } from 'lucide-react'
 import type { BatchProgress as BatchProgressType } from '../api'
 import { api } from '../api'
 
@@ -23,6 +23,8 @@ export default function BatchProgress({
 }) {
   const [progress, setProgress] = useState<BatchProgressType | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [pausing, setPausing] = useState(false)
+  const [resuming, setResuming] = useState(false)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const fetchProgress = () => {
@@ -39,13 +41,43 @@ export default function BatchProgress({
     }
   }, [groupId])
 
-  // Stop polling when finished
+  // Stop polling when finished or paused
   useEffect(() => {
-    if (progress?.finished && timerRef.current) {
+    if ((progress?.finished || progress?.paused) && timerRef.current) {
       clearInterval(timerRef.current)
       timerRef.current = null
     }
-  }, [progress?.finished])
+  }, [progress?.finished, progress?.paused])
+
+  // Clear pausing flag once the backend confirms paused
+  useEffect(() => {
+    if (progress?.paused) setPausing(false)
+  }, [progress?.paused])
+
+  const handlePause = async () => {
+    setPausing(true)
+    try {
+      await api.batchPause(groupId)
+    } catch {
+      setPausing(false)
+    }
+  }
+
+  const handleResume = async () => {
+    setResuming(true)
+    try {
+      await api.batchResume(groupId)
+      // Restart polling
+      fetchProgress()
+      if (!timerRef.current) {
+        timerRef.current = setInterval(fetchProgress, 3000)
+      }
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setResuming(false)
+    }
+  }
 
   if (error) {
     return (
@@ -92,11 +124,38 @@ export default function BatchProgress({
             }`}>
               {progress.failed === 0 ? 'All Complete' : `Done with ${progress.failed} failures`}
             </span>
+          ) : progress.paused ? (
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium px-3 py-1 rounded-full bg-[var(--warning)]/15 text-[var(--warning)]">
+                Paused
+              </span>
+              <button
+                onClick={handleResume}
+                disabled={resuming}
+                className="flex items-center gap-1.5 text-sm font-medium px-3 py-1 rounded-full bg-[var(--accent)]/15 text-[var(--accent)] hover:bg-[var(--accent)]/25 transition-colors disabled:opacity-50"
+              >
+                {resuming ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
+                {resuming ? 'Resuming...' : 'Resume'}
+              </button>
+            </div>
           ) : (
-            <span className="flex items-center gap-2 text-sm text-[var(--accent)]">
-              <Loader2 size={14} className="animate-spin" />
-              Processing chapter {(progress.current_chapter ?? 0) + 1} — {STEP_LABELS[progress.current_step ?? ''] || progress.current_step}
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="flex items-center gap-2 text-sm text-[var(--accent)]">
+                <Loader2 size={14} className="animate-spin" />
+                {pausing
+                  ? 'Pausing after current chapter...'
+                  : `Processing chapter ${(progress.current_chapter ?? 0) + 1} — ${STEP_LABELS[progress.current_step ?? ''] || progress.current_step}`
+                }
+              </span>
+              <button
+                onClick={handlePause}
+                disabled={pausing}
+                className="flex items-center gap-1.5 text-sm font-medium px-3 py-1 rounded-full bg-[var(--warning)]/15 text-[var(--warning)] hover:bg-[var(--warning)]/25 transition-colors disabled:opacity-50"
+              >
+                <Pause size={14} />
+                {pausing ? 'Pausing...' : 'Pause'}
+              </button>
+            </div>
           )}
         </div>
 

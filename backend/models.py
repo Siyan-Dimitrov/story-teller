@@ -59,6 +59,7 @@ class ProjectState(BaseModel):
     # Batch chapter fields
     book_group_id: Optional[str] = None
     chapter_index: Optional[int] = None
+    book_title: Optional[str] = None
 
 
 # ── API requests ─────────────────────────────────────────────
@@ -266,3 +267,4 @@ class BatchProgress(BaseModel):
     current_step: Optional[str] = None
     chapters: list[ChapterProgress] = Field(default_factory=list)
     finished: bool = False
+    paused: bool = False
