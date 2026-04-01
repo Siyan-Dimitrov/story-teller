@@ -37,6 +37,7 @@ from .models import (
     AnalyzeChaptersRequest,
     BatchCreateRequest,
     BatchRunRequest,
+    UpdateSettingsRequest,
 )
 from .image_qc import run_qc_for_project, regenerate_and_evaluate, get_qc_progress, evaluate_single_image
 
@@ -337,6 +338,8 @@ async def list_projects():
             created_at=p.get("created_at", ""),
             book_group_id=p.get("book_group_id"),
             chapter_index=p.get("chapter_index"),
+            tone=p.get("tone", ""),
+            target_minutes=p.get("target_minutes", 5.0),
         )
         for p in projects
     ]
@@ -381,6 +384,23 @@ async def delete_project(project_id: str):
         raise HTTPException(404, "Project not found")
     shutil.rmtree(pdir)
     return {"deleted": project_id}
+
+
+@app.put("/api/projects/{project_id}/settings")
+async def update_settings(project_id: str, req: UpdateSettingsRequest):
+    try:
+        store.load_state(project_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Project not found")
+    updates = {}
+    if req.tone is not None:
+        updates["tone"] = req.tone
+    if req.target_minutes is not None:
+        updates["target_minutes"] = req.target_minutes
+    if not updates:
+        raise HTTPException(400, "No settings to update")
+    state = store.update_state(project_id, **updates)
+    return state
 
 
 # ── Stage 1: Script generation ───────────────────────────────

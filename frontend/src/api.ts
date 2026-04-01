@@ -50,6 +50,7 @@ export interface ProjectState {
   ollama_model: string
   image_backend: string
   target_minutes: number
+  tone?: string
   created_at: string
   script?: Script
   output_dir?: string | null
@@ -63,6 +64,8 @@ export interface ProjectSummary {
   created_at: string
   book_group_id?: string | null
   chapter_index?: number | null
+  tone: string
+  target_minutes: number
 }
 
 export interface Tale {
@@ -259,6 +262,8 @@ export const api = {
     post<ProjectState>('/api/projects', body),
   getProject: (id: string) => request<ProjectState>(`/api/projects/${id}`),
   deleteProject: (id: string) => del<{ deleted: string }>(`/api/projects/${id}`),
+  updateSettings: (id: string, body: { tone?: string; target_minutes?: number }) =>
+    put<Record<string, unknown>>(`/api/projects/${id}/settings`, body),
 
   runScript: (id: string, body: { ollama_model?: string; target_minutes?: number; custom_prompt?: string }) =>
     post<Script>(`/api/projects/${id}/script`, body),

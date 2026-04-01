@@ -1200,14 +1200,93 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                                   <button onClick={() => setSelectedRunChapters(prev => new Map(prev).set(groupId, new Set()))} className="text-[10px] text-[var(--accent)] hover:underline">None</button>
                                 </div>
                               </div>
-                              <div className="space-y-1 max-h-48 overflow-y-auto rounded border border-[var(--border)] p-1.5 bg-[var(--bg-tertiary)]">
+                              {/* Bulk actions for selected chapters */}
+                              <div className="flex items-center gap-2 mb-1.5 p-1.5 rounded bg-[var(--bg-tertiary)] border border-[var(--border)]">
+                                <span className="text-[10px] text-[var(--text-muted)] font-medium shrink-0">Bulk set:</span>
+                                <select
+                                  defaultValue=""
+                                  onChange={(e) => {
+                                    const tone = e.target.value
+                                    if (!tone) return
+                                    const ids = sel.size > 0 ? sel : new Set(chapters.map(c => c.project_id))
+                                    setProjects(prev => prev.map(p => ids.has(p.project_id) ? { ...p, tone } : p))
+                                    ids.forEach(pid => api.updateSettings(pid, { tone }).catch(() => {}))
+                                    e.target.value = ''
+                                  }}
+                                  className="bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-1 py-0.5 text-[10px] text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)] capitalize"
+                                  title="Set tone for all selected chapters"
+                                >
+                                  <option value="">All tones...</option>
+                                  {ADAPTATION_TONES.map(t => (
+                                    <option key={t.value} value={t.value}>{t.label}</option>
+                                  ))}
+                                </select>
+                                <span className="text-[10px] text-[var(--text-muted)] shrink-0">target:</span>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  step="0.5"
+                                  placeholder="min"
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                      const val = parseFloat((e.target as HTMLInputElement).value)
+                                      if (val > 0) {
+                                        const ids = sel.size > 0 ? sel : new Set(chapters.map(c => c.project_id))
+                                        setProjects(prev => prev.map(p => ids.has(p.project_id) ? { ...p, target_minutes: val } : p))
+                                        ids.forEach(pid => api.updateSettings(pid, { target_minutes: val }).catch(() => {}))
+                                        ;(e.target as HTMLInputElement).value = ''
+                                      }
+                                    }
+                                  }}
+                                  className="w-14 bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-1 py-0.5 text-[10px] text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)] placeholder-[var(--text-muted)]"
+                                  title="Set target minutes for all selected chapters (press Enter)"
+                                />
+                                <span className="text-[10px] text-[var(--text-muted)] shrink-0">min ↵</span>
+                              </div>
+                              <div className="space-y-1 max-h-64 overflow-y-auto rounded border border-[var(--border)] p-1.5 bg-[var(--bg-tertiary)]">
                                 {chapters.map(ch => (
-                                  <label key={ch.project_id} className={`flex items-center gap-2 p-1.5 rounded cursor-pointer transition-colors ${sel.has(ch.project_id) ? 'bg-[var(--accent)]/5' : ''}`}>
-                                    <input type="checkbox" checked={sel.has(ch.project_id)} onChange={() => toggleRunChapter(groupId, ch.project_id)} className="accent-[var(--accent)]" />
-                                    <span className="text-[10px] text-[var(--text-muted)]">Ch. {(ch.chapter_index ?? 0) + 1}</span>
-                                    <span className="text-xs truncate flex-1">{ch.title?.replace(/^.*?\s—\s/, '') || 'Untitled'}</span>
+                                  <div key={ch.project_id} className={`flex items-center gap-2 p-1.5 rounded transition-colors ${sel.has(ch.project_id) ? 'bg-[var(--accent)]/5' : ''}`}>
+                                    <input type="checkbox" checked={sel.has(ch.project_id)} onChange={() => toggleRunChapter(groupId, ch.project_id)} className="accent-[var(--accent)] shrink-0" />
+                                    <span className="text-[10px] text-[var(--text-muted)] shrink-0">Ch. {(ch.chapter_index ?? 0) + 1}</span>
+                                    <span className="text-xs truncate flex-1 min-w-0">{ch.title?.replace(/^.*?\s—\s/, '') || 'Untitled'}</span>
+                                    <input
+                                      type="number"
+                                      min="1"
+                                      step="0.5"
+                                      value={ch.target_minutes}
+                                      onChange={(e) => {
+                                        const val = parseFloat(e.target.value)
+                                        if (val > 0) {
+                                          setProjects(prev => prev.map(p => p.project_id === ch.project_id ? { ...p, target_minutes: val } : p))
+                                        }
+                                      }}
+                                      onBlur={(e) => {
+                                        const val = parseFloat(e.target.value)
+                                        if (val > 0) api.updateSettings(ch.project_id, { target_minutes: val }).catch(() => {})
+                                      }}
+                                      className="w-12 bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-1 py-0 text-[10px] text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)] shrink-0"
+                                      title="Target minutes"
+                                    />
+                                    <span className="text-[10px] text-[var(--text-muted)] shrink-0">min</span>
+                                    <select
+                                      value={ch.tone}
+                                      onChange={(e) => {
+                                        const tone = e.target.value
+                                        setProjects(prev => prev.map(p => p.project_id === ch.project_id ? { ...p, tone } : p))
+                                        api.updateSettings(ch.project_id, { tone }).catch(() => {})
+                                      }}
+                                      className="bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-1 py-0 text-[10px] text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)] shrink-0 capitalize max-w-[110px]"
+                                      title="Tone"
+                                    >
+                                      {ch.tone && !ADAPTATION_TONES.some(t => t.value === ch.tone) && (
+                                        <option value={ch.tone}>{ch.tone}</option>
+                                      )}
+                                      {ADAPTATION_TONES.map(t => (
+                                        <option key={t.value} value={t.value}>{t.label}</option>
+                                      ))}
+                                    </select>
                                     <span className={`text-[10px] px-1.5 py-0.5 rounded-full shrink-0 ${ch.step === 'assembled' ? 'bg-[var(--success)]/15 text-[var(--success)]' : 'bg-[var(--bg-secondary)] text-[var(--text-muted)]'}`}>{STEP_LABELS[ch.step] || ch.step}</span>
-                                  </label>
+                                  </div>
                                 ))}
                               </div>
                             </div>

@@ -4,6 +4,18 @@ import {
   Check, Loader2, AlertCircle,
 } from 'lucide-react'
 import type { ProjectState } from '../api'
+import { api } from '../api'
+
+const ADAPTATION_TONES = [
+  { value: 'dark', label: 'Dark & Gothic' },
+  { value: 'humorous', label: 'Dark Humor' },
+  { value: 'psychological horror', label: 'Psychological Horror' },
+  { value: 'gothic noir', label: 'Gothic Noir' },
+  { value: 'whimsical dark', label: 'Whimsical Dark' },
+  { value: 'tragic', label: 'Tragic' },
+  { value: 'satirical', label: 'Satirical' },
+  { value: 'romantic gothic', label: 'Romantic Gothic' },
+]
 import ScriptPanel from './ScriptPanel'
 import VoicePanel from './VoicePanel'
 import ImagePanel from './ImagePanel'
@@ -57,15 +69,56 @@ function stepActive(projectStep: string, tabIndex: number): boolean {
 
 export default function StoryWizard({ project, onRefresh }: Props) {
   const [activeTab, setActiveTab] = useState<StepKey>('script')
+  const canEditSettings = project.step === 'created'
+
+  const updateSetting = (updates: { tone?: string; target_minutes?: number }) => {
+    api.updateSettings(project.project_id, updates).then(() => onRefresh()).catch(() => {})
+  }
 
   return (
     <div>
       {/* Title */}
       <div className="mb-4">
         <h2 className="text-xl font-semibold">{project.title || 'Untitled Story'}</h2>
-        <p className="text-sm text-[var(--text-muted)]">
-          {project.source_tale || 'Custom story'} &middot; {project.target_minutes} min target
-        </p>
+        <div className="flex items-center gap-3 text-sm text-[var(--text-muted)] mt-1">
+          <span>{project.source_tale || 'Custom story'}</span>
+          <span>&middot;</span>
+          {canEditSettings ? (
+            <>
+              <span className="flex items-center gap-1">
+                <input
+                  type="number"
+                  min="1"
+                  step="0.5"
+                  value={project.target_minutes}
+                  onChange={() => {}}
+                  onBlur={(e) => {
+                    const val = parseFloat(e.target.value)
+                    if (val > 0 && val !== project.target_minutes) updateSetting({ target_minutes: val })
+                  }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+                  className="w-14 bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-1.5 py-0.5 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
+                />
+                min target
+              </span>
+              <span>&middot;</span>
+              <select
+                value={project.tone || 'dark'}
+                onChange={(e) => updateSetting({ tone: e.target.value })}
+                className="bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-1.5 py-0.5 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)] capitalize"
+              >
+                {project.tone && !ADAPTATION_TONES.some(t => t.value === project.tone) && (
+                  <option value={project.tone}>{project.tone}</option>
+                )}
+                {ADAPTATION_TONES.map(t => (
+                  <option key={t.value} value={t.value}>{t.label}</option>
+                ))}
+              </select>
+            </>
+          ) : (
+            <span>{project.target_minutes} min target{project.tone ? ` · ${project.tone}` : ''}</span>
+          )}
+        </div>
       </div>
 
       {/* Error banner */}

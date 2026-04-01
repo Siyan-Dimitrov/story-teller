@@ -193,6 +193,13 @@ class ProjectSummary(BaseModel):
     created_at: str
     book_group_id: Optional[str] = None
     chapter_index: Optional[int] = None
+    tone: str = ""
+    target_minutes: float = 5.0
+
+
+class UpdateSettingsRequest(BaseModel):
+    tone: Optional[str] = None
+    target_minutes: Optional[float] = None
 
 
 class VoiceProfile(BaseModel):
