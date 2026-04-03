@@ -1228,8 +1228,8 @@ async def _find_split_points_with_llm(
 ) -> list[dict]:
     """Use LLM to find logical split points in the text."""
     avg_pct = 100 / num_parts
-    min_pct = max(20, int(avg_pct * 0.6))
-    max_pct = min(80, int(avg_pct * 1.4))
+    min_pct = max(14, int(avg_pct * 0.7))
+    max_pct = min(86, int(avg_pct * 1.3))
     prompt = INTELLIGENT_SPLIT_PROMPT.format(num_parts=num_parts, min_pct=min_pct, max_pct=max_pct)
 
     # Send as much text as possible so the LLM can find balanced split points
@@ -1416,13 +1416,13 @@ def _split_text_intelligently(text: str, split_points: list[dict]) -> list[tuple
     """Split text based on LLM-provided split points.
 
     Returns list of (title, summary, part_text) tuples.
-    Enforces balance: no part can be smaller than 25% of the average part size.
+    Enforces balance: no part can be smaller than 70% of the average part size.
     """
     num_parts = len(split_points)
     text_len = len(text)
     ideal_part_size = text_len // num_parts
-    # Minimum part size: 25% of ideal (prevents 15%/85% splits)
-    min_part_size = int(ideal_part_size * 0.25)
+    # Minimum part size: 70% of ideal (e.g. 2 parts → 35%-65% range)
+    min_part_size = int(ideal_part_size * 0.70)
 
     parts = []
     start_pos = 0
