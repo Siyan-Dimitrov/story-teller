@@ -83,7 +83,7 @@ async def search_stories(
                     {"role": "user", "content": user_prompt},
                 ],
                 "stream": False,
-                "options": {"temperature": 0.7, "num_predict": 4000},
+                "options": {"temperature": 0.7, "num_predict": 8000},
             },
         )
         if resp.status_code != 200:

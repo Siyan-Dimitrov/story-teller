@@ -91,7 +91,7 @@ async def generate_youtube_metadata(
                     {"role": "user", "content": prompt},
                 ],
                 "stream": False,
-                "options": {"temperature": 0.7, "num_predict": 3000},
+                "options": {"temperature": 0.7, "num_predict": 8000},
             },
         )
         if resp.status_code != 200:

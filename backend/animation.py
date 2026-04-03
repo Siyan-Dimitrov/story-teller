@@ -155,7 +155,6 @@ async def _classify_batch(
                     ],
                     "stream": False,
                     "options": {"temperature": 0.3, "num_predict": 8000},
-                    "think": False,  # Disable thinking mode — we need raw JSON output
                 },
             )
             resp.raise_for_status()

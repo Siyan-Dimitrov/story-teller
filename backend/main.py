@@ -1,7 +1,9 @@
 """Story Teller — FastAPI backend."""
 
 import asyncio
+import json
 import logging
+import re
 import shutil
 import sys
 import threading
@@ -38,6 +40,11 @@ from .models import (
     BatchCreateRequest,
     BatchRunRequest,
     UpdateSettingsRequest,
+    BulkDeleteRequest,
+    SplitProjectRequest,
+    IntelligentSplitRequest,
+    IntelligentSplitResponse,
+    TextPart,
 )
 from .image_qc import run_qc_for_project, regenerate_and_evaluate, get_qc_progress, evaluate_single_image
 
@@ -340,9 +347,38 @@ async def list_projects():
             chapter_index=p.get("chapter_index"),
             tone=p.get("tone", ""),
             target_minutes=p.get("target_minutes", 5.0),
+            suggested_length=p.get("suggested_length"),
+            **get_text_stats(p),
         )
         for p in projects
     ]
+
+
+def get_text_stats(project: dict) -> dict:
+    """Get character count and estimated duration from project source text."""
+    # Try custom_prompt first, then source_tale lookup
+    text = project.get("custom_prompt", "")
+    if not text:
+        source = project.get("source_tale", "")
+        if source:
+            from .grimm_tales import get_tale
+            tale = get_tale(source)
+            text = tale.get("full_text", "") if tale else ""
+    # Also check for batch chapter source_text.txt
+    if not text:
+        try:
+            pdir = store.project_dir(project["project_id"])
+            source_file = pdir / "source_text.txt"
+            if source_file.exists():
+                text = source_file.read_text(encoding="utf-8")
+        except Exception:
+            pass
+    char_count = len(text)
+    minutes = char_count / config.BATCH_NARRATION_RATE
+    return {
+        "char_count": char_count,
+        "estimated_duration": max(1.0, round(minutes, 1)),
+    }
 
 
 @app.post("/api/projects")
@@ -374,6 +410,10 @@ async def get_project(project_id: str):
     script = store.load_json(project_id, "script.json")
     if script:
         state["script"] = script
+    # Add calculated text stats
+    stats = get_text_stats(state)
+    state["char_count"] = stats["char_count"]
+    state["estimated_duration"] = stats["estimated_duration"]
     return state
 
 
@@ -384,6 +424,37 @@ async def delete_project(project_id: str):
         raise HTTPException(404, "Project not found")
     shutil.rmtree(pdir)
     return {"deleted": project_id}
+
+
+@app.post("/api/projects/bulk-delete")
+async def bulk_delete_projects(req: BulkDeleteRequest):
+    """Delete multiple projects at once."""
+    deleted = []
+    not_found = []
+    for pid in req.project_ids:
+        pdir = store.project_dir(pid)
+        if pdir.exists():
+            shutil.rmtree(pdir)
+            deleted.append(pid)
+        else:
+            not_found.append(pid)
+    return {"deleted": deleted, "not_found": not_found}
+
+
+@app.delete("/api/book-group/{group_id}")
+async def delete_book_group(group_id: str):
+    """Delete all projects belonging to a book group."""
+    all_projects = store.list_projects()
+    group_projects = [p for p in all_projects if p.get("book_group_id") == group_id]
+    if not group_projects:
+        raise HTTPException(404, "No projects found for this book group")
+    deleted = []
+    for p in group_projects:
+        pdir = store.project_dir(p["project_id"])
+        if pdir.exists():
+            shutil.rmtree(pdir)
+            deleted.append(p["project_id"])
+    return {"deleted": deleted, "group_id": group_id}
 
 
 @app.put("/api/projects/{project_id}/settings")
@@ -397,6 +468,8 @@ async def update_settings(project_id: str, req: UpdateSettingsRequest):
         updates["tone"] = req.tone
     if req.target_minutes is not None:
         updates["target_minutes"] = req.target_minutes
+    if req.suggested_length is not None:
+        updates["suggested_length"] = req.suggested_length
     if not updates:
         raise HTTPException(400, "No settings to update")
     state = store.update_state(project_id, **updates)
@@ -852,6 +925,667 @@ async def get_artifact(project_id: str, filepath: str):
         ".mp4": "video/mp4",
     }
     return FileResponse(str(target), media_type=media_types.get(suffix, "application/octet-stream"))
+
+
+# ── Project source text ──────────────────────────────────────
+
+@app.get("/api/projects/{project_id}/source-text")
+async def get_project_source_text(project_id: str):
+    """Get the saved source text for a project."""
+    try:
+        state = store.load_state(project_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Project not found")
+
+    pdir = store.project_dir(project_id)
+    source_file = pdir / "source_text.txt"
+
+    if not source_file.exists():
+        # Return empty response if no source text saved
+        return {"text": "", "char_count": 0, "project_id": project_id}
+
+    text = source_file.read_text(encoding="utf-8")
+    return {
+        "text": text,
+        "char_count": len(text),
+        "project_id": project_id,
+        "title": state.get("title", ""),
+        "book_group_id": state.get("book_group_id"),
+        "chapter_index": state.get("chapter_index"),
+    }
+
+
+@app.post("/api/projects/{project_id}/split")
+async def split_project(project_id: str, req: SplitProjectRequest):
+    """Split a project's source text into multiple parts, creating new projects.
+
+    The original project is deleted after successful split.
+    Returns the new project IDs created.
+    """
+    if req.parts < 2:
+        raise HTTPException(400, "Parts must be at least 2")
+
+    try:
+        state = store.load_state(project_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Project not found")
+
+    pdir = store.project_dir(project_id)
+    source_file = pdir / "source_text.txt"
+
+    if not source_file.exists():
+        raise HTTPException(400, "Project has no source text to split")
+
+    full_text = source_file.read_text(encoding="utf-8")
+    if not full_text.strip():
+        raise HTTPException(400, "Source text is empty")
+
+    # Get project metadata for the new projects
+    book_group_id = state.get("book_group_id")
+    book_title = state.get("book_title", "")
+    chapter_index = state.get("chapter_index", 0)
+    base_title = state.get("title", "Untitled")
+    ollama_model = state.get("ollama_model", config.OLLAMA_MODEL)
+    image_backend = state.get("image_backend", "comfyui")
+    tone = state.get("tone", "")
+    voice_profile_id = state.get("voice_profile_id")
+    voice_language = state.get("voice_language", "en")
+    target_minutes = state.get("target_minutes", 5.0)
+
+    # Calculate duration per part
+    total_duration = target_minutes
+    part_duration = max(1.0, round(total_duration / req.parts, 1))
+
+    # Split the text
+    part_texts = batch._split_text_into_parts(full_text, req.parts)
+
+    if len(part_texts) < req.parts:
+        raise HTTPException(400, f"Could not split text into {req.parts} meaningful parts")
+
+    # Create new projects for each part
+    new_project_ids = []
+    for part_idx, part_text in enumerate(part_texts):
+        new_pid, new_pdir = store.create_project()
+
+        if req.parts > 1:
+            part_title = f"{base_title} — Part {part_idx + 1}/{req.parts}"
+        else:
+            part_title = base_title
+
+        store.update_state(
+            new_pid,
+            title=part_title,
+            book_group_id=book_group_id,
+            book_title=book_title,
+            chapter_index=chapter_index + part_idx,
+            ollama_model=ollama_model,
+            target_minutes=part_duration,
+            tone=tone,
+            custom_prompt=part_text,
+            image_backend=image_backend,
+            voice_profile_id=voice_profile_id,
+            voice_language=voice_language,
+        )
+
+        if part_text:
+            (new_pdir / "source_text.txt").write_text(part_text, encoding="utf-8")
+
+        new_project_ids.append(new_pid)
+        log.info(f"Created split project {new_pid}: '{part_title}' from {project_id}")
+
+    # Delete the original project after successful split
+    shutil.rmtree(pdir)
+    log.info(f"Deleted original project {project_id} after splitting into {len(new_project_ids)} parts")
+
+    return {
+        "original_project_id": project_id,
+        "new_project_ids": new_project_ids,
+        "parts": len(new_project_ids),
+    }
+
+
+# ── Helper for regular split (used as fallback) ─────────────────
+
+async def _do_regular_split(project_id: str, full_text: str, state: dict, num_parts: int) -> dict:
+    """Perform a regular character-based split. Used as fallback for intelligent split."""
+    book_group_id = state.get("book_group_id")
+    book_title = state.get("book_title", "")
+    chapter_index = state.get("chapter_index", 0)
+    base_title = state.get("title", "Untitled")
+    ollama_model = state.get("ollama_model", config.OLLAMA_MODEL)
+    image_backend = state.get("image_backend", "comfyui")
+    tone = state.get("tone", "")
+    voice_profile_id = state.get("voice_profile_id")
+    voice_language = state.get("voice_language", "en")
+    target_minutes = state.get("target_minutes", 5.0)
+
+    # Calculate duration per part
+    part_duration = max(1.0, round(target_minutes / num_parts, 1))
+
+    # Split the text
+    part_texts = batch._split_text_into_parts(full_text, num_parts)
+
+    if len(part_texts) < num_parts:
+        raise HTTPException(400, f"Could not split text into {num_parts} meaningful parts")
+
+    # Create new projects for each part
+    pdir = store.project_dir(project_id)
+    new_project_ids = []
+    split_details = []
+
+    for part_idx, part_text in enumerate(part_texts):
+        new_pid, new_pdir = store.create_project()
+        part_title = f"Part {part_idx + 1}"
+
+        if num_parts > 1:
+            full_title = f"{base_title} — Part {part_idx + 1}/{num_parts}"
+        else:
+            full_title = base_title
+
+        store.update_state(
+            new_pid,
+            title=full_title,
+            book_group_id=book_group_id,
+            book_title=book_title,
+            chapter_index=chapter_index + part_idx,
+            ollama_model=ollama_model,
+            target_minutes=part_duration,
+            tone=tone,
+            custom_prompt=part_text,
+            image_backend=image_backend,
+            voice_profile_id=voice_profile_id,
+            voice_language=voice_language,
+        )
+
+        if part_text:
+            (new_pdir / "source_text.txt").write_text(part_text, encoding="utf-8")
+
+        new_project_ids.append(new_pid)
+        split_details.append({
+            "title": part_title,
+            "summary": f"Part {part_idx + 1} of {num_parts}",
+            "char_count": len(part_text),
+        })
+        log.info(f"Created regular split project {new_pid}: '{full_title}' from {project_id}")
+
+    # Delete the original project after successful split
+    shutil.rmtree(pdir)
+    log.info(f"Deleted original project {project_id} after regular split into {len(new_project_ids)} parts")
+
+    return {
+        "original_project_id": project_id,
+        "new_project_ids": new_project_ids,
+        "parts": len(new_project_ids),
+        "split_details": split_details,
+        "fallback": True,
+        "message": "Intelligent split failed, used regular split instead",
+    }
+
+
+# ── Intelligent LLM-based splitting ───────────────────────────
+
+INTELLIGENT_SPLIT_PROMPT = """You are a literary editor. Your task: split the given text into {num_parts} logical narrative parts.
+
+EXTREMELY IMPORTANT: Your ENTIRE response must be ONLY a valid JSON object. NO explanations before. NO explanations after. NO markdown code fences with ```. Just raw JSON starting with {{ and ending with }}.
+
+JSON format required:
+- parts: array of {num_parts} objects, each with:
+  - part_number: integer (1, 2, 3...)
+  - title: string describing this section
+  - summary: brief description of what happens
+  - split_after_text: the EXACT last 50-100 characters from this part (copy verbatim from source text)
+  - char_count: approximate character count
+- reasoning: brief explanation of why you chose these split points
+
+Rules:
+1. Narrative coherence over equal sizing
+2. Find breaks at scene endings, time shifts, or story pauses
+3. split_after_text MUST be copied exactly from the source text
+4. Output ONLY JSON - nothing else
+"""
+
+
+def _extract_json_from_llm_response(content: str) -> dict | None:
+    """Extract JSON from LLM response, handling markdown fences and other common formats."""
+    if not content or not content.strip():
+        return None
+
+    content = content.strip()
+
+    # Try to find JSON between markdown fences with json tag
+    json_match = re.search(r'```json\s*\n?(.*?)\n?```', content, re.DOTALL)
+    if json_match:
+        try:
+            result = json.loads(json_match.group(1).strip())
+            log.info(f"Extracted JSON from ```json fence")
+            return result
+        except json.JSONDecodeError as e:
+            log.warning(f"Failed to parse JSON from ```json fence: {e}")
+
+    # Try to find JSON between plain markdown fences
+    json_match = re.search(r'```\s*\n?(.*?)\n?```', content, re.DOTALL)
+    if json_match:
+        try:
+            result = json.loads(json_match.group(1).strip())
+            log.info(f"Extracted JSON from ``` fence")
+            return result
+        except json.JSONDecodeError as e:
+            log.warning(f"Failed to parse JSON from ``` fence: {e}")
+
+    # Try to find JSON object with "parts" key - look for properly balanced braces
+    # Try LAST match first (reasoning models output JSON at the end)
+    all_matches = list(re.finditer(r'\{[\s\S]*?"parts"[\s\S]*?\}', content))
+    for match in reversed(all_matches):
+        try:
+            json_str = match.group(0)
+            # Try to find the outermost balanced braces
+            brace_count = 0
+            start = match.start()
+            for i, char in enumerate(content[start:]):
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        json_str = content[start:start+i+1]
+                        break
+            result = json.loads(json_str)
+            log.info(f"Extracted JSON with 'parts' key (from {len(all_matches)} matches)")
+            return result
+        except json.JSONDecodeError:
+            continue
+
+    # Try to find any JSON object that looks like our response structure
+    # Last resort: find content between first { and last }
+    try:
+        start = content.find('{')
+        end = content.rfind('}')
+        if start != -1 and end != -1 and end > start:
+            json_str = content[start:end+1]
+            result = json.loads(json_str)
+            log.info(f"Extracted JSON from first '{' to last '}'")
+            return result
+    except json.JSONDecodeError:
+        pass
+
+    # Try the whole content as JSON
+    try:
+        result = json.loads(content)
+        log.info(f"Parsed entire content as JSON")
+        return result
+    except json.JSONDecodeError:
+        pass
+
+    log.warning(f"All JSON extraction methods failed")
+    return None
+
+
+async def _find_split_points_with_llm(
+    text: str,
+    num_parts: int,
+    model: str,
+    base_url: str,
+) -> list[dict]:
+    """Use LLM to find logical split points in the text."""
+    prompt = INTELLIGENT_SPLIT_PROMPT.format(num_parts=num_parts)
+
+    # Send as much text as possible so the LLM can find balanced split points
+    # (sending too little causes back-loaded splits since the LLM only sees the beginning)
+    max_text = 60000
+    text_for_llm = text[:max_text] if len(text) > max_text else text
+
+    user_message = f"Please split this text into exactly {num_parts} logical parts.\n\nText ({len(text)} chars total, {'showing first ' + str(max_text) + ' chars' if len(text) > max_text else 'full text'}):\n\n{text_for_llm}"
+
+    log.info(f"Calling LLM for intelligent split: model={model}, num_parts={num_parts}, text_len={len(text_for_llm)}")
+
+    try:
+        # First test if Ollama is reachable
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                health = await client.get(f"{base_url}/api/tags")
+                log.info(f"Ollama health check: {health.status_code}")
+                if health.status_code == 200:
+                    models_data = health.json()
+                    available_models = [m.get('name', m.get('model', '')) for m in models_data.get('models', [])]
+                    log.info(f"Available Ollama models: {available_models}")
+                    if model not in available_models and not any(m.startswith(model.split(':')[0]) for m in available_models):
+                        log.error(f"Model '{model}' not found in available models: {available_models}")
+            except Exception as e:
+                log.error(f"Cannot connect to Ollama at {base_url}: {e}")
+                return []
+
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            resp = await client.post(
+                f"{base_url}/api/chat",
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": user_message},
+                    ],
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.3,
+                        "num_predict": 8000,
+                    },
+                },
+            )
+
+        log.info(f"LLM response status: {resp.status_code}")
+
+        if resp.status_code != 200:
+            log.error(f"LLM split failed (HTTP {resp.status_code}), response: {resp.text[:500]}")
+            try:
+                error_data = resp.json()
+                log.error(f"Ollama error details: {error_data}")
+            except:
+                pass
+            return []
+
+        data = resp.json()
+        log.info(f"LLM response data keys: {list(data.keys()) if isinstance(data, dict) else 'not a dict'}")
+
+        # Try to get content directly from message.content (ollama standard)
+        msg = data.get("message", {})
+        content = msg.get("content", "") or ""
+
+        # Also check for thinking field (some models use this)
+        if not content:
+            content = msg.get("thinking", "") or ""
+
+        # Fallback to script_gen extractor
+        if not content:
+            content = script_gen._extract_llm_content(data)
+
+        log.info(f"LLM content length: {len(content) if content else 0}")
+
+        if not content or not content.strip():
+            log.warning("LLM split returned empty content")
+            return []
+
+        # Log first 1000 chars of response for debugging
+        log.info(f"LLM raw response preview: {content[:1000]}...")
+
+        result = _extract_json_from_llm_response(content)
+        if result is None:
+            log.error(f"Could not extract JSON from LLM response")
+            log.error(f"Raw content type: {type(content)}, length: {len(content)}")
+            log.error(f"Full response:\n{'='*50}\n{content}\n{'='*50}")
+            return []
+
+        log.info(f"Extracted JSON keys: {list(result.keys()) if isinstance(result, dict) else 'not a dict'}")
+
+        parts = result.get("parts", [])
+        if not parts:
+            log.warning(f"LLM response missing 'parts' array. Got keys: {list(result.keys())}")
+            return []
+
+        log.info(f"LLM found {len(parts)} split points")
+        return parts
+
+    except (httpx.TimeoutException, httpx.ReadTimeout):
+        log.error("LLM split request timed out after 300s")
+        return []
+    except Exception as exc:
+        log.error(f"LLM split error: {type(exc).__name__}: {exc}")
+        import traceback
+        log.error(traceback.format_exc())
+        return []
+
+
+def _find_split_position(text: str, split_after_text: str) -> int:
+    """Find the position in text after the given split marker text."""
+    if not split_after_text or len(split_after_text) < 10:
+        return -1
+
+    # Normalize whitespace in both texts for comparison
+    def normalize_ws(s: str) -> str:
+        return ' '.join(s.split())
+
+    normalized_marker = normalize_ws(split_after_text)
+    normalized_text = normalize_ws(text)
+
+    # Try exact match first (case-sensitive) on normalized text
+    pos = normalized_text.find(normalized_marker)
+    if pos != -1:
+        # Map back to original text position
+        char_count = 0
+        original_pos = 0
+        for char in text:
+            if char_count >= pos + len(normalized_marker):
+                break
+            if not char.isspace() or (char_count > 0 and normalized_text[char_count:char_count+1] == ' '):
+                char_count += 1
+            original_pos += 1
+        return original_pos
+
+    # Try case-insensitive on normalized
+    pos = normalized_text.lower().find(normalized_marker.lower())
+    if pos != -1:
+        char_count = 0
+        original_pos = 0
+        for char in text:
+            if char_count >= pos + len(normalized_marker):
+                break
+            if not char.isspace() or (char_count > 0 and normalized_text[char_count:char_count+1] == ' '):
+                char_count += 1
+            original_pos += 1
+        return original_pos
+
+    # Try matching just the last 30 chars of the marker
+    short_marker = normalized_marker[-30:] if len(normalized_marker) > 30 else normalized_marker
+    pos = normalized_text.find(short_marker)
+    if pos != -1:
+        char_count = 0
+        original_pos = 0
+        for char in text:
+            if char_count >= pos + len(short_marker):
+                break
+            if not char.isspace() or (char_count > 0 and normalized_text[char_count:char_count+1] == ' '):
+                char_count += 1
+            original_pos += 1
+        return original_pos
+
+    return -1
+
+
+def _split_text_intelligently(text: str, split_points: list[dict]) -> list[tuple[str, str, str]]:
+    """Split text based on LLM-provided split points.
+
+    Returns list of (title, summary, part_text) tuples.
+    """
+    parts = []
+    start_pos = 0
+    text_len = len(text)
+
+    for i, point in enumerate(split_points):
+        if i == len(split_points) - 1:
+            # Last part - take everything from start_pos to end
+            part_text = text[start_pos:].strip()
+            title = point.get("title", f"Part {i + 1}")
+            summary = point.get("summary", "")
+            parts.append((title, summary, part_text))
+            break
+
+        split_after = point.get("split_after_text", "")
+        expected_chars = point.get("char_count", text_len // len(split_points))
+
+        # Try to find exact split position
+        split_pos = _find_split_position(text[start_pos:], split_after) if split_after else -1
+        if split_pos != -1:
+            split_pos += start_pos  # adjust back to absolute position
+
+            # Sanity check: if the found position is way off from expected, don't trust it
+            expected_end = start_pos + expected_chars
+            if abs(split_pos - expected_end) > expected_chars * 0.5:
+                log.warning(f"Split marker found at {split_pos} but expected ~{expected_end}, ignoring marker")
+                split_pos = -1
+
+        if split_pos == -1 or split_pos <= start_pos:
+            # Fallback: use expected character count as approximate position
+            target_pos = start_pos + expected_chars
+
+            # Look for paragraph boundary near target
+            search_start = min(target_pos, text_len - 100)
+            best_para = -1
+            best_dist = float('inf')
+
+            # Search for paragraph breaks within +/- 20% of expected length
+            search_range = int(expected_chars * 0.2)
+            for para_pos in range(max(0, search_start - search_range), min(text_len, search_start + search_range)):
+                if text[para_pos:para_pos+2] == "\n\n":
+                    dist = abs(para_pos - target_pos)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_para = para_pos
+
+            if best_para != -1:
+                split_pos = best_para + 2  # After the \n\n
+            else:
+                # Last resort: split at exact target or next period
+                split_pos = target_pos
+                next_period = text.find(". ", split_pos)
+                if next_period != -1 and next_period < split_pos + 200:
+                    split_pos = next_period + 2
+
+        split_pos = max(split_pos, start_pos + 100)  # Ensure minimum part size
+        split_pos = min(split_pos, text_len)  # Don't exceed text length
+
+        part_text = text[start_pos:split_pos].strip()
+        start_pos = split_pos
+
+        title = point.get("title", f"Part {i + 1}")
+        summary = point.get("summary", "")
+        parts.append((title, summary, part_text))
+
+    return parts
+
+
+@app.post("/api/projects/{project_id}/split-intelligent")
+async def split_project_intelligent(project_id: str, req: IntelligentSplitRequest):
+    """Split a project using LLM to find logical narrative break points.
+
+    The original project is deleted after successful split.
+    """
+    if req.parts < 2:
+        raise HTTPException(400, "Parts must be at least 2")
+
+    try:
+        state = store.load_state(project_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Project not found")
+
+    pdir = store.project_dir(project_id)
+    source_file = pdir / "source_text.txt"
+
+    if not source_file.exists():
+        raise HTTPException(400, "Project has no source text to split")
+
+    full_text = source_file.read_text(encoding="utf-8")
+    if not full_text.strip():
+        raise HTTPException(400, "Source text is empty")
+
+    # Get LLM model
+    ollama_model = req.ollama_model or state.get("ollama_model", config.OLLAMA_MODEL)
+    base_url = config.OLLAMA_URL
+
+    # Ask LLM to find split points
+    log.info(f"Requesting intelligent split for {project_id} into {req.parts} parts using {ollama_model}")
+    log.info(f"Text length: {len(full_text)} chars, sending {min(len(full_text), 4000)} to LLM")
+
+    split_points = await _find_split_points_with_llm(
+        text=full_text,
+        num_parts=req.parts,
+        model=ollama_model,
+        base_url=base_url,
+    )
+
+    if not split_points:
+        log.error(f"Intelligent split failed for {project_id}: LLM returned no split points")
+        raise HTTPException(500, f"LLM could not determine split points using model '{ollama_model}'. Check that Ollama is running, the model is available, and try again.")
+
+    # Split text based on LLM suggestions
+    parts = _split_text_intelligently(full_text, split_points)
+    log.info(f"Split text into {len(parts)} parts")
+
+    for i, (title, summary, text) in enumerate(parts):
+        log.info(f"Part {i+1}: '{title}' ({len(text)} chars)")
+
+    if len(parts) < 2:
+        raise HTTPException(500, "Could not create meaningful split")
+
+    # Get project metadata
+    book_group_id = state.get("book_group_id")
+    book_title = state.get("book_title", "")
+    chapter_index = state.get("chapter_index", 0)
+    base_title = state.get("title", "Untitled")
+    image_backend = state.get("image_backend", "comfyui")
+    tone = state.get("tone", "")
+    voice_profile_id = state.get("voice_profile_id")
+    voice_language = state.get("voice_language", "en")
+    target_minutes = state.get("target_minutes", 5.0)
+
+    # Calculate duration per part proportionally
+    total_chars = len(full_text)
+
+    # Create new projects
+    new_project_ids = []
+    for part_idx, (part_title, part_summary, part_text) in enumerate(parts):
+        new_pid, new_pdir = store.create_project()
+
+        # Calculate proportional duration
+        part_duration = max(1.0, round(target_minutes * (len(part_text) / total_chars), 1))
+
+        # Build full title with book info if available
+        if book_title:
+            full_title = f"{book_title} — {base_title} — {part_title}"
+        else:
+            full_title = f"{base_title} — {part_title}"
+
+        store.update_state(
+            new_pid,
+            title=full_title,
+            book_group_id=book_group_id,
+            book_title=book_title,
+            chapter_index=chapter_index + part_idx,
+            ollama_model=ollama_model,
+            target_minutes=part_duration,
+            tone=tone,
+            custom_prompt=part_text,
+            image_backend=image_backend,
+            voice_profile_id=voice_profile_id,
+            voice_language=voice_language,
+        )
+
+        # Save source text
+        (new_pdir / "source_text.txt").write_text(part_text, encoding="utf-8")
+
+        # Save summary as metadata
+        store.save_json(new_pid, "split_info.json", {
+            "original_project_id": project_id,
+            "part_number": part_idx + 1,
+            "total_parts": len(parts),
+            "title": part_title,
+            "summary": part_summary,
+            "char_count": len(part_text),
+        })
+
+        new_project_ids.append(new_pid)
+        log.info(f"Created intelligent split project {new_pid}: '{full_title}' ({len(part_text)} chars)")
+
+    # Delete original project
+    shutil.rmtree(pdir)
+    log.info(f"Deleted original project {project_id} after intelligent split into {len(new_project_ids)} parts")
+
+    return {
+        "original_project_id": project_id,
+        "new_project_ids": new_project_ids,
+        "parts": len(new_project_ids),
+        "split_details": [
+            {"title": p[0], "summary": p[1], "char_count": len(p[2])}
+            for p in parts
+        ],
+    }
 
 
 # ── Run ──────────────────────────────────────────────────────

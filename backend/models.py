@@ -55,6 +55,7 @@ class ProjectState(BaseModel):
     ollama_model: str = "kimi-k2.5:cloud"
     image_backend: str = "comfyui"  # comfyui | ollama | replicate
     target_minutes: float = 5.0
+    suggested_length: Optional[str] = None  # e.g., "5 min", "short story", "flash fiction"
     created_at: str = ""
     # Batch chapter fields
     book_group_id: Optional[str] = None
@@ -195,11 +196,41 @@ class ProjectSummary(BaseModel):
     chapter_index: Optional[int] = None
     tone: str = ""
     target_minutes: float = 5.0
+    suggested_length: Optional[str] = None
+    estimated_duration: float = 5.0  # Calculated from source text char count
+    char_count: int = 0  # Source text character count
+
+
+class BulkDeleteRequest(BaseModel):
+    project_ids: list[str] = Field(default_factory=list)
 
 
 class UpdateSettingsRequest(BaseModel):
     tone: Optional[str] = None
     target_minutes: Optional[float] = None
+    suggested_length: Optional[str] = None
+
+
+class SplitProjectRequest(BaseModel):
+    parts: int = 1  # Number of parts to split the project into
+
+
+class IntelligentSplitRequest(BaseModel):
+    parts: int = 2  # Number of logical parts to split into
+    ollama_model: Optional[str] = None
+
+
+class TextPart(BaseModel):
+    part_number: int
+    title: str  # A descriptive title for this part
+    summary: str  # Brief summary of what happens in this part
+    split_after_text: str  # The exact text (last ~100 chars) where the split should happen
+    char_count: int  # Approximate character count for this part
+
+
+class IntelligentSplitResponse(BaseModel):
+    parts: list[TextPart] = Field(default_factory=list)
+    reasoning: str = ""  # Brief explanation of why these split points were chosen
 
 
 class VoiceProfile(BaseModel):
@@ -223,6 +254,7 @@ class AnalyzedChapter(BaseModel):
     summary: str = ""
     estimated_duration: float = 5.0
     char_count: int = 0
+    parts: int = 1  # Split chapter into N equal parts (1 = no split)
 
 
 class AnalyzeChaptersResponse(BaseModel):

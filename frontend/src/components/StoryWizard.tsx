@@ -71,7 +71,7 @@ export default function StoryWizard({ project, onRefresh }: Props) {
   const [activeTab, setActiveTab] = useState<StepKey>('script')
   const canEditSettings = project.step === 'created'
 
-  const updateSetting = (updates: { tone?: string; target_minutes?: number }) => {
+  const updateSetting = (updates: { tone?: string; target_minutes?: number; suggested_length?: string }) => {
     api.updateSettings(project.project_id, updates).then(() => onRefresh()).catch(() => {})
   }
 
@@ -82,6 +82,13 @@ export default function StoryWizard({ project, onRefresh }: Props) {
         <h2 className="text-xl font-semibold">{project.title || 'Untitled Story'}</h2>
         <div className="flex items-center gap-3 text-sm text-[var(--text-muted)] mt-1">
           <span>{project.source_tale || 'Custom story'}</span>
+          {project.char_count && project.char_count > 0 && (
+            <>
+              <span>&middot;</span>
+              <span className="text-[var(--accent)]" title="Estimated from source text">~{project.estimated_duration}m</span>
+              <span>{project.char_count.toLocaleString()} chars</span>
+            </>
+          )}
           <span>&middot;</span>
           {canEditSettings ? (
             <>
@@ -91,16 +98,24 @@ export default function StoryWizard({ project, onRefresh }: Props) {
                   min="1"
                   step="0.5"
                   value={project.target_minutes}
-                  onChange={() => {}}
-                  onBlur={(e) => {
+                  onChange={(e) => {
                     const val = parseFloat(e.target.value)
-                    if (val > 0 && val !== project.target_minutes) updateSetting({ target_minutes: val })
+                    if (val > 0) updateSetting({ target_minutes: val })
                   }}
                   onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
                   className="w-14 bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-1.5 py-0.5 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
                 />
                 min target
               </span>
+              <span>&middot;</span>
+              <input
+                type="text"
+                value={project.suggested_length || ''}
+                onChange={(e) => updateSetting({ suggested_length: e.target.value })}
+                onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+                placeholder="e.g. 5 min"
+                className="w-24 bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-1.5 py-0.5 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
+              />
               <span>&middot;</span>
               <select
                 value={project.tone || 'dark'}
@@ -116,7 +131,7 @@ export default function StoryWizard({ project, onRefresh }: Props) {
               </select>
             </>
           ) : (
-            <span>{project.target_minutes} min target{project.tone ? ` · ${project.tone}` : ''}</span>
+            <span>{project.target_minutes} min target{project.suggested_length ? ` · ${project.suggested_length}` : ''}{project.tone ? ` · ${project.tone}` : ''}</span>
           )}
         </div>
       </div>

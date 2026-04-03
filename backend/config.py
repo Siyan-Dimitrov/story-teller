@@ -81,8 +81,8 @@ FLUX_LORA_ALTERNATIVES = {
 CIVITAI_API_TOKEN = os.getenv("CIVITAI_API_TOKEN", "")
 
 # ── Gutenberg ───────────────────────────────────────────────
-GUTENBERG_TIMEOUT_SECONDS = 60.0
-GUTENBERG_TEXT_TIMEOUT_SECONDS = 60.0
+GUTENBERG_TIMEOUT_SECONDS = 30.0
+GUTENBERG_TEXT_TIMEOUT_SECONDS = 30.0
 
 # ── Video output ─────────────────────────────────────────────
 VIDEO_WIDTH = 1920

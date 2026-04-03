@@ -50,10 +50,13 @@ export interface ProjectState {
   ollama_model: string
   image_backend: string
   target_minutes: number
+  suggested_length?: string
   tone?: string
   created_at: string
   script?: Script
   output_dir?: string | null
+  char_count?: number
+  estimated_duration?: number
 }
 
 export interface ProjectSummary {
@@ -66,6 +69,9 @@ export interface ProjectSummary {
   chapter_index?: number | null
   tone: string
   target_minutes: number
+  suggested_length?: string
+  estimated_duration: number
+  char_count: number
 }
 
 export interface Tale {
@@ -131,6 +137,7 @@ export interface AnalyzedChapter {
   summary: string
   estimated_duration: number
   char_count: number
+  parts: number
 }
 
 export interface AnalyzeChaptersResponse {
@@ -262,7 +269,11 @@ export const api = {
     post<ProjectState>('/api/projects', body),
   getProject: (id: string) => request<ProjectState>(`/api/projects/${id}`),
   deleteProject: (id: string) => del<{ deleted: string }>(`/api/projects/${id}`),
-  updateSettings: (id: string, body: { tone?: string; target_minutes?: number }) =>
+  bulkDeleteProjects: (projectIds: string[]) =>
+    post<{ deleted: string[]; not_found: string[] }>('/api/projects/bulk-delete', { project_ids: projectIds }),
+  deleteBookGroup: (groupId: string) =>
+    del<{ deleted: string[]; group_id: string }>(`/api/book-group/${groupId}`),
+  updateSettings: (id: string, body: { tone?: string; target_minutes?: number; suggested_length?: string }) =>
     put<Record<string, unknown>>(`/api/projects/${id}/settings`, body),
 
   runScript: (id: string, body: { ollama_model?: string; target_minutes?: number; custom_prompt?: string }) =>
@@ -316,4 +327,12 @@ export const api = {
 
   downloadUrl: (projectId: string) =>
     `/api/projects/${projectId}/download`,
+
+  // Source text and splitting
+  getSourceText: (projectId: string) =>
+    request<{ text: string; char_count: number; project_id: string; title: string; book_group_id?: string; chapter_index?: number }>(`/api/projects/${projectId}/source-text`),
+  splitProject: (projectId: string, parts: number) =>
+    post<{ original_project_id: string; new_project_ids: string[]; parts: number }>(`/api/projects/${projectId}/split`, { parts }),
+  splitProjectIntelligent: (projectId: string, parts: number, ollamaModel?: string) =>
+    post<{ original_project_id: string; new_project_ids: string[]; parts: number; split_details: { title: string; summary: string; char_count: number }[] }>(`/api/projects/${projectId}/split-intelligent`, { parts, ollama_model: ollamaModel }),
 }

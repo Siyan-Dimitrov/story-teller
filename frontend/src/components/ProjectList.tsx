@@ -105,11 +105,14 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
   const [loadingFullText, setLoadingFullText] = useState(false)
   const [onlineTopic, setOnlineTopic] = useState('')
   const [onlineLanguage, setOnlineLanguage] = useState('en')
+  const [fullText, setFullText] = useState('')
 
   // Chapter analysis state
   const [analyzedChapters, setAnalyzedChapters] = useState<AnalyzedChapter[]>([])
   const [analyzingChapters, setAnalyzingChapters] = useState(false)
   const [selectedChapters, setSelectedChapters] = useState<Set<number>>(new Set())
+  const [manualChapterCount, setManualChapterCount] = useState(0)
+  const [viewingChapterText, setViewingChapterText] = useState<number | null>(null)
   const [batchSteps, setBatchSteps] = useState({ qc: false, animate: false })
   const [showChapterPanel, setShowChapterPanel] = useState(false)
   const [bookTitle, setBookTitle] = useState('')
@@ -118,6 +121,8 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
   const [chapterTargetOverrides, setChapterTargetOverrides] = useState<Map<number, number>>(new Map())
   // Custom tone per chapter (index -> override value)
   const [chapterToneOverrides, setChapterToneOverrides] = useState<Map<number, string>>(new Map())
+  // Parts per chapter (index -> number of parts to split into)
+  const [chapterPartsOverrides, setChapterPartsOverrides] = useState<Map<number, number>>(new Map())
   const [voiceProfiles, setVoiceProfiles] = useState<VoiceProfile[]>([])
   const [batchVoiceProfile, setBatchVoiceProfile] = useState('')
   const [batchImageBackend, setBatchImageBackend] = useState('replicate')
@@ -131,6 +136,15 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
   const [runningGroup, setRunningGroup] = useState(false)
   // Per-group chapter selection for batch run (group_id → set of project_ids)
   const [selectedRunChapters, setSelectedRunChapters] = useState<Map<string, Set<string>>>(new Map())
+
+  // Source text viewing and splitting for saved batch chapters
+  const [viewingSourceFor, setViewingSourceFor] = useState<string | null>(null)
+  const [sourceText, setSourceText] = useState<string>('')
+  const [loadingSourceText, setLoadingSourceText] = useState(false)
+  const [splittingProject, setSplittingProject] = useState<string | null>(null)
+  const [splittingIntelligent, setSplittingIntelligent] = useState(false)
+  const [splitParts, setSplitParts] = useState<number>(1)
+  const [intelligentSplitResults, setIntelligentSplitResults] = useState<{ title: string; summary: string; char_count: number }[] | null>(null)
 
   const refresh = () => {
     api.listProjects().then(setProjects).catch(() => {})
@@ -165,6 +179,10 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
     setOnlineSearching(true)
     setSelectedOnline(null)
     setOnlinePreview('')
+    setFullText('')
+    setViewingChapterText(null)
+    setShowChapterPanel(false)
+    setAnalyzedChapters([])
     try {
       const res = await api.gutenbergSearch(q, page, onlineTopic, onlineLanguage)
       setOnlineResults(res.results)
@@ -179,6 +197,10 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
 
   const handleSelectOnlineBook = async (book: GutenbergBook) => {
     setSelectedOnline(book)
+    setFullText('')
+    setViewingChapterText(null)
+    setShowChapterPanel(false)
+    setAnalyzedChapters([])
     if (book.text_url) {
       setLoadingPreview(true)
       setOnlinePreview('')
@@ -212,20 +234,67 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
     if (!selectedOnline?.text_url) return
     setAnalyzingChapters(true)
     setAnalyzedChapters([])
-    setChapterTargetOverrides(new Map())  // Clear overrides on new analysis
+    setChapterTargetOverrides(new Map())
     setChapterToneOverrides(new Map())
+    setManualChapterCount(0)
+    setViewingChapterText(null)
     setShowChapterPanel(false)
     try {
       // Fetch full text first
       const textRes = await api.gutenbergText(selectedOnline.text_url, 0)
+      setFullText(textRes.text)
       // Send to LLM for analysis
       const res = await api.analyzeChapters(textRes.text, selectedOnline.title, ollamaModel)
       setAnalyzedChapters(res.chapters)
       setBookTitle(res.book_title)
       setSelectedChapters(new Set(res.chapters.map((_, i) => i)))
+      setManualChapterCount(res.chapters.length)  // Remember detected count
       setShowChapterPanel(true)
     } catch (e) {
       alert('Chapter analysis failed: ' + (e as Error).message)
+    } finally {
+      setAnalyzingChapters(false)
+    }
+  }
+
+  const handleManualSplit = async () => {
+    if (!selectedOnline?.text_url || manualChapterCount < 2) return
+    setAnalyzingChapters(true)
+    setAnalyzedChapters([])
+    setSelectedChapters(new Set())
+    setChapterTargetOverrides(new Map())  // Clear previous overrides
+    setChapterToneOverrides(new Map())
+    setShowChapterPanel(false)
+    try {
+      const textRes = await api.gutenbergText(selectedOnline.text_url, 0)
+      const text = textRes.text
+      setFullText(text)
+      const charsPerChapter = Math.floor(text.length / manualChapterCount)
+
+      const chapters: AnalyzedChapter[] = []
+      for (let i = 0; i < manualChapterCount; i++) {
+        const start = i * charsPerChapter
+        const end = i === manualChapterCount - 1 ? text.length : (i + 1) * charsPerChapter
+        const chapterText = text.slice(start, end).trim()
+        // Try to find a good breakpoint (end of sentence)
+        const excerpt = chapterText.slice(0, 500)
+        chapters.push({
+          title: `Chapter ${i + 1}`,
+          text: chapterText,
+          suggested_tone: 'dark',
+          summary: excerpt.slice(0, 200) + (excerpt.length > 200 ? '...' : ''),
+          estimated_duration: Math.max(1, Math.round((chapterText.length / 800) * 10) / 10),
+          char_count: chapterText.length,
+          parts: 1,
+        })
+      }
+
+      setAnalyzedChapters(chapters)
+      setBookTitle(selectedOnline.title)
+      setSelectedChapters(new Set(chapters.map((_, i) => i)))
+      setShowChapterPanel(true)
+    } catch (e) {
+      alert('Manual split failed: ' + (e as Error).message)
     } finally {
       setAnalyzingChapters(false)
     }
@@ -259,18 +328,84 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
     })
   }
 
+  const getChapterParts = (_ch: AnalyzedChapter, index: number): number => {
+    return chapterPartsOverrides.get(index) ?? 1
+  }
+
+  const updateChapterParts = (index: number, parts: number) => {
+    setChapterPartsOverrides(prev => {
+      const next = new Map(prev)
+      if (parts > 1) {
+        next.set(index, parts)
+      } else {
+        next.delete(index)
+      }
+      return next
+    })
+  }
+
+  // Handlers for viewing and splitting saved project source text
+  const handleViewSourceText = async (projectId: string) => {
+    setLoadingSourceText(true)
+    setViewingSourceFor(projectId)
+    try {
+      const res = await api.getSourceText(projectId)
+      setSourceText(res.text)
+    } catch (e) {
+      alert('Failed to load source text: ' + (e as Error).message)
+      setViewingSourceFor(null)
+    } finally {
+      setLoadingSourceText(false)
+    }
+  }
+
+  const handleSplitProject = async (projectId: string) => {
+    if (splitParts < 2) return
+    setSplittingProject(projectId)
+    try {
+      const res = await api.splitProject(projectId, splitParts)
+      setViewingSourceFor(null)
+      setSourceText('')
+      setSplitParts(1)
+      setIntelligentSplitResults(null)
+      refresh()
+      alert(`Successfully split into ${res.parts} parts`)
+    } catch (e) {
+      alert('Split failed: ' + (e as Error).message)
+    } finally {
+      setSplittingProject(null)
+    }
+  }
+
+  const handleIntelligentSplit = async (projectId: string) => {
+    if (splitParts < 2) return
+    setSplittingIntelligent(true)
+    setIntelligentSplitResults(null)
+    try {
+      const res = await api.splitProjectIntelligent(projectId, splitParts, ollamaModel)
+      setIntelligentSplitResults(res.split_details)
+      refresh()
+      // Don't close panel - show the results first
+    } catch (e) {
+      alert('Intelligent split failed: ' + (e as Error).message)
+    } finally {
+      setSplittingIntelligent(false)
+    }
+  }
+
   const handleSaveBatch = async () => {
     if (selectedChapters.size === 0) return
     setCreatingBatch(true)
     try {
-      // Apply target duration and tone overrides
+      // Apply target duration, tone, and parts overrides
       const chaptersToCreate = analyzedChapters
         .map((ch, i) => ({ ch, i }))
         .filter(({ i }) => selectedChapters.has(i))
         .map(({ ch, i }) => {
           const target = getChapterTarget(ch, i)
           const tone = getChapterTone(ch, i)
-          return { ...ch, estimated_duration: target, suggested_tone: tone }
+          const parts = getChapterParts(ch, i)
+          return { ...ch, estimated_duration: target, suggested_tone: tone, parts }
         })
       await api.batchCreate({
         book_title: bookTitle,
@@ -284,6 +419,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
       setAnalyzedChapters([])
       setChapterTargetOverrides(new Map())
       setChapterToneOverrides(new Map())
+      setChapterPartsOverrides(new Map())
       setShowCreate(false)
       refresh()
     } catch (e) {
@@ -297,14 +433,15 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
     if (selectedChapters.size === 0) return
     setCreatingBatch(true)
     try {
-      // Apply target duration and tone overrides
+      // Apply target duration, tone, and parts overrides
       const chaptersToCreate = analyzedChapters
         .map((ch, i) => ({ ch, i }))
         .filter(({ i }) => selectedChapters.has(i))
         .map(({ ch, i }) => {
           const target = getChapterTarget(ch, i)
           const tone = getChapterTone(ch, i)
-          return { ...ch, estimated_duration: target, suggested_tone: tone }
+          const parts = getChapterParts(ch, i)
+          return { ...ch, estimated_duration: target, suggested_tone: tone, parts }
         })
       const steps = ['script', 'voice', 'images', ...(batchSteps.qc ? ['qc'] : []), ...(batchSteps.animate ? ['animate'] : []), 'assemble']
 
@@ -334,6 +471,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
       setAnalyzedChapters([])
       setChapterTargetOverrides(new Map())
       setChapterToneOverrides(new Map())
+      setChapterPartsOverrides(new Map())
       setShowCreate(false)
       refresh()
     } catch (e) {
@@ -747,10 +885,18 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                           {onlinePreview}{onlinePreviewTotal > 2000 && '...'}
                         </p>
                         <div className="flex items-center justify-between mt-2">
-                          <span className="text-[10px] text-[var(--text-muted)]">
-                            {onlinePreviewTotal.toLocaleString()} characters total
-                          </span>
-                          <div className="flex gap-2">
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] text-[var(--text-muted)]">
+                              {onlinePreviewTotal.toLocaleString()} characters total
+                            </span>
+                            <button
+                              onClick={() => setViewingChapterText(viewingChapterText === -1 ? null : -1)}
+                              className="text-[10px] text-[var(--accent)] hover:underline"
+                            >
+                              {viewingChapterText === -1 ? 'Hide Full Text' : 'Preview Full Text'}
+                            </button>
+                          </div>
+                          <div className="flex items-center gap-2 flex-wrap">
                             {onlinePreviewTotal > 5000 && (
                               <button
                                 onClick={handleAnalyzeChapters}
@@ -758,9 +904,27 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                                 className="flex items-center gap-1 text-[10px] px-2 py-1 rounded bg-[var(--accent)]/10 border border-[var(--accent)]/30 text-[var(--accent)] hover:bg-[var(--accent)]/20 transition-colors disabled:opacity-50"
                               >
                                 {analyzingChapters ? <Loader2 size={10} className="animate-spin" /> : <Layers size={10} />}
-                                {analyzingChapters ? 'Analyzing...' : 'Analyze Chapters'}
+                                {analyzingChapters ? 'Analyzing...' : 'Auto-Detect Chapters'}
                               </button>
                             )}
+                            <div className="flex items-center gap-1">
+                              <input
+                                type="number"
+                                min="2"
+                                max="100"
+                                value={manualChapterCount || ''}
+                                onChange={(e) => setManualChapterCount(parseInt(e.target.value) || 0)}
+                                placeholder="#"
+                                className="w-12 bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-1.5 py-1 text-[10px] text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
+                              />
+                              <button
+                                onClick={handleManualSplit}
+                                disabled={!onlinePreviewTotal || manualChapterCount < 2}
+                                className="text-[10px] px-2 py-1 rounded bg-[var(--bg-secondary)] border border-[var(--border)] text-[var(--text-primary)] hover:border-[var(--accent)] transition-colors disabled:opacity-50"
+                              >
+                                Split Evenly
+                              </button>
+                            </div>
                             <button
                               onClick={handleUseFullText}
                               disabled={loadingFullText}
@@ -770,6 +934,12 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                             </button>
                           </div>
                         </div>
+                        {viewingChapterText === -1 && fullText && (
+                          <div className="mt-3 p-3 rounded bg-[var(--bg-tertiary)] border border-[var(--border)] text-xs text-[var(--text-secondary)] whitespace-pre-wrap max-h-64 overflow-y-auto font-mono leading-relaxed">
+                            <div className="text-[var(--text-muted)] mb-2 border-b border-[var(--border)] pb-1 sticky top-0 bg-[var(--bg-tertiary)]">Full text ({fullText.length.toLocaleString()} chars):</div>
+                            {fullText}
+                          </div>
+                        )}
                       </>
                     ) : !selectedOnline.text_url ? (
                       <p className="text-xs text-[var(--text-muted)]">No plain text available for this book.</p>
@@ -780,20 +950,31 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                 {/* Chapter analysis results */}
                 {showChapterPanel && analyzedChapters.length > 0 && (
                   <div className="p-4 rounded-lg border border-[var(--border)] bg-[var(--bg-tertiary)]">
+                    {analyzedChapters.length === 1 && (
+                      <div className="mb-3 p-2 rounded bg-[var(--warning)]/10 border border-[var(--warning)]/30 text-[10px] text-[var(--text-muted)]">
+                        <span className="text-[var(--warning)] font-medium">⚠ Auto-detection found only 1 chapter.</span> Try entering the actual chapter count above and clicking "Split Evenly", or use "Edit Full Text" to manually add chapter markers.
+                      </div>
+                    )}
                     <div className="flex items-center justify-between mb-3">
                       <div>
                         <h4 className="text-sm font-medium">{bookTitle}</h4>
                         <p className="text-[10px] text-[var(--text-muted)]">
-                          {analyzedChapters.length} chapters detected &middot; {selectedChapters.size} selected
-                          {selectedChapters.size > 0 && (
-                            <>
-                              {' '}· {' '}
-                              <strong className="text-[var(--text-primary)]">
-                                {Array.from(selectedChapters).reduce((sum, idx) => sum + getChapterTarget(analyzedChapters[idx], idx), 0).toFixed(1)} min
-                              </strong>
-                              {' '}total
-                            </>
-                          )}
+                          {analyzedChapters.length} chapter{analyzedChapters.length !== 1 ? 's' : ''} detected &middot; {selectedChapters.size} selected
+                          {selectedChapters.size > 0 && (() => {
+                            const totalParts = Array.from(selectedChapters).reduce((sum, idx) => sum + getChapterParts(analyzedChapters[idx], idx), 0)
+                            return (
+                              <>
+                                {totalParts > selectedChapters.size && (
+                                  <> &rarr; <strong className="text-[var(--accent)]">{totalParts} projects</strong></>
+                                )}
+                                {' '}· {' '}
+                                <strong className="text-[var(--text-primary)]">
+                                  {Array.from(selectedChapters).reduce((sum, idx) => sum + getChapterTarget(analyzedChapters[idx], idx), 0).toFixed(1)} min
+                                </strong>
+                                {' '}total
+                              </>
+                            )
+                          })()}
                         </p>
                       </div>
                       <div className="flex gap-2">
@@ -863,6 +1044,19 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                                 />
                                 min
                               </span>
+                              <span className="flex items-center gap-1">
+                                Parts:
+                                <input
+                                  type="number"
+                                  min="1"
+                                  max="20"
+                                  step="1"
+                                  value={getChapterParts(ch, i)}
+                                  onChange={(e) => updateChapterParts(i, Math.max(1, parseInt(e.target.value) || 1))}
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="w-10 bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-1 py-0 text-[10px] text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
+                                />
+                              </span>
                               <select
                                 value={getChapterTone(ch, i)}
                                 onChange={(e) => { e.stopPropagation(); updateChapterTone(i, e.target.value) }}
@@ -877,7 +1071,23 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                                   <option key={t.value} value={t.value}>{t.label}</option>
                                 ))}
                               </select>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); setViewingChapterText(viewingChapterText === i ? null : i) }}
+                                className="text-[var(--accent)] hover:underline"
+                              >
+                                {viewingChapterText === i ? 'Hide Text' : 'View Text'}
+                              </button>
                             </div>
+                            {viewingChapterText === i && (
+                              <div
+                                className="mt-2 p-2 rounded bg-[var(--bg-tertiary)] border border-[var(--border)] text-[10px] text-[var(--text-secondary)] whitespace-pre-wrap max-h-40 overflow-y-auto font-mono leading-relaxed"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <div className="text-[var(--text-muted)] mb-1 border-b border-[var(--border)] pb-1">First 2000 chars:</div>
+                                {ch.text.slice(0, 2000)}
+                                {ch.text.length > 2000 && '...'}
+                              </div>
+                            )}
                           </div>
                         </label>
                       ))}
@@ -977,30 +1187,38 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                     </div>
 
                     {/* Save / Save & Run buttons */}
-                    <div className="flex gap-2">
-                      <button
-                        onClick={handleSaveBatch}
-                        disabled={creatingBatch || selectedChapters.size === 0}
-                        className="flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-lg border border-[var(--accent)] text-[var(--accent)] text-sm font-medium transition-colors hover:bg-[var(--accent)]/10 disabled:opacity-50"
-                      >
-                        {creatingBatch ? (
-                          <><Loader2 size={14} className="animate-spin" /> Saving...</>
-                        ) : (
-                          <><Layers size={14} /> Save {selectedChapters.size} Chapters</>
-                        )}
-                      </button>
-                      <button
-                        onClick={handleCreateBatch}
-                        disabled={creatingBatch || selectedChapters.size === 0 || !batchVoiceProfile}
-                        className="flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-sm font-medium transition-colors disabled:opacity-50"
-                      >
-                        {creatingBatch ? (
-                          <><Loader2 size={14} className="animate-spin" /> Creating...</>
-                        ) : (
-                          <><Play size={14} /> Save & Run {selectedChapters.size}</>
-                        )}
-                      </button>
-                    </div>
+                    {(() => {
+                      const totalProjects = Array.from(selectedChapters).reduce((sum, idx) => sum + getChapterParts(analyzedChapters[idx], idx), 0)
+                      const label = totalProjects > selectedChapters.size
+                        ? `${totalProjects} Projects`
+                        : `${selectedChapters.size} Chapter${selectedChapters.size !== 1 ? 's' : ''}`
+                      return (
+                        <div className="flex gap-2">
+                          <button
+                            onClick={handleSaveBatch}
+                            disabled={creatingBatch || selectedChapters.size === 0}
+                            className="flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-lg border border-[var(--accent)] text-[var(--accent)] text-sm font-medium transition-colors hover:bg-[var(--accent)]/10 disabled:opacity-50"
+                          >
+                            {creatingBatch ? (
+                              <><Loader2 size={14} className="animate-spin" /> Saving...</>
+                            ) : (
+                              <><Layers size={14} /> Save {label}</>
+                            )}
+                          </button>
+                          <button
+                            onClick={handleCreateBatch}
+                            disabled={creatingBatch || selectedChapters.size === 0 || !batchVoiceProfile}
+                            className="flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-sm font-medium transition-colors disabled:opacity-50"
+                          >
+                            {creatingBatch ? (
+                              <><Loader2 size={14} className="animate-spin" /> Creating...</>
+                            ) : (
+                              <><Play size={14} /> Save & Run {label}</>
+                            )}
+                          </button>
+                        </div>
+                      )
+                    })()}
                     {!batchVoiceProfile && (
                       <p className="text-[10px] text-[var(--warning)] mt-1">Select a voice profile to run immediately</p>
                     )}
@@ -1105,41 +1323,170 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
             list.sort((a, b) => (a.chapter_index ?? 0) - (b.chapter_index ?? 0))
           }
 
-          const renderProject = (p: ProjectSummary, indent = false) => (
-            <button
-              key={p.project_id}
-              onClick={() => onSelect(p.project_id)}
-              className={`w-full flex items-center gap-4 p-4 rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] hover:bg-[var(--bg-hover)] transition-colors text-left ${indent ? 'ml-6' : ''}`}
-            >
-              <BookOpen size={18} className="text-[var(--accent)] shrink-0" />
-              <div className="flex-1 min-w-0">
-                <div className="font-medium text-sm truncate">
-                  {indent && p.chapter_index != null && <span className="text-[var(--text-muted)] mr-1.5">Ch. {p.chapter_index + 1}</span>}
-                  {p.title || 'Untitled'}
+          const renderProject = (p: ProjectSummary, indent = false, inGroup = false) => (
+            <div key={p.project_id} className={`space-y-2 ${indent ? 'ml-6' : ''}`}>
+              <button
+                onClick={() => onSelect(p.project_id)}
+                className={`w-full flex items-center gap-4 p-4 rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] hover:bg-[var(--bg-hover)] transition-colors text-left`}
+              >
+                <BookOpen size={18} className="text-[var(--accent)] shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <div className="font-medium text-sm truncate">
+                    {indent && p.chapter_index != null && <span className="text-[var(--text-muted)] mr-1.5">Ch. {p.chapter_index + 1}</span>}
+                    {p.title || 'Untitled'}
+                  </div>
+                  <div className="flex items-center gap-3 mt-0.5 text-xs text-[var(--text-muted)]">
+                    <span>{p.source_tale || 'custom'}</span>
+                    <span className="flex items-center gap-1">
+                      <Clock size={10} />
+                      {new Date(p.created_at).toLocaleDateString()}
+                    </span>
+                    {p.char_count > 0 && (
+                      <>
+                        <span className="text-[var(--accent)]" title="Estimated from source text">~{p.estimated_duration}m</span>
+                        <span>{p.char_count.toLocaleString()} chars</span>
+                      </>
+                    )}
+                  </div>
                 </div>
-                <div className="flex items-center gap-3 mt-0.5 text-xs text-[var(--text-muted)]">
-                  <span>{p.source_tale || 'custom'}</span>
-                  <span className="flex items-center gap-1">
-                    <Clock size={10} />
-                    {new Date(p.created_at).toLocaleDateString()}
+                <span className={`shrink-0 text-xs px-2 py-0.5 rounded-full ${
+                  p.step === 'assembled' ? 'bg-[var(--success)]/15 text-[var(--success)]' :
+                  p.step.includes('generating') || p.step === 'assembling' ? 'bg-[var(--warning)]/15 text-[var(--warning)]' :
+                  'bg-[var(--bg-tertiary)] text-[var(--text-muted)]'
+                }`}>
+                  {STEP_LABELS[p.step] || p.step}
+                </span>
+                <button
+                  onClick={e => handleDelete(e, p.project_id)}
+                  className="shrink-0 p-1 rounded text-[var(--text-muted)] hover:text-[var(--error)] transition-colors"
+                >
+                  <Trash2 size={14} />
+                </button>
+                <ChevronRight size={14} className="text-[var(--text-muted)] shrink-0" />
+              </button>
+
+              {/* Source text view and split controls for batch chapters in 'created' state */}
+              {inGroup && p.step === 'created' && viewingSourceFor === p.project_id && (
+                <div className="p-4 rounded-lg border border-[var(--border)] bg-[var(--bg-tertiary)] space-y-3">
+                  {loadingSourceText ? (
+                    <div className="flex items-center justify-center py-4">
+                      <Loader2 size={20} className="animate-spin text-[var(--accent)]" />
+                      <span className="ml-2 text-sm text-[var(--text-muted)]">Loading text...</span>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="max-h-48 overflow-y-auto text-xs text-[var(--text)] whitespace-pre-wrap font-mono bg-[var(--bg-secondary)] p-3 rounded border border-[var(--border)]">
+                        {sourceText || '(No source text saved)'}
+                      </div>
+                      {sourceText && !intelligentSplitResults && (
+                        <div className="space-y-3 pt-2 border-t border-[var(--border)]">
+                          <div className="flex items-center gap-3">
+                            <span className="text-xs text-[var(--text-muted)]">Number of parts:</span>
+                            <input
+                              type="number"
+                              min={2}
+                              max={10}
+                              value={splitParts}
+                              onChange={(e) => setSplitParts(Math.max(2, Math.min(10, parseInt(e.target.value) || 2)))}
+                              className="w-16 px-2 py-1 text-xs rounded border border-[var(--border)] bg-[var(--bg-secondary)]"
+                            />
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => handleSplitProject(p.project_id)}
+                              disabled={splittingProject === p.project_id}
+                              className="text-xs px-3 py-1.5 rounded bg-[var(--bg-secondary)] border border-[var(--border)] hover:bg-[var(--bg-hover)] transition-colors disabled:opacity-50"
+                              title="Split by character count (fast)"
+                            >
+                              {splittingProject === p.project_id ? (
+                                <span className="flex items-center gap-1">
+                                  <Loader2 size={12} className="animate-spin" /> Splitting...
+                                </span>
+                              ) : (
+                                'Simple Split'
+                              )}
+                            </button>
+                            <button
+                              onClick={() => handleIntelligentSplit(p.project_id)}
+                              disabled={splittingIntelligent}
+                              className="text-xs px-3 py-1.5 rounded bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)] transition-colors disabled:opacity-50"
+                              title="Use AI to find logical story break points (slower, better quality)"
+                            >
+                              {splittingIntelligent ? (
+                                <span className="flex items-center gap-1">
+                                  <Loader2 size={12} className="animate-spin" /> Analyzing...
+                                </span>
+                              ) : (
+                                <>
+                                  <span className="mr-1">✨</span> Smart Split
+                                </>
+                              )}
+                            </button>
+                            <button
+                              onClick={() => { setViewingSourceFor(null); setSourceText(''); setSplitParts(1); }}
+                              className="text-xs px-3 py-1.5 rounded border border-[var(--border)] hover:bg-[var(--bg-hover)] transition-colors"
+                            >
+                              Close
+                            </button>
+                          </div>
+                          <p className="text-[10px] text-[var(--text-muted)]">
+                            <strong>Simple Split:</strong> Divides by character count (fast).{' '}
+                            <strong>Smart Split:</strong> Uses AI to find logical story breaks (slower, better narrative flow).
+                          </p>
+                        </div>
+                      )}
+
+                      {/* Intelligent split results preview */}
+                      {intelligentSplitResults && (
+                        <div className="space-y-3 pt-2 border-t border-[var(--border)]">
+                          <div className="text-xs font-medium text-[var(--success)]">
+                            ✓ AI found {intelligentSplitResults.length} logical parts:
+                          </div>
+                          <div className="space-y-2 max-h-48 overflow-y-auto">
+                            {intelligentSplitResults.map((part, idx) => (
+                              <div key={idx} className="p-2 rounded bg-[var(--bg-secondary)] border border-[var(--border)]">
+                                <div className="font-medium text-xs">{part.title}</div>
+                                <div className="text-[10px] text-[var(--text-muted)] mt-0.5">{part.summary}</div>
+                                <div className="text-[10px] text-[var(--accent)] mt-1">{part.char_count.toLocaleString()} chars</div>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => {
+                                setIntelligentSplitResults(null)
+                                setViewingSourceFor(null)
+                                setSourceText('')
+                                setSplitParts(1)
+                              }}
+                              className="text-xs px-3 py-1.5 rounded bg-[var(--success)] text-white hover:bg-[var(--success)]/80 transition-colors"
+                            >
+                              Done
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* Button to view source text for batch chapters */}
+              {inGroup && p.step === 'created' && viewingSourceFor !== p.project_id && (
+                <div className="flex items-center gap-2 px-4">
+                  <button
+                    onClick={() => handleViewSourceText(p.project_id)}
+                    className="text-xs text-[var(--accent)] hover:underline"
+                  >
+                    View text & split
+                  </button>
+                  <span className="text-[var(--text-muted)]">·</span>
+                  <span className="text-xs text-[var(--text-muted)]">
+                    {p.char_count?.toLocaleString() || '?'} chars
                   </span>
                 </div>
-              </div>
-              <span className={`shrink-0 text-xs px-2 py-0.5 rounded-full ${
-                p.step === 'assembled' ? 'bg-[var(--success)]/15 text-[var(--success)]' :
-                p.step.includes('generating') || p.step === 'assembling' ? 'bg-[var(--warning)]/15 text-[var(--warning)]' :
-                'bg-[var(--bg-tertiary)] text-[var(--text-muted)]'
-              }`}>
-                {STEP_LABELS[p.step] || p.step}
-              </span>
-              <button
-                onClick={e => handleDelete(e, p.project_id)}
-                className="shrink-0 p-1 rounded text-[var(--text-muted)] hover:text-[var(--error)] transition-colors"
-              >
-                <Trash2 size={14} />
-              </button>
-              <ChevronRight size={14} className="text-[var(--text-muted)] shrink-0" />
-            </button>
+              )}
+            </div>
           )
 
           return (
@@ -1181,6 +1528,17 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                             View Progress
                           </button>
                         )}
+                        <button
+                          onClick={async () => {
+                            if (!confirm(`Delete entire book "${groupTitle}" (${chapters.length} chapters)?`)) return
+                            await api.deleteBookGroup(groupId).catch(() => {})
+                            refresh()
+                          }}
+                          className="text-[10px] px-2.5 py-1 rounded-full bg-[var(--error)]/10 text-[var(--error)] hover:bg-[var(--error)]/20 transition-colors"
+                          title="Delete all chapters in this book"
+                        >
+                          <Trash2 size={10} className="inline mr-0.5" /> Delete Book
+                        </button>
                       </div>
                       <ChevronDown size={16} className={`text-[var(--text-muted)] shrink-0 transition-transform ${expanded ? '' : '-rotate-90'}`} />
                     </button>
@@ -1198,6 +1556,20 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                                 <div className="flex gap-2">
                                   <button onClick={() => setSelectedRunChapters(prev => new Map(prev).set(groupId, new Set(chapters.map(c => c.project_id))))} className="text-[10px] text-[var(--accent)] hover:underline">All</button>
                                   <button onClick={() => setSelectedRunChapters(prev => new Map(prev).set(groupId, new Set()))} className="text-[10px] text-[var(--accent)] hover:underline">None</button>
+                                  {sel.size > 0 && (
+                                    <button
+                                      onClick={async () => {
+                                        const ids = [...sel]
+                                        if (!confirm(`Delete ${ids.length} selected chapter${ids.length !== 1 ? 's' : ''}?`)) return
+                                        await api.bulkDeleteProjects(ids).catch(() => {})
+                                        setSelectedRunChapters(prev => new Map(prev).set(groupId, new Set()))
+                                        refresh()
+                                      }}
+                                      className="text-[10px] text-[var(--error)] hover:underline"
+                                    >
+                                      Delete Selected
+                                    </button>
+                                  )}
                                 </div>
                               </div>
                               {/* Bulk actions for selected chapters */}
@@ -1262,12 +1634,32 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                                       }}
                                       onBlur={(e) => {
                                         const val = parseFloat(e.target.value)
-                                        if (val > 0) api.updateSettings(ch.project_id, { target_minutes: val }).catch(() => {})
+                                        if (val > 0) {
+                                          api.updateSettings(ch.project_id, { target_minutes: val }).catch(() => {})
+                                        }
                                       }}
+                                      onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
                                       className="w-12 bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-1 py-0 text-[10px] text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)] shrink-0"
                                       title="Target minutes"
                                     />
                                     <span className="text-[10px] text-[var(--text-muted)] shrink-0">min</span>
+                                    <input
+                                      type="text"
+                                      value={ch.suggested_length || ''}
+                                      onChange={(e) => {
+                                        const val = e.target.value
+                                        setProjects(prev => prev.map(p => p.project_id === ch.project_id ? { ...p, suggested_length: val } : p))
+                                      }}
+                                      onBlur={(e) => {
+                                        const val = e.target.value
+                                        api.updateSettings(ch.project_id, { suggested_length: val }).catch(() => {})
+                                      }}
+                                      onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+                                      placeholder="e.g. 5 min"
+                                      className="w-20 bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-1 py-0 text-[10px] text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)] shrink-0"
+                                      title="Suggested length (free text)"
+                                    />
+                                    <span className="text-[10px] text-[var(--accent)] shrink-0" title={`Estimated from source text: ~${ch.estimated_duration} min`}>~{ch.estimated_duration}m</span>
                                     <select
                                       value={ch.tone}
                                       onChange={(e) => {
@@ -1372,14 +1764,14 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
 
                     {expanded && (
                       <div className="space-y-1 p-2 bg-[var(--bg-tertiary)]">
-                        {chapters.map(p => renderProject(p, true))}
+                        {chapters.map(p => renderProject(p, true, true))}
                       </div>
                     )}
                   </div>
                 )
               })}
               {/* Standalone projects */}
-              {standalone.map(p => renderProject(p))}
+              {standalone.map(p => renderProject(p, false, false))}
             </>
           )
         })()}

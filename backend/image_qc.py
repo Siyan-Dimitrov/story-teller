@@ -119,7 +119,7 @@ async def evaluate_image(
                         },
                     ],
                     "stream": False,
-                    "options": {"temperature": 0.3, "num_predict": 1000},
+                    "options": {"temperature": 0.3, "num_predict": 4000},
                 },
             )
 
