@@ -1124,7 +1124,7 @@ async def _do_regular_split(project_id: str, full_text: str, state: dict, num_pa
 
 # ── Intelligent LLM-based splitting ───────────────────────────
 
-INTELLIGENT_SPLIT_PROMPT = """You are a literary editor. Your task: split the given text into {num_parts} logical narrative parts.
+INTELLIGENT_SPLIT_PROMPT = """You are a literary editor. Your task: split the given text into {num_parts} roughly equal parts.
 
 EXTREMELY IMPORTANT: Your ENTIRE response must be ONLY a valid JSON object. NO explanations before. NO explanations after. NO markdown code fences with ```. Just raw JSON starting with {{ and ending with }}.
 
@@ -1138,8 +1138,8 @@ JSON format required:
 - reasoning: brief explanation of why you chose these split points
 
 Rules:
-1. Narrative coherence over equal sizing
-2. Find breaks at scene endings, time shifts, or story pauses
+1. Parts MUST be roughly equal in size. Each part should be between {min_pct}% and {max_pct}% of the total text. This is the most important rule.
+2. Within the equal-size constraint, prefer to split at scene endings, time shifts, chapter breaks, or narrative pauses
 3. split_after_text MUST be copied exactly from the source text
 4. Output ONLY JSON - nothing else
 """
@@ -1227,14 +1227,22 @@ async def _find_split_points_with_llm(
     base_url: str,
 ) -> list[dict]:
     """Use LLM to find logical split points in the text."""
-    prompt = INTELLIGENT_SPLIT_PROMPT.format(num_parts=num_parts)
+    avg_pct = 100 / num_parts
+    min_pct = max(20, int(avg_pct * 0.6))
+    max_pct = min(80, int(avg_pct * 1.4))
+    prompt = INTELLIGENT_SPLIT_PROMPT.format(num_parts=num_parts, min_pct=min_pct, max_pct=max_pct)
 
     # Send as much text as possible so the LLM can find balanced split points
     # (sending too little causes back-loaded splits since the LLM only sees the beginning)
     max_text = 60000
     text_for_llm = text[:max_text] if len(text) > max_text else text
 
-    user_message = f"Please split this text into exactly {num_parts} logical parts.\n\nText ({len(text)} chars total, {'showing first ' + str(max_text) + ' chars' if len(text) > max_text else 'full text'}):\n\n{text_for_llm}"
+    avg_chars = len(text) // num_parts
+    user_message = (
+        f"Please split this text into exactly {num_parts} roughly equal parts "
+        f"(each part should be around {avg_chars:,} characters, between {min_pct}%-{max_pct}% of the total).\n\n"
+        f"Text ({len(text)} chars total, {'showing first ' + str(max_text) + ' chars' if len(text) > max_text else 'full text'}):\n\n{text_for_llm}"
+    )
 
     log.info(f"Calling LLM for intelligent split: model={model}, num_parts={num_parts}, text_len={len(text_for_llm)}")
 
@@ -1389,18 +1397,38 @@ def _find_split_position(text: str, split_after_text: str) -> int:
     return -1
 
 
+def _find_paragraph_near(text: str, target_pos: int, search_range: int) -> int:
+    """Find the nearest paragraph break (\\n\\n) to target_pos within search_range.
+    Returns the position after the break, or -1 if none found."""
+    text_len = len(text)
+    best_para = -1
+    best_dist = float('inf')
+    for pos in range(max(0, target_pos - search_range), min(text_len - 1, target_pos + search_range)):
+        if text[pos:pos+2] == "\n\n":
+            dist = abs(pos - target_pos)
+            if dist < best_dist:
+                best_dist = dist
+                best_para = pos
+    return best_para + 2 if best_para != -1 else -1
+
+
 def _split_text_intelligently(text: str, split_points: list[dict]) -> list[tuple[str, str, str]]:
     """Split text based on LLM-provided split points.
 
     Returns list of (title, summary, part_text) tuples.
+    Enforces balance: no part can be smaller than 25% of the average part size.
     """
+    num_parts = len(split_points)
+    text_len = len(text)
+    ideal_part_size = text_len // num_parts
+    # Minimum part size: 25% of ideal (prevents 15%/85% splits)
+    min_part_size = int(ideal_part_size * 0.25)
+
     parts = []
     start_pos = 0
-    text_len = len(text)
 
     for i, point in enumerate(split_points):
         if i == len(split_points) - 1:
-            # Last part - take everything from start_pos to end
             part_text = text[start_pos:].strip()
             title = point.get("title", f"Part {i + 1}")
             summary = point.get("summary", "")
@@ -1408,48 +1436,42 @@ def _split_text_intelligently(text: str, split_points: list[dict]) -> list[tuple
             break
 
         split_after = point.get("split_after_text", "")
-        expected_chars = point.get("char_count", text_len // len(split_points))
 
-        # Try to find exact split position
+        # Try to find LLM-suggested split position
         split_pos = _find_split_position(text[start_pos:], split_after) if split_after else -1
         if split_pos != -1:
-            split_pos += start_pos  # adjust back to absolute position
+            split_pos += start_pos
 
-            # Sanity check: if the found position is way off from expected, don't trust it
-            expected_end = start_pos + expected_chars
-            if abs(split_pos - expected_end) > expected_chars * 0.5:
-                log.warning(f"Split marker found at {split_pos} but expected ~{expected_end}, ignoring marker")
+        # Balance check: reject the LLM position if it creates a part that's too small or too large
+        remaining_text = text_len - start_pos
+        remaining_parts = num_parts - i
+        if split_pos != -1 and split_pos > start_pos:
+            this_part_size = split_pos - start_pos
+            leftover = remaining_text - this_part_size
+            leftover_avg = leftover / (remaining_parts - 1) if remaining_parts > 1 else leftover
+            if this_part_size < min_part_size:
+                log.warning(f"LLM split at {split_pos} gives part {i+1} only {this_part_size} chars (min {min_part_size}), rebalancing")
+                split_pos = -1
+            elif leftover_avg < min_part_size:
+                log.warning(f"LLM split at {split_pos} leaves too little for remaining parts ({leftover_avg:.0f} avg), rebalancing")
                 split_pos = -1
 
         if split_pos == -1 or split_pos <= start_pos:
-            # Fallback: use expected character count as approximate position
-            target_pos = start_pos + expected_chars
+            # Fallback: target a balanced split
+            target_pos = start_pos + (remaining_text // remaining_parts)
+            search_range = int(ideal_part_size * 0.2)
 
-            # Look for paragraph boundary near target
-            search_start = min(target_pos, text_len - 100)
-            best_para = -1
-            best_dist = float('inf')
-
-            # Search for paragraph breaks within +/- 20% of expected length
-            search_range = int(expected_chars * 0.2)
-            for para_pos in range(max(0, search_start - search_range), min(text_len, search_start + search_range)):
-                if text[para_pos:para_pos+2] == "\n\n":
-                    dist = abs(para_pos - target_pos)
-                    if dist < best_dist:
-                        best_dist = dist
-                        best_para = para_pos
-
-            if best_para != -1:
-                split_pos = best_para + 2  # After the \n\n
+            para_pos = _find_paragraph_near(text, target_pos, search_range)
+            if para_pos != -1:
+                split_pos = para_pos
             else:
-                # Last resort: split at exact target or next period
                 split_pos = target_pos
                 next_period = text.find(". ", split_pos)
                 if next_period != -1 and next_period < split_pos + 200:
                     split_pos = next_period + 2
 
-        split_pos = max(split_pos, start_pos + 100)  # Ensure minimum part size
-        split_pos = min(split_pos, text_len)  # Don't exceed text length
+        split_pos = max(split_pos, start_pos + min_part_size)
+        split_pos = min(split_pos, text_len)
 
         part_text = text[start_pos:split_pos].strip()
         start_pos = split_pos
@@ -1457,6 +1479,12 @@ def _split_text_intelligently(text: str, split_points: list[dict]) -> list[tuple
         title = point.get("title", f"Part {i + 1}")
         summary = point.get("summary", "")
         parts.append((title, summary, part_text))
+
+    # Post-split balance check: log the distribution
+    sizes = [len(p[2]) for p in parts]
+    total = sum(sizes)
+    pcts = [s / total * 100 for s in sizes]
+    log.info(f"Split result: {num_parts} parts, sizes={sizes}, ratios={[f'{p:.1f}%' for p in pcts]}")
 
     return parts
 
