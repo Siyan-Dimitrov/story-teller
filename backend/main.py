@@ -417,15 +417,6 @@ async def get_project(project_id: str):
     return state
 
 
-@app.delete("/api/projects/{project_id}")
-async def delete_project(project_id: str):
-    pdir = store.project_dir(project_id)
-    if not pdir.exists():
-        raise HTTPException(404, "Project not found")
-    shutil.rmtree(pdir)
-    return {"deleted": project_id}
-
-
 @app.post("/api/projects/bulk-delete")
 async def bulk_delete_projects(req: BulkDeleteRequest):
     """Delete multiple projects at once."""
@@ -439,6 +430,15 @@ async def bulk_delete_projects(req: BulkDeleteRequest):
         else:
             not_found.append(pid)
     return {"deleted": deleted, "not_found": not_found}
+
+
+@app.delete("/api/projects/{project_id}")
+async def delete_project(project_id: str):
+    pdir = store.project_dir(project_id)
+    if not pdir.exists():
+        raise HTTPException(404, "Project not found")
+    shutil.rmtree(pdir)
+    return {"deleted": project_id}
 
 
 @app.delete("/api/book-group/{group_id}")
