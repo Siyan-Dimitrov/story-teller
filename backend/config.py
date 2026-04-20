@@ -10,11 +10,13 @@ PROJECTS_DIR = BASE_DIR / "projects"
 OUTPUT_DIR = BASE_DIR / "output"
 DATA_DIR = BASE_DIR / "data"
 TALES_DIR = DATA_DIR / "tales"
+MUSIC_DIR = DATA_DIR / "music"
 
 PROJECTS_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 DATA_DIR.mkdir(exist_ok=True)
 TALES_DIR.mkdir(exist_ok=True)
+MUSIC_DIR.mkdir(exist_ok=True)
 
 # ── External services ────────────────────────────────────────
 VOICEBOX_URL = os.getenv("VOICEBOX_URL", "http://localhost:17493")
@@ -25,7 +27,7 @@ COMFYUI_URL = os.getenv("COMFYUI_URL", "http://127.0.0.1:8188")
 # ── Replicate (cloud image generation) ──────────────────────
 REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN", "")
 # Use LoRA-enabled models for style control
-REPLICATE_MODEL = os.getenv("REPLICATE_MODEL", "black-forest-labs/flux-dev-lora")  # or flux-schnell-lora
+REPLICATE_MODEL = os.getenv("REPLICATE_MODEL", "black-forest-labs/flux-kontext-dev-lora")
 REPLICATE_TIMEOUT_SECONDS = float(os.getenv("REPLICATE_TIMEOUT_SECONDS", "120.0"))
 REPLICATE_DELAY_SECONDS = float(os.getenv("REPLICATE_DELAY_SECONDS", "11.0"))  # delay between API calls (6/min rate limit with <$5 credit)
 REPLICATE_MAX_RETRIES = int(os.getenv("REPLICATE_MAX_RETRIES", "3"))  # retries on rate-limit / transient errors
@@ -34,47 +36,46 @@ REPLICATE_MAX_RETRIES = int(os.getenv("REPLICATE_MAX_RETRIES", "3"))  # retries 
 # These are loaded dynamically via Replicate's lora_weights parameter
 # All URLs verified working (HTTP 200, no auth required) as of 2026-03-25
 FLUX_LORA_URLS = {
-    # Victorian Gothic Horror — sepia-toned, aged, haunting aesthetic (trigger: "vicgoth")
-    # Closest match for Tim Burton's dark whimsical gothic style
     "tim_burton": os.getenv(
         "FLUX_LORA_TIM_BURTON",
         "https://huggingface.co/Keltezaa/victorian-gothic-horror/resolve/main/victoriangothic_v50_rank64_bf16-step01500.safetensors"
     ),
-    # Dark Fantasy Illustration — dark fantasy retro illustrations (no trigger word, strength 1.2)
     "dark_gothic": os.getenv(
         "FLUX_LORA_DARK_GOTHIC",
         "https://huggingface.co/nerijs/dark-fantasy-illustration-flux/resolve/main/darkfantasy_illustration_v2.safetensors"
     ),
-    # Shakker-Labs Dark Fantasy — fantasy creatures, metallic textures, magical light (no trigger, strength 0.6-0.8)
-    "dark_fantasy": os.getenv(
-        "FLUX_LORA_DARK_FANTASY",
-        "https://huggingface.co/Shakker-Labs/FLUX.1-dev-LoRA-Dark-Fantasy/resolve/main/FLUX.1-dev-lora-Dark-Fantasy.safetensors"
-    ),
-    # Doodle Toon — whimsical storybook illustration with marker/pencil textures (trigger: "d00dlet00n")
     "storybook": os.getenv(
         "FLUX_LORA_STORYBOOK",
         "https://huggingface.co/renderartist/doodletoonflux/resolve/main/d00dlet00n_Flux_v2_renderartist.safetensors"
     ),
-    # Flux Surrealism — surrealist/dreamlike art with sci-fi elements (trigger: "evangsurreal")
-    # Closest match for Mark Ryden pop surrealism style
     "mark_ryden": os.getenv(
         "FLUX_LORA_MARK_RYDEN",
         "https://huggingface.co/brushpenbob/Flux-surrealism/resolve/main/Flux_surrealism.safetensors"
     ),
-}
-
-# Additional verified FLUX LoRA URLs (alternatives)
-FLUX_LORA_ALTERNATIVES = {
-    # Omarito Dark Fantasy — atmospheric dark fantasy paintings (trigger: long prompt prefix)
-    "dark_fantasy_alt": "https://huggingface.co/Omarito2412/Dark-Fantasy-Flux/resolve/main/dark_fantasy_flux.safetensors",
-    # Dark Creature — gothic dark creatures (trigger: "Dark Creature") — still in training
-    "dark_creature": "https://huggingface.co/prithivMLmods/Dark-Thing-Flux-LoRA/resolve/main/Dark_Creature.safetensors",
-    # Weird Things — surrealism + psychedelia blend (trigger: "w3irdth1ngs")
-    "weird_surreal": "https://huggingface.co/renderartist/weirdthingsflux/resolve/main/Weird_Things_Flux_v1_renderartist.safetensors",
-    # Ghibsky Illustration — Ghibli + Shinkai whimsical landscapes (trigger: "GHIBSKY style")
-    "ghibsky": "https://huggingface.co/aleksa-codes/flux-ghibsky-illustration/resolve/main/lora.safetensors",
-    # Children Simple Sketch — stick-figure, pastel, hand-drawn (trigger: "sketched style")
-    "children_sketch": "https://huggingface.co/Shakker-Labs/FLUX.1-dev-LoRA-Children-Simple-Sketch/resolve/main/FLUX-dev-lora-children-simple-sketch.safetensors",
+    "painterly_illustration": os.getenv(
+        "FLUX_LORA_PAINTERLY",
+        "https://huggingface.co/Shakker-Labs/FLUX.1-dev-LoRA-blended-realistic-illustration/resolve/main/FLUX-dev-lora-blended-realistic-illustration.safetensors"
+    ),
+    "golden_atmosphere": os.getenv(
+        "FLUX_LORA_GOLDEN",
+        "https://huggingface.co/prithivMLmods/Golden-Dust-Flux-LoRA/resolve/main/golden-dust-flux-lora.safetensors"
+    ),
+    "ghibli_whimsical": os.getenv(
+        "FLUX_LORA_GHIBLI",
+        "https://huggingface.co/aleksa-codes/flux-ghibsky-illustration/resolve/main/lora.safetensors"
+    ),
+    "children_sketch": os.getenv(
+        "FLUX_LORA_CHILDREN",
+        "https://huggingface.co/Shakker-Labs/FLUX.1-dev-LoRA-Children-Simple-Sketch/resolve/main/FLUX-dev-lora-children-simple-sketch.safetensors"
+    ),
+    "concept_art": os.getenv(
+        "FLUX_LORA_CONCEPT",
+        "https://huggingface.co/strangerzonehf/Flux-Midjourney-Painterly/resolve/main/Flux-Midjourney-Painterly.safetensors"
+    ),
+    "sketch_paint": os.getenv(
+        "FLUX_LORA_SKETCH_PAINT",
+        "https://huggingface.co/renderartist/sketchpaintflux/resolve/main/Sketch_Paint_Flux_v1_renderartist.safetensors"
+    ),
 }
 
 # ── CivitAI (optional, for gated model URLs) ─────────────────
@@ -91,9 +92,9 @@ VIDEO_FPS = 25
 CROSSFADE_DURATION = 0.5  # seconds between scenes
 
 # ── LLM ──────────────────────────────────────────────────────
-LLM_TIMEOUT_SECONDS = 300.0
+LLM_TIMEOUT_SECONDS = 1200.0
 LLM_TEMPERATURE = 0.8
-LLM_MAX_TOKENS = 16000
+LLM_MAX_TOKENS = 128000
 
 # ── Batch chapter analysis ───────────────────────────────────
 BATCH_NARRATION_RATE = 800  # characters per minute for duration estimation
@@ -129,6 +130,11 @@ KB_DIRECTIONS = ["zoom_in", "zoom_out", "pan_left", "pan_right"]
 # ── Animation / Depth Parallax ──────────────────────────────
 PARALLAX_STRENGTH = 80.0  # max displacement in pixels at overscan resolution
 DEPTH_METHOD = "gradient"  # "gradient" (fast, no deps), "comfyui" (MiDaS node required), "auto" (try comfyui, fallback gradient)
+
+# ── Background music ─────────────────────────────────────────
+JAMENDO_CLIENT_ID = os.getenv("JAMENDO_CLIENT_ID", "").strip()
+JAMENDO_URL = "https://api.jamendo.com/v3.0"
+DEFAULT_MUSIC_VOLUME = 0.15
 
 # ── FFmpeg ───────────────────────────────────────────────────
 FFMPEG_PATH = shutil.which("ffmpeg") or "ffmpeg"

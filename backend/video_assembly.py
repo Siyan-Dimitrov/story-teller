@@ -5,6 +5,7 @@ import math
 import random
 import threading
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 from PIL import Image as PILImage
@@ -15,7 +16,10 @@ from moviepy import (
     AudioFileClip,
     ImageSequenceClip,
     concatenate_videoclips,
+    concatenate_audioclips,
+    CompositeAudioClip,
 )
+from moviepy.audio.fx import MultiplyVolume
 
 from . import config
 
@@ -453,6 +457,8 @@ def assemble_video(
     output_filename: str = "final.mp4",
     crossfade: float = config.CROSSFADE_DURATION,
     project_id: str | None = None,
+    background_music: Optional[str] = None,
+    music_volume: float = config.DEFAULT_MUSIC_VOLUME,
 ) -> tuple[Path, float]:
     """Assemble final video from scenes with images and audio."""
     output_path = project_dir / output_filename
@@ -587,6 +593,20 @@ def assemble_video(
             final = concatenate_videoclips(clips, method="compose", padding=-crossfade)
         else:
             final = concatenate_videoclips(clips, method="compose")
+
+        # Mix in background music if provided
+        if background_music and Path(background_music).exists():
+            bg_music = AudioFileClip(str(background_music))
+            if bg_music.duration < final.duration:
+                loops = math.ceil(final.duration / bg_music.duration)
+                bg_music = concatenate_audioclips([bg_music] * loops)
+            bg_music = bg_music.subclipped(0, final.duration)
+            bg_music = bg_music.with_effects([MultiplyVolume(music_volume)])
+            if final.audio:
+                final = final.with_audio(CompositeAudioClip([final.audio, bg_music]))
+            else:
+                final = final.with_audio(bg_music)
+            log.info(f"Mixed background music: {background_music} at volume {music_volume}")
 
         final = final.with_fps(config.VIDEO_FPS)
 

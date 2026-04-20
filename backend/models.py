@@ -61,6 +61,10 @@ class ProjectState(BaseModel):
     book_group_id: Optional[str] = None
     chapter_index: Optional[int] = None
     book_title: Optional[str] = None
+    # Background music fields
+    background_music: Optional[str] = None  # "auto" | "none" | absolute/relative path | None
+    music_volume: float = 0.15
+    selected_music: Optional[dict] = None  # last resolved track metadata
 
 
 # ── API requests ─────────────────────────────────────────────
@@ -102,6 +106,7 @@ class RunImagesRequest(BaseModel):
     backend: str = "comfyui"  # comfyui | ollama | replicate
     style_prompt: str = "dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting"
     lora_keys: Optional[list[str]] = None  # e.g. ["tim_burton", "dark_fantasy"] - None uses defaults for backend
+    character_consistency: bool = False  # Use first image as reference for visual consistency (Replicate only)
     # For Replicate: Uses FLUX LoRA URLs from config.FLUX_LORA_URLS
     # For ComfyUI: Uses local .safetensors files from AVAILABLE_LORAS
 
@@ -173,7 +178,24 @@ class RegenerateQCRequest(BaseModel):
 
 
 class RunAssembleRequest(BaseModel):
-    pass
+    background_music: Optional[str] = None  # "auto" | "none" | path
+    music_volume: Optional[float] = None
+
+
+class MusicTrack(BaseModel):
+    id: str
+    title: str
+    artist: str = ""
+    duration: float = 0
+    url: Optional[str] = None
+    path: Optional[str] = None
+    source: str = "jamendo"  # jamendo | local
+    license: str = ""
+
+
+class SetProjectMusicRequest(BaseModel):
+    background_music: Optional[str] = None
+    music_volume: Optional[float] = None
 
 
 # ── API responses ────────────────────────────────────────────
@@ -285,6 +307,7 @@ class BatchRunRequest(BaseModel):
     image_backend: str = "comfyui"
     style_prompt: str = "dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting"
     lora_keys: Optional[list[str]] = None
+    character_consistency: bool = False
 
 
 class ChapterProgress(BaseModel):

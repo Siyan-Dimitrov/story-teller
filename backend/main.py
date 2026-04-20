@@ -17,7 +17,7 @@ import httpx
 
 from . import config
 from . import project_store as store
-from . import script_gen, voice_gen, image_gen, gutenberg, batch
+from . import script_gen, voice_gen, image_gen, gutenberg, batch, music
 from .video_assembly import assemble_video, get_assembly_progress, cancel_assembly
 from .animation import prepare_animations, get_animation_progress
 from .grimm_tales import list_tales, get_tale
@@ -45,6 +45,8 @@ from .models import (
     IntelligentSplitRequest,
     IntelligentSplitResponse,
     TextPart,
+    MusicTrack,
+    SetProjectMusicRequest,
 )
 from .image_qc import run_qc_for_project, regenerate_and_evaluate, get_qc_progress, evaluate_single_image
 
@@ -236,6 +238,7 @@ async def batch_run(group_id: str, req: BatchRunRequest):
                     image_backend=req.image_backend,
                     style_prompt=req.style_prompt,
                     lora_keys=req.lora_keys,
+                    character_consistency=req.character_consistency,
                 )
             )
         except Exception as e:
@@ -288,6 +291,7 @@ async def batch_resume(group_id: str):
                     image_backend=run_config["image_backend"],
                     style_prompt=run_config["style_prompt"],
                     lora_keys=run_config["lora_keys"],
+                    character_consistency=run_config.get("character_consistency", False),
                 )
             )
         except Exception as e:
@@ -322,8 +326,8 @@ async def get_loras():
                 "trigger": v["trigger"],
                 "file": v["file"],
                 "has_flux": v.get("flux_lora_key") is not None
-                    and (v["flux_lora_key"] in config.FLUX_LORA_URLS
-                         or v["flux_lora_key"] in config.FLUX_LORA_ALTERNATIVES),
+                    and v["flux_lora_key"] in config.FLUX_LORA_URLS,
+                "description": v.get("description", ""),
             }
             for key, v in image_gen.AVAILABLE_LORAS.items()
         },
@@ -589,6 +593,7 @@ async def run_images(project_id: str, req: RunImagesRequest):
             backend=req.backend,
             style_prompt=req.style_prompt,
             lora_keys=req.lora_keys,
+            character_consistency=req.character_consistency,
         )
         script["scenes"] = scenes
         store.save_json(project_id, "script.json", script)
@@ -821,12 +826,39 @@ async def run_assemble(project_id: str, req: RunAssembleRequest):
     store.update_state(project_id, step="assembling", error=None)
     pdir = store.project_dir(project_id)
 
+    # Resolve background music
+    music_path: str | None = None
+    mode = req.background_music or state.get("background_music") or "auto"
+    tone = script.get("tone") or state.get("tone", "")
+    if mode == "auto":
+        try:
+            track = await music.suggest_background_music(tone)
+        except Exception as ex:
+            log.warning(f"Music suggestion failed: {ex}")
+            track = None
+        if track:
+            if track.get("path"):
+                music_path = track["path"]
+            elif track.get("url"):
+                dl = pdir / "music" / "background.mp3"
+                dl.parent.mkdir(parents=True, exist_ok=True)
+                if await music.download_music(track["url"], dl):
+                    music_path = str(dl)
+            store.update_state(project_id, selected_music=track)
+    elif mode not in (None, "none", ""):
+        music_path = mode  # explicit path
+
+    volume = req.music_volume if req.music_volume is not None else state.get("music_volume", config.DEFAULT_MUSIC_VOLUME)
+    store.update_state(project_id, background_music=mode, music_volume=volume)
+
     def _run():
         try:
             output, duration = assemble_video(
                 scenes=script["scenes"],
                 project_dir=pdir,
                 project_id=project_id,
+                background_music=music_path,
+                music_volume=volume,
             )
             store.update_state(project_id, step="assembled")
 
@@ -892,6 +924,39 @@ async def assembly_cancel_endpoint(project_id: str):
         fallback = "animated"  # preserve animation data on cancel
         store.update_state(project_id, step=fallback, error="Assembly cancelled")
     return {"cancelled": cancelled}
+
+
+# ── Background music ─────────────────────────────────────────
+
+@app.get("/api/music/search", response_model=list[MusicTrack])
+async def music_search(query: str = "", limit: int = 5):
+    if not query.strip():
+        return []
+    tracks = await music.search_jamendo(query, limit=limit)
+    return [MusicTrack(**t) for t in tracks]
+
+
+@app.get("/api/music/local", response_model=list[MusicTrack])
+async def music_local():
+    tracks = music.find_local_music()
+    return [MusicTrack(**t) for t in tracks]
+
+
+@app.post("/api/projects/{project_id}/music")
+async def set_project_music(project_id: str, req: SetProjectMusicRequest):
+    state = store.load_state(project_id)
+    updates: dict = {}
+    if req.background_music is not None:
+        updates["background_music"] = req.background_music
+    if req.music_volume is not None:
+        updates["music_volume"] = req.music_volume
+    if updates:
+        state = store.update_state(project_id, **updates)
+    return {
+        "background_music": state.get("background_music"),
+        "music_volume": state.get("music_volume", config.DEFAULT_MUSIC_VOLUME),
+        "selected_music": state.get("selected_music"),
+    }
 
 
 # ── File serving ─────────────────────────────────────────────

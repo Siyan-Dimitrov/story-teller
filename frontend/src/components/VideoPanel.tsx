@@ -1,11 +1,19 @@
 import { useState, useEffect, useRef } from 'react'
-import { Film, Download, Loader2, Play, X, FolderOpen } from 'lucide-react'
-import type { ProjectState } from '../api'
+import { Film, Download, Play, X, FolderOpen, Music } from 'lucide-react'
+import type { ProjectState, MusicTrack } from '../api'
 import { api } from '../api'
 
 interface Props {
   project: ProjectState
   onRefresh: () => void
+}
+
+type MusicMode = 'auto' | 'local' | 'none'
+
+function initialMode(value: string | null | undefined): MusicMode {
+  if (!value || value === 'auto') return 'auto'
+  if (value === 'none') return 'none'
+  return 'local'
 }
 
 export default function VideoPanel({ project, onRefresh }: Props) {
@@ -14,6 +22,27 @@ export default function VideoPanel({ project, onRefresh }: Props) {
   const [phase, setPhase] = useState('')
   const [error, setError] = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  const [musicMode, setMusicMode] = useState<MusicMode>(initialMode(project.background_music))
+  const [localTracks, setLocalTracks] = useState<MusicTrack[]>([])
+  const [localTrackPath, setLocalTrackPath] = useState<string>(
+    project.background_music && project.background_music !== 'auto' && project.background_music !== 'none'
+      ? project.background_music
+      : '',
+  )
+  const [musicVolume, setMusicVolume] = useState<number>(project.music_volume ?? 0.15)
+
+  useEffect(() => {
+    api.listLocalMusic().then(setLocalTracks).catch(() => setLocalTracks([]))
+  }, [])
+
+  const persistMusic = async (patch: { background_music?: string | null; music_volume?: number }) => {
+    try {
+      await api.setProjectMusic(project.project_id, patch)
+    } catch {
+      // ignore; will be reapplied on next assemble call
+    }
+  }
 
   const isAssembled = project.step === 'assembled'
   const scenes = project.script?.scenes || []
@@ -61,13 +90,19 @@ export default function VideoPanel({ project, onRefresh }: Props) {
     }
   }
 
+  const resolveMusicPayload = (): { background_music: string | null; music_volume: number } => {
+    if (musicMode === 'auto') return { background_music: 'auto', music_volume: musicVolume }
+    if (musicMode === 'none') return { background_music: 'none', music_volume: musicVolume }
+    return { background_music: localTrackPath || 'none', music_volume: musicVolume }
+  }
+
   const handleAssemble = async () => {
     setAssembling(true)
     setProgress(0)
     setPhase('starting')
     setError(null)
     try {
-      await api.runAssemble(project.project_id)
+      await api.runAssemble(project.project_id, resolveMusicPayload())
       startPolling()
     } catch (e) {
       setError('Failed to start assembly: ' + (e as Error).message)
@@ -151,6 +186,78 @@ export default function VideoPanel({ project, onRefresh }: Props) {
         {error && !assembling && (
           <div className="mt-3 p-2 rounded-lg border border-[var(--error)]/30 bg-[var(--error)]/5 text-xs text-[var(--error)]">
             {error}
+          </div>
+        )}
+      </div>
+
+      {/* Background music controls */}
+      <div className="p-4 rounded-xl border border-[var(--border)] bg-[var(--bg-secondary)]">
+        <div className="flex items-center gap-2 mb-3">
+          <Music size={14} className="text-[var(--accent)]" />
+          <h3 className="text-sm font-medium">Background Music</h3>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div>
+            <label className="block text-xs text-[var(--text-muted)] mb-1">Source</label>
+            <select
+              value={musicMode}
+              onChange={async (e) => {
+                const mode = e.target.value as MusicMode
+                setMusicMode(mode)
+                const bg = mode === 'local' ? localTrackPath || 'none' : mode
+                await persistMusic({ background_music: bg })
+              }}
+              className="w-full px-2 py-1.5 rounded-lg bg-[var(--bg-tertiary)] border border-[var(--border)] text-sm"
+            >
+              <option value="auto">Auto (tone-based)</option>
+              <option value="local">Local track</option>
+              <option value="none">None</option>
+            </select>
+          </div>
+          {musicMode === 'local' && (
+            <div>
+              <label className="block text-xs text-[var(--text-muted)] mb-1">
+                Track {localTracks.length === 0 && '(drop files into data/music/)'}
+              </label>
+              <select
+                value={localTrackPath}
+                onChange={async (e) => {
+                  const path = e.target.value
+                  setLocalTrackPath(path)
+                  await persistMusic({ background_music: path || 'none' })
+                }}
+                className="w-full px-2 py-1.5 rounded-lg bg-[var(--bg-tertiary)] border border-[var(--border)] text-sm"
+              >
+                <option value="">— Select —</option>
+                {localTracks.map(t => (
+                  <option key={t.id} value={t.path || ''}>{t.title}</option>
+                ))}
+              </select>
+            </div>
+          )}
+          <div className={musicMode === 'local' ? '' : 'md:col-span-2'}>
+            <label className="flex items-center justify-between text-xs text-[var(--text-muted)] mb-1">
+              <span>Volume</span>
+              <span className="tabular-nums">{Math.round(musicVolume * 100)}%</span>
+            </label>
+            <input
+              type="range"
+              min={0}
+              max={0.5}
+              step={0.01}
+              value={musicVolume}
+              onChange={e => setMusicVolume(parseFloat(e.target.value))}
+              onMouseUp={() => persistMusic({ music_volume: musicVolume })}
+              onTouchEnd={() => persistMusic({ music_volume: musicVolume })}
+              className="w-full accent-[var(--accent)]"
+            />
+          </div>
+        </div>
+        {project.selected_music && musicMode === 'auto' && (
+          <div className="mt-3 text-xs text-[var(--text-secondary)]">
+            ♪ {project.selected_music.title}
+            {project.selected_music.artist ? ` — ${project.selected_music.artist}` : ''}
+            {' '}({project.selected_music.source})
           </div>
         )}
       </div>
