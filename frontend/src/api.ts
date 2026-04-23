@@ -28,6 +28,8 @@ export interface Scene {
   animatediff_clip_paths?: (string | null)[]
   voice_error?: string
   image_error?: string
+  music_track?: string | null
+  music_volume?: number | null
 }
 
 export interface Script {
@@ -57,6 +59,8 @@ export interface ProjectState {
   output_dir?: string | null
   char_count?: number
   estimated_duration?: number
+  music_track?: string | null
+  music_volume?: number | null
 }
 
 export interface ProjectSummary {
@@ -216,12 +220,42 @@ export interface LorasResponse {
   defaults: string[]
 }
 
+export interface MusicTrack {
+  id: string
+  title: string
+  name?: string
+  path?: string
+  size_bytes?: number
+  source: 'local' | 'jamendo'
+  artist?: string
+  duration?: number
+  url?: string
+  license?: string
+}
+
+export interface MusicListResponse {
+  available: MusicTrack[]
+  default_volume: number
+  music_dir: string
+  jamendo_enabled: boolean
+}
+
 export const api = {
   health: () => request<HealthStatus>('/api/health'),
   tales: () => request<Tale[]>('/api/tales'),
   tale: (id: string) => request<Tale>(`/api/tales/${id}`),
   profiles: () => request<VoiceProfile[]>('/api/profiles'),
   loras: () => request<LorasResponse>('/api/loras'),
+  music: () => request<MusicListResponse>('/api/music'),
+  musicSearch: (query: string, limit?: number) =>
+    request<{ query: string; results: MusicTrack[] }>(`/api/music/search?query=${encodeURIComponent(query)}&limit=${limit || 8}`),
+  musicDownload: (url: string) =>
+    post<{ name: string; path: string; size_bytes: number }>('/api/music/download', { url }),
+
+  suggestMusic: (id: string) =>
+    post<{ scenes: { scene_index: number; query: string; reasoning: string; tracks: MusicTrack[] }[] }>(`/api/projects/${id}/suggest-music`, {}),
+  updateSceneMusic: (id: string, sceneIndex: number, body: { music_track?: string | null; music_volume?: number | null }) =>
+    put<Scene>(`/api/projects/${id}/scenes/${sceneIndex}/music`, body),
 
   listProjects: () => request<ProjectSummary[]>('/api/projects'),
   searchStories: (query: string, count?: number, ollama_model?: string) =>
@@ -268,12 +302,13 @@ export const api = {
   createProject: (body: { source_tale: string; custom_prompt?: string; target_minutes: number; ollama_model: string; tone?: string }) =>
     post<ProjectState>('/api/projects', body),
   getProject: (id: string) => request<ProjectState>(`/api/projects/${id}`),
+  duplicateProject: (id: string) => post<ProjectState>(`/api/projects/${id}/duplicate`),
   deleteProject: (id: string) => del<{ deleted: string }>(`/api/projects/${id}`),
   bulkDeleteProjects: (projectIds: string[]) =>
     post<{ deleted: string[]; not_found: string[] }>('/api/projects/bulk-delete', { project_ids: projectIds }),
   deleteBookGroup: (groupId: string) =>
     del<{ deleted: string[]; group_id: string }>(`/api/book-group/${groupId}`),
-  updateSettings: (id: string, body: { tone?: string; target_minutes?: number; suggested_length?: string }) =>
+  updateSettings: (id: string, body: { tone?: string; target_minutes?: number; suggested_length?: string; music_track?: string | null; music_volume?: number | null }) =>
     put<Record<string, unknown>>(`/api/projects/${id}/settings`, body),
 
   runScript: (id: string, body: { ollama_model?: string; target_minutes?: number; custom_prompt?: string }) =>
@@ -286,6 +321,9 @@ export const api = {
 
   runImages: (id: string, body: { backend: string; style_prompt: string; lora_keys?: string[] }) =>
     post<{ scenes: Scene[] }>(`/api/projects/${id}/images`, body),
+
+  regenerateSceneImages: (id: string, sceneIndex: number, body: { backend: string; style_prompt: string; lora_keys?: string[]; character_consistency?: boolean }) =>
+    post<{ scene: Scene }>(`/api/projects/${id}/images/${sceneIndex}`, body),
 
   runQC: (id: string, body: { vision_model?: string; pass_threshold?: number; style_prompt?: string; targets?: { scene_index: number; image_index: number }[] }) =>
     post<{ status: string }>(`/api/projects/${id}/qc`, body),
@@ -311,8 +349,8 @@ export const api = {
       `/api/projects/${id}/animation-progress`
     ),
 
-  runAssemble: (id: string) =>
-    post<{ status: string }>(`/api/projects/${id}/assemble`, {}),
+  runAssemble: (id: string, body?: { music_track?: string; music_volume?: number }) =>
+    post<{ status: string }>(`/api/projects/${id}/assemble`, body || {}),
 
   assemblyProgress: (id: string) =>
     request<{ active: boolean; progress: number; phase: string; error: string | null }>(

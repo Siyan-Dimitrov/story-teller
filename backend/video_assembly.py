@@ -13,9 +13,11 @@ from proglog import ProgressBarLogger
 from moviepy import (
     VideoClip,
     AudioFileClip,
+    CompositeAudioClip,
     ImageSequenceClip,
     concatenate_videoclips,
 )
+from moviepy.audio.fx import MultiplyVolume, AudioFadeIn, AudioFadeOut, AudioLoop
 
 from . import config
 
@@ -447,14 +449,67 @@ def _animatediff_clip(
 
 # ── Assembly ─────────────────────────────────────────────────
 
+def _resolve_music_path(music_track: str | None) -> Path | None:
+    """Resolve a user-supplied music_track to an absolute path.
+
+    Accepts an absolute path, a filename inside data/music/, an http(s) URL
+    (which will be downloaded into the music cache), or None.
+    """
+    if not music_track:
+        return None
+    if music_track.startswith(("http://", "https://")):
+        from . import music_search
+        return music_search.download_music_to_cache(music_track)
+    candidate = Path(music_track)
+    if candidate.is_absolute() and candidate.exists():
+        return candidate
+    in_music_dir = config.MUSIC_DIR / music_track
+    if in_music_dir.exists():
+        return in_music_dir
+    log.warning(f"Music track not found: {music_track}")
+    return None
+
+
+def _build_music_bed(music_path: Path, total_duration: float, volume: float) -> AudioFileClip | None:
+    """Load music, loop to cover total_duration, fade, scale volume."""
+    try:
+        bed = AudioFileClip(str(music_path))
+    except Exception as e:
+        log.error(f"Failed to load music {music_path}: {e}")
+        return None
+
+    if bed.duration < total_duration:
+        bed = bed.with_effects([AudioLoop(duration=total_duration)])
+    else:
+        bed = bed.with_duration(total_duration)
+
+    fade = min(config.MUSIC_FADE_SECONDS, total_duration / 4)
+    bed = bed.with_effects([
+        MultiplyVolume(max(0.0, min(1.0, volume))),
+        AudioFadeIn(fade),
+        AudioFadeOut(fade),
+    ])
+    log.info(
+        f"Music bed: {music_path.name} @ vol={volume:.2f}, "
+        f"{total_duration:.1f}s with {fade:.1f}s fades"
+    )
+    return bed
+
+
 def assemble_video(
     scenes: list[dict],
     project_dir: Path,
     output_filename: str = "final.mp4",
     crossfade: float = config.CROSSFADE_DURATION,
     project_id: str | None = None,
+    music_track: str | None = None,
+    music_volume: float | None = None,
 ) -> tuple[Path, float]:
-    """Assemble final video from scenes with images and audio."""
+    """Assemble final video from scenes with images and audio.
+
+    music_track: filename inside data/music/ or an absolute path. Optional.
+    music_volume: 0.0-1.0, defaults to config.MUSIC_DEFAULT_VOLUME.
+    """
     output_path = project_dir / output_filename
     clips = []
 
@@ -572,7 +627,32 @@ def assemble_video(
                 scene_video = concatenate_videoclips(scene_clips, method="compose")
 
             if audio_clip:
-                scene_video = scene_video.with_audio(audio_clip)
+                # Check for per-scene music override
+                scene_music_track = scene.get("music_track")
+                if scene_music_track:
+                    scene_music_path = _resolve_music_path(scene_music_track)
+                    if scene_music_path is not None:
+                        scene_vol = scene.get("music_volume")
+                        vol = scene_vol if scene_vol is not None else (music_volume if music_volume is not None else config.MUSIC_DEFAULT_VOLUME)
+                        bed = _build_music_bed(scene_music_path, scene_duration, vol)
+                        if bed is not None:
+                            scene_audio = CompositeAudioClip([audio_clip, bed])
+                            scene_video = scene_video.with_audio(scene_audio)
+                        else:
+                            scene_video = scene_video.with_audio(audio_clip)
+                    else:
+                        scene_video = scene_video.with_audio(audio_clip)
+                else:
+                    scene_video = scene_video.with_audio(audio_clip)
+            elif scene.get("music_track"):
+                # Scene has music but no voice audio — just use the music bed
+                scene_music_path = _resolve_music_path(scene.get("music_track"))
+                if scene_music_path is not None:
+                    scene_vol = scene.get("music_volume")
+                    vol = scene_vol if scene_vol is not None else (music_volume if music_volume is not None else config.MUSIC_DEFAULT_VOLUME)
+                    bed = _build_music_bed(scene_music_path, scene_duration, vol)
+                    if bed is not None:
+                        scene_video = scene_video.with_audio(bed)
 
             clips.append(scene_video)
 
@@ -589,6 +669,19 @@ def assemble_video(
             final = concatenate_videoclips(clips, method="compose")
 
         final = final.with_fps(config.VIDEO_FPS)
+
+        # Mix in global background music bed only if no per-scene music was used
+        any_scene_music = any(s.get("music_track") for s in scenes)
+        music_path = _resolve_music_path(music_track)
+        if music_path is not None and not any_scene_music:
+            vol = music_volume if music_volume is not None else config.MUSIC_DEFAULT_VOLUME
+            bed = _build_music_bed(music_path, final.duration, vol)
+            if bed is not None:
+                if final.audio is not None:
+                    composite = CompositeAudioClip([final.audio, bed])
+                else:
+                    composite = bed
+                final = final.with_audio(composite)
 
         # Build logger for progress tracking
         progress_logger = None

@@ -13,11 +13,12 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 import httpx
 
 from . import config
 from . import project_store as store
-from . import script_gen, voice_gen, image_gen, gutenberg, batch
+from . import script_gen, voice_gen, image_gen, gutenberg, batch, music_search
 from .video_assembly import assemble_video, get_assembly_progress, cancel_assembly
 from .animation import prepare_animations, get_animation_progress
 from .grimm_tales import list_tales, get_tale
@@ -28,6 +29,7 @@ from .models import (
     UpdateScriptRequest,
     RunVoiceRequest,
     RunImagesRequest,
+    RegenerateSceneImagesRequest,
     RunQCRequest,
     RegenerateQCRequest,
     RunAssembleRequest,
@@ -45,6 +47,7 @@ from .models import (
     IntelligentSplitRequest,
     IntelligentSplitResponse,
     TextPart,
+    UpdateSceneMusicRequest,
 )
 from .image_qc import run_qc_for_project, regenerate_and_evaluate, get_qc_progress, evaluate_single_image
 
@@ -55,6 +58,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname
 log = logging.getLogger(__name__)
 
 app = FastAPI(title="Story Teller", version="0.1.0")
+app.mount("/music", StaticFiles(directory=str(config.MUSIC_DIR)), name="music")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5191", "http://127.0.0.1:5191"],
@@ -331,6 +335,38 @@ async def get_loras():
     }
 
 
+@app.get("/api/music")
+async def list_music():
+    """List available background music tracks in data/music/."""
+    return {
+        "available": music_search.find_local_music(),
+        "default_volume": config.MUSIC_DEFAULT_VOLUME,
+        "music_dir": str(config.MUSIC_DIR),
+        "jamendo_enabled": bool(config.JAMENDO_CLIENT_ID),
+    }
+
+
+@app.get("/api/music/search")
+async def search_music(query: str = "cinematic", limit: int = 8):
+    """Search Jamendo for royalty-free instrumental music matching a mood/query."""
+    if not config.JAMENDO_CLIENT_ID:
+        raise HTTPException(
+            status_code=503,
+            detail="Jamendo not configured. Set JAMENDO_CLIENT_ID in the environment.",
+        )
+    tracks = await music_search.search_jamendo(query, limit=limit)
+    return {"query": query, "results": tracks}
+
+
+@app.post("/api/music/download")
+async def download_music(url: str):
+    """Download a remote music URL into data/music/ cache and return the local filename."""
+    path = music_search.download_music_to_cache(url)
+    if path is None:
+        raise HTTPException(status_code=400, detail="Could not download music from that URL.")
+    return {"name": path.name, "path": str(path), "size_bytes": path.stat().st_size}
+
+
 # ── Projects CRUD ────────────────────────────────────────────
 
 @app.get("/api/projects")
@@ -457,6 +493,33 @@ async def delete_book_group(group_id: str):
     return {"deleted": deleted, "group_id": group_id}
 
 
+@app.post("/api/projects/{project_id}/duplicate")
+async def duplicate_project(project_id: str):
+    try:
+        source_state = store.load_state(project_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Project not found")
+
+    new_id, new_dir = store.create_project()
+    # Copy settings from source
+    copy_fields = [
+        "source_tale", "tone", "target_minutes", "ollama_model",
+        "voice_language", "image_backend", "suggested_length",
+        "title", "music_track", "music_volume",
+    ]
+    updates = {k: source_state.get(k) for k in copy_fields if source_state.get(k) is not None}
+    if updates:
+        store.update_state(new_id, **updates)
+
+    # Copy script if it exists
+    script = store.load_json(project_id, "script.json")
+    if script:
+        store.save_json(new_id, "script.json", script)
+        store.update_state(new_id, step="scripted")
+
+    return store.load_state(new_id)
+
+
 @app.put("/api/projects/{project_id}/settings")
 async def update_settings(project_id: str, req: UpdateSettingsRequest):
     try:
@@ -470,6 +533,10 @@ async def update_settings(project_id: str, req: UpdateSettingsRequest):
         updates["target_minutes"] = req.target_minutes
     if req.suggested_length is not None:
         updates["suggested_length"] = req.suggested_length
+    if req.music_track is not None:
+        updates["music_track"] = req.music_track
+    if req.music_volume is not None:
+        updates["music_volume"] = req.music_volume
     if not updates:
         raise HTTPException(400, "No settings to update")
     state = store.update_state(project_id, **updates)
@@ -598,6 +665,48 @@ async def run_images(project_id: str, req: RunImagesRequest):
         tb = traceback.format_exc()
         log.error(f"Image generation failed: {tb}")
         store.update_state(project_id, step="voiced", error=f"{e}\n{tb}")
+        raise HTTPException(500, str(e))
+
+
+@app.post("/api/projects/{project_id}/images/{scene_index}")
+async def regenerate_scene_images(project_id: str, scene_index: int, req: RegenerateSceneImagesRequest):
+    state = store.load_state(project_id)
+    script = store.load_json(project_id, "script.json")
+    if not script:
+        raise HTTPException(400, "No script found")
+
+    scenes = script["scenes"]
+    if scene_index < 0 or scene_index >= len(scenes):
+        raise HTTPException(400, f"Invalid scene index {scene_index}")
+
+    scene = scenes[scene_index]
+    pdir = store.project_dir(project_id)
+
+    # Determine reference image for character consistency
+    reference_image = None
+    if req.character_consistency and req.backend == "replicate":
+        # Use first image of first scene as reference if available
+        if scenes and scenes[0].get("image_paths"):
+            ref_path = pdir / scenes[0]["image_paths"][0]
+            if ref_path.exists():
+                reference_image = ref_path
+
+    try:
+        updated_scene = await image_gen.generate_scene_images(
+            scene=scene,
+            project_dir=pdir,
+            backend=req.backend,
+            style_prompt=req.style_prompt,
+            lora_keys=req.lora_keys,
+            reference_image=reference_image,
+        )
+        scenes[scene_index] = updated_scene
+        script["scenes"] = scenes
+        store.save_json(project_id, "script.json", script)
+        return {"scene": updated_scene}
+    except Exception as e:
+        tb = traceback.format_exc()
+        log.error(f"Scene image regeneration failed: {tb}")
         raise HTTPException(500, str(e))
 
 
@@ -818,7 +927,8 @@ async def run_assemble(project_id: str, req: RunAssembleRequest):
     if progress["active"]:
         return {"status": "already_assembling"}
 
-    store.update_state(project_id, step="assembling", error=None)
+    store.update_state(project_id, step="assembling", error=None,
+                        music_track=req.music_track, music_volume=req.music_volume)
     pdir = store.project_dir(project_id)
 
     def _run():
@@ -827,6 +937,8 @@ async def run_assemble(project_id: str, req: RunAssembleRequest):
                 scenes=script["scenes"],
                 project_dir=pdir,
                 project_id=project_id,
+                music_track=req.music_track,
+                music_volume=req.music_volume,
             )
             store.update_state(project_id, step="assembled")
 
@@ -892,6 +1004,175 @@ async def assembly_cancel_endpoint(project_id: str):
         fallback = "animated"  # preserve animation data on cancel
         store.update_state(project_id, step=fallback, error="Assembly cancelled")
     return {"cancelled": cancelled}
+
+
+# ── Per-scene music suggestion ─────────────────────────────
+
+SUGGEST_MUSIC_PROMPT = """You are a music supervisor for dark fairy tale videos.
+Given scene descriptions, suggest a short 2-3 word instrumental music search query for each scene.
+
+EXTREMELY IMPORTANT: Your ENTIRE response must be ONLY a valid JSON array. NO explanations before. NO explanations after. NO markdown code fences with ```. Just raw JSON starting with [ and ending with ].
+
+JSON format: array of objects, one per scene, in order:
+[
+  {"scene_index": 0, "query": "dark orchestral", "reasoning": "..."},
+  ...
+]
+
+Rules:
+1. Each query should be 2-4 words, suitable for searching instrumental/background music
+2. Queries should match the scene mood and atmosphere
+3. Output ONLY the JSON array - nothing else
+"""
+
+
+# Mood-to-query fallback mapping
+_MOOD_TO_QUERY = {
+    "dark": "dark ambient",
+    "gothic": "gothic orchestral",
+    "tense": "suspense tension",
+    "suspenseful": "suspense tension",
+    "whimsical": "whimsical playful",
+    "peaceful": "peaceful ambient",
+    "sad": "melancholic piano",
+    "melancholic": "melancholic strings",
+    "epic": "epic cinematic",
+    "dramatic": "dramatic orchestral",
+    "mysterious": "mysterious atmospheric",
+    "horror": "horror dark ambient",
+    "romantic": "romantic strings",
+    "joyful": "joyful uplifting",
+    "calm": "calm ambient",
+}
+
+
+def _mood_to_query(mood: str) -> str:
+    mood_lower = mood.lower()
+    for key, query in _MOOD_TO_QUERY.items():
+        if key in mood_lower:
+            return query
+    return "cinematic background"
+
+
+@app.post("/api/projects/{project_id}/suggest-music")
+async def suggest_music(project_id: str):
+    """Suggest per-scene background music by querying Ollama and Jamendo."""
+    state = store.load_state(project_id)
+    script = store.load_json(project_id, "script.json")
+    if not script:
+        raise HTTPException(400, "No script found")
+
+    scenes = script.get("scenes", [])
+    if not scenes:
+        raise HTTPException(400, "No scenes in script")
+
+    ollama_model = state.get("ollama_model", config.OLLAMA_MODEL)
+    base_url = config.OLLAMA_URL
+
+    # Build prompt with scene summaries
+    scene_descriptions = []
+    for i, scene in enumerate(scenes):
+        desc = f"Scene {i}: mood={scene.get('mood', 'neutral')}, narration_preview={scene.get('narration', '')[:120]!r}, image_prompt={scene.get('image_prompt', '')[:120]!r}"
+        scene_descriptions.append(desc)
+
+    user_message = "Suggest instrumental music queries for these scenes:\n\n" + "\n".join(scene_descriptions)
+
+    queries = []
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                f"{base_url}/api/chat",
+                json={
+                    "model": ollama_model,
+                    "messages": [
+                        {"role": "system", "content": SUGGEST_MUSIC_PROMPT},
+                        {"role": "user", "content": user_message},
+                    ],
+                    "stream": False,
+                    "options": {"temperature": 0.5, "num_predict": 2000},
+                },
+            )
+        if resp.status_code == 200:
+            data = resp.json()
+            content = data.get("message", {}).get("content", "")
+            if content:
+                # Try to extract JSON array
+                import json
+                content = content.strip()
+                # Remove markdown fences if present
+                if content.startswith("```"):
+                    content = content.split("\n", 1)[1]
+                if content.endswith("```"):
+                    content = content.rsplit("\n", 1)[0]
+                if content.startswith("json"):
+                    content = content[4:].strip()
+                try:
+                    parsed = json.loads(content)
+                    if isinstance(parsed, list):
+                        queries = parsed
+                except json.JSONDecodeError:
+                    log.warning(f"Could not parse LLM music suggestion response: {content[:200]}")
+    except Exception as e:
+        log.warning(f"LLM music suggestion failed: {e}")
+
+    # Fallback to heuristic if LLM failed
+    if not queries:
+        queries = [
+            {"scene_index": i, "query": _mood_to_query(scene.get("mood", "cinematic")), "reasoning": "Fallback from mood heuristic"}
+            for i, scene in enumerate(scenes)
+        ]
+
+    # Search Jamendo for each unique query
+    unique_queries = {q["query"] for q in queries if q.get("query")}
+    query_results: dict[str, list[dict]] = {}
+    for query in unique_queries:
+        try:
+            tracks = await music_search.search_jamendo(query, limit=3)
+            query_results[query] = tracks
+        except Exception as e:
+            log.warning(f"Jamendo search failed for '{query}': {e}")
+            query_results[query] = []
+
+    # Build response
+    result_scenes = []
+    for q in queries:
+        si = q.get("scene_index", 0)
+        query = q.get("query", "cinematic background")
+        tracks = query_results.get(query, [])
+        result_scenes.append({
+            "scene_index": si,
+            "query": query,
+            "reasoning": q.get("reasoning", ""),
+            "tracks": tracks,
+        })
+
+    return {"scenes": result_scenes}
+
+
+@app.put("/api/projects/{project_id}/scenes/{scene_index}/music")
+async def update_scene_music(project_id: str, scene_index: int, req: UpdateSceneMusicRequest):
+    """Update music track/volume for a single scene."""
+    store.load_state(project_id)  # Verify exists
+    script = store.load_json(project_id, "script.json")
+    if not script:
+        raise HTTPException(400, "No script found")
+
+    scenes = script.get("scenes", [])
+    if scene_index < 0 or scene_index >= len(scenes):
+        raise HTTPException(400, f"Invalid scene index {scene_index}")
+
+    scene = scenes[scene_index]
+    if req.music_track is not None:
+        if req.music_track == "":
+            scene.pop("music_track", None)
+        else:
+            scene["music_track"] = req.music_track
+    if req.music_volume is not None:
+        scene["music_volume"] = req.music_volume
+
+    script["scenes"] = scenes
+    store.save_json(project_id, "script.json", script)
+    return scene
 
 
 # ── File serving ─────────────────────────────────────────────

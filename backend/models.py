@@ -29,6 +29,9 @@ class Scene(BaseModel):
     motion_presets: list[str] = Field(default_factory=list)  # per-image motion preset name
     depth_map_paths: list[str] = Field(default_factory=list)  # per-image depth map file paths
     animatediff_clip_paths: list[str] = Field(default_factory=list)  # per-image AnimateDiff output dirs
+    # Per-scene music (optional override of global music track)
+    music_track: Optional[str] = None  # filename in data/music/ or absolute path
+    music_volume: Optional[float] = None  # 0.0-1.0 override
 
 
 # ── Script ───────────────────────────────────────────────────
@@ -61,6 +64,9 @@ class ProjectState(BaseModel):
     book_group_id: Optional[str] = None
     chapter_index: Optional[int] = None
     book_title: Optional[str] = None
+    # Music preferences (persisted after assembly)
+    music_track: Optional[str] = None
+    music_volume: Optional[float] = None
 
 
 # ── API requests ─────────────────────────────────────────────
@@ -104,6 +110,13 @@ class RunImagesRequest(BaseModel):
     lora_keys: Optional[list[str]] = None  # e.g. ["tim_burton", "dark_fantasy"] - None uses defaults for backend
     # For Replicate: Uses FLUX LoRA URLs from config.FLUX_LORA_URLS
     # For ComfyUI: Uses local .safetensors files from AVAILABLE_LORAS
+
+
+class RegenerateSceneImagesRequest(BaseModel):
+    backend: str = "comfyui"
+    style_prompt: str = "dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting"
+    lora_keys: Optional[list[str]] = None
+    character_consistency: bool = False
 
 
 class SearchStoriesRequest(BaseModel):
@@ -172,8 +185,14 @@ class RegenerateQCRequest(BaseModel):
     lora_keys: Optional[list[str]] = None
 
 
+class UpdateSceneMusicRequest(BaseModel):
+    music_track: Optional[str] = None  # filename in data/music/ or absolute path, null to clear
+    music_volume: Optional[float] = None  # 0.0-1.0, null to use global default
+
+
 class RunAssembleRequest(BaseModel):
-    pass
+    music_track: Optional[str] = None  # filename in data/music/ or absolute path
+    music_volume: Optional[float] = None  # 0.0-1.0, defaults to config.MUSIC_DEFAULT_VOLUME
 
 
 # ── API responses ────────────────────────────────────────────
@@ -209,6 +228,8 @@ class UpdateSettingsRequest(BaseModel):
     tone: Optional[str] = None
     target_minutes: Optional[float] = None
     suggested_length: Optional[str] = None
+    music_track: Optional[str] = None
+    music_volume: Optional[float] = None
 
 
 class SplitProjectRequest(BaseModel):
