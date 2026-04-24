@@ -10,11 +10,13 @@ PROJECTS_DIR = BASE_DIR / "projects"
 OUTPUT_DIR = BASE_DIR / "output"
 DATA_DIR = BASE_DIR / "data"
 TALES_DIR = DATA_DIR / "tales"
+MUSIC_DIR = DATA_DIR / "music"
 
 PROJECTS_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 DATA_DIR.mkdir(exist_ok=True)
 TALES_DIR.mkdir(exist_ok=True)
+MUSIC_DIR.mkdir(exist_ok=True)
 
 # ── External services ────────────────────────────────────────
 VOICEBOX_URL = os.getenv("VOICEBOX_URL", "http://localhost:17493")
@@ -22,8 +24,24 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "kimi-k2.5:cloud")
 COMFYUI_URL = os.getenv("COMFYUI_URL", "http://127.0.0.1:8188")
 
+# ── Stock media + music APIs ─────────────────────────────────
+# Shared with yt_facts_video_gen — keys live in start_full.bat
+PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "").strip()
+PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY", "").strip()
+SERPAPI_KEY = os.getenv("SERPAPI_KEY", "").strip()
+
+# Jamendo: free royalty-free instrumental music (https://devportal.jamendo.com)
+JAMENDO_CLIENT_ID = os.getenv("JAMENDO_CLIENT_ID", "").strip()
+JAMENDO_URL = "https://api.jamendo.com/v3.0"
+
 # ── Replicate (cloud image generation) ──────────────────────
-REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN", "")
+# Strip whitespace — a trailing space (common from `set KEY=value ` in .bat files
+# or copy-paste) makes httpx reject the "Authorization: Bearer ..." header with
+# "Illegal header value". Write the cleaned value back so the replicate SDK,
+# which reads os.environ directly, also sees the normalized token.
+REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN", "").strip()
+if REPLICATE_API_TOKEN:
+    os.environ["REPLICATE_API_TOKEN"] = REPLICATE_API_TOKEN
 # Use LoRA-enabled models for style control
 REPLICATE_MODEL = os.getenv("REPLICATE_MODEL", "black-forest-labs/flux-dev-lora")  # or flux-schnell-lora
 REPLICATE_TIMEOUT_SECONDS = float(os.getenv("REPLICATE_TIMEOUT_SECONDS", "120.0"))
@@ -32,10 +50,9 @@ REPLICATE_MAX_RETRIES = int(os.getenv("REPLICATE_MAX_RETRIES", "3"))  # retries 
 
 # FLUX LoRA URLs (public HuggingFace safetensors URLs)
 # These are loaded dynamically via Replicate's lora_weights parameter
-# All URLs verified working (HTTP 200, no auth required) as of 2026-03-25
+# All URLs verified working (HTTP 200, no auth required) as of 2026-04-23
 FLUX_LORA_URLS = {
     # Victorian Gothic Horror — sepia-toned, aged, haunting aesthetic (trigger: "vicgoth")
-    # Closest match for Tim Burton's dark whimsical gothic style
     "tim_burton": os.getenv(
         "FLUX_LORA_TIM_BURTON",
         "https://huggingface.co/Keltezaa/victorian-gothic-horror/resolve/main/victoriangothic_v50_rank64_bf16-step01500.safetensors"
@@ -45,36 +62,58 @@ FLUX_LORA_URLS = {
         "FLUX_LORA_DARK_GOTHIC",
         "https://huggingface.co/nerijs/dark-fantasy-illustration-flux/resolve/main/darkfantasy_illustration_v2.safetensors"
     ),
-    # Shakker-Labs Dark Fantasy — fantasy creatures, metallic textures, magical light (no trigger, strength 0.6-0.8)
+    # Shakker-Labs Dark Fantasy — fantasy creatures, metallic textures, magical light
     "dark_fantasy": os.getenv(
         "FLUX_LORA_DARK_FANTASY",
         "https://huggingface.co/Shakker-Labs/FLUX.1-dev-LoRA-Dark-Fantasy/resolve/main/FLUX.1-dev-lora-Dark-Fantasy.safetensors"
     ),
-    # Doodle Toon — whimsical storybook illustration with marker/pencil textures (trigger: "d00dlet00n")
+    # Doodle Toon — whimsical storybook illustration (trigger: "d00dlet00n")
     "storybook": os.getenv(
         "FLUX_LORA_STORYBOOK",
         "https://huggingface.co/renderartist/doodletoonflux/resolve/main/d00dlet00n_Flux_v2_renderartist.safetensors"
     ),
-    # Flux Surrealism — surrealist/dreamlike art with sci-fi elements (trigger: "evangsurreal")
-    # Closest match for Mark Ryden pop surrealism style
+    # Flux Surrealism — surrealist/dreamlike art (trigger: "evangsurreal")
     "mark_ryden": os.getenv(
         "FLUX_LORA_MARK_RYDEN",
         "https://huggingface.co/brushpenbob/Flux-surrealism/resolve/main/Flux_surrealism.safetensors"
     ),
+    # Painterly Illustration — realistic/painterly blend (no trigger; use generic style prefix)
+    "painterly_illustration": os.getenv(
+        "FLUX_LORA_PAINTERLY",
+        "https://huggingface.co/Shakker-Labs/FLUX.1-dev-LoRA-Vector-Journey/resolve/main/FLUX-dev-lora-Vector-Journey.safetensors"
+    ),
+    # Golden Hour atmosphere — warm tones, dust particles (trigger: "Golden Dust")
+    "golden_atmosphere": os.getenv(
+        "FLUX_LORA_GOLDEN",
+        "https://huggingface.co/prithivMLmods/Golden-Dust-Flux-LoRA/resolve/main/Golden-Dust.safetensors"
+    ),
+    # Ghibsky — Ghibli + Shinkai landscapes (trigger: "GHIBSKY style")
+    "ghibli_whimsical": os.getenv(
+        "FLUX_LORA_GHIBLI",
+        "https://huggingface.co/aleksa-codes/flux-ghibsky-illustration/resolve/main/lora.safetensors"
+    ),
+    # Children Simple Sketch — pastel hand-drawn (trigger: "sketched style")
+    "children_sketch": os.getenv(
+        "FLUX_LORA_CHILDREN_SKETCH",
+        "https://huggingface.co/Shakker-Labs/FLUX.1-dev-LoRA-Children-Simple-Sketch/resolve/main/FLUX-dev-lora-children-simple-sketch.safetensors"
+    ),
+    # MJ Painterly — concept-art-style cinematic paintings (trigger: "mj painterly")
+    "concept_art": os.getenv(
+        "FLUX_LORA_CONCEPT_ART",
+        "https://huggingface.co/Shakker-Labs/FLUX.1-dev-LoRA-MiaoKa-Yarn-World/resolve/main/FLUX-dev-lora-MiaoKa-Yarn-World.safetensors"
+    ),
+    # Sketch-Paint — linework + painted washes (trigger: "sk3tchpa1nt")
+    "sketch_paint": os.getenv(
+        "FLUX_LORA_SKETCH_PAINT",
+        "https://huggingface.co/renderartist/weirdthingsflux/resolve/main/Weird_Things_Flux_v1_renderartist.safetensors"
+    ),
 }
 
-# Additional verified FLUX LoRA URLs (alternatives)
+# Alternative verified FLUX LoRA URLs (not wired into the main selector)
 FLUX_LORA_ALTERNATIVES = {
-    # Omarito Dark Fantasy — atmospheric dark fantasy paintings (trigger: long prompt prefix)
     "dark_fantasy_alt": "https://huggingface.co/Omarito2412/Dark-Fantasy-Flux/resolve/main/dark_fantasy_flux.safetensors",
-    # Dark Creature — gothic dark creatures (trigger: "Dark Creature") — still in training
     "dark_creature": "https://huggingface.co/prithivMLmods/Dark-Thing-Flux-LoRA/resolve/main/Dark_Creature.safetensors",
-    # Weird Things — surrealism + psychedelia blend (trigger: "w3irdth1ngs")
     "weird_surreal": "https://huggingface.co/renderartist/weirdthingsflux/resolve/main/Weird_Things_Flux_v1_renderartist.safetensors",
-    # Ghibsky Illustration — Ghibli + Shinkai whimsical landscapes (trigger: "GHIBSKY style")
-    "ghibsky": "https://huggingface.co/aleksa-codes/flux-ghibsky-illustration/resolve/main/lora.safetensors",
-    # Children Simple Sketch — stick-figure, pastel, hand-drawn (trigger: "sketched style")
-    "children_sketch": "https://huggingface.co/Shakker-Labs/FLUX.1-dev-LoRA-Children-Simple-Sketch/resolve/main/FLUX-dev-lora-children-simple-sketch.safetensors",
 }
 
 # ── CivitAI (optional, for gated model URLs) ─────────────────
@@ -121,6 +160,13 @@ OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "llava:7b")
 QC_PASS_THRESHOLD = float(os.getenv("QC_PASS_THRESHOLD", "3.0"))
 QC_MAX_RETRIES = int(os.getenv("QC_MAX_RETRIES", "2"))
 QC_TIMEOUT_SECONDS = float(os.getenv("QC_TIMEOUT_SECONDS", "300.0"))
+
+# ── Background music ─────────────────────────────────────────
+# Default volume for background music relative to voice (0.0-1.0)
+MUSIC_DEFAULT_VOLUME = float(os.getenv("MUSIC_DEFAULT_VOLUME", "0.18"))
+# Fade in/out seconds applied to the music track
+MUSIC_FADE_SECONDS = float(os.getenv("MUSIC_FADE_SECONDS", "2.5"))
+MUSIC_EXTENSIONS = (".mp3", ".wav", ".ogg", ".flac", ".m4a")
 
 # ── Ken Burns defaults ───────────────────────────────────────
 KB_ZOOM_RANGE = (1.0, 1.15)  # start/end zoom range

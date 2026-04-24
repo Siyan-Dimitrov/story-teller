@@ -3,6 +3,7 @@
 import logging
 import math
 import random
+import subprocess
 import threading
 from pathlib import Path
 
@@ -470,12 +471,67 @@ def _resolve_music_path(music_track: str | None) -> Path | None:
     return None
 
 
+def _loudnorm_track(src: Path) -> Path:
+    """Return a loudness-normalized copy of src (cached on disk).
+
+    Different tracks ship at wildly different mastering levels, so a single master
+    volume multiplier sounds inconsistent scene-to-scene. We pre-process each track
+    through ffmpeg's EBU R128 loudnorm filter so every bed hits the same perceived
+    loudness target (-23 LUFS) — then the user's volume slider lands predictably.
+
+    Cached copies live in data/music/.loudnorm/ and are keyed by source mtime so
+    edits/replacements invalidate automatically. Falls back to the raw file if
+    ffmpeg is unavailable or the pass fails — we don't want to block assembly.
+    """
+    cache_dir = config.MUSIC_DIR / ".loudnorm"
+    cache_dir.mkdir(exist_ok=True)
+
+    try:
+        mtime = int(src.stat().st_mtime)
+    except OSError:
+        return src
+
+    cache_path = cache_dir / f"{src.stem}_{mtime}.mp3"
+    if cache_path.exists() and cache_path.stat().st_size > 0:
+        return cache_path
+
+    try:
+        result = subprocess.run(
+            [
+                config.FFMPEG_PATH, "-y",
+                "-i", str(src),
+                "-filter:a", "loudnorm=I=-23:TP=-2:LRA=7",
+                "-c:a", "libmp3lame",
+                "-b:a", "192k",
+                "-ar", "44100",
+                str(cache_path),
+            ],
+            capture_output=True,
+            timeout=120,
+        )
+        if result.returncode != 0 or not cache_path.exists() or cache_path.stat().st_size == 0:
+            log.warning(
+                f"loudnorm failed for {src.name} (rc={result.returncode}), using raw track. "
+                f"stderr: {result.stderr.decode('utf-8', errors='replace')[-400:]}"
+            )
+            if cache_path.exists():
+                cache_path.unlink(missing_ok=True)
+            return src
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        log.warning(f"loudnorm unavailable/timed out for {src.name}: {e}. Using raw track.")
+        return src
+
+    log.info(f"loudnorm: cached normalized copy of {src.name} → {cache_path.name}")
+    return cache_path
+
+
 def _build_music_bed(music_path: Path, total_duration: float, volume: float) -> AudioFileClip | None:
     """Load music, loop to cover total_duration, fade, scale volume."""
+    normalized_path = _loudnorm_track(music_path)
     try:
-        bed = AudioFileClip(str(music_path))
+        bed = AudioFileClip(str(normalized_path))
     except Exception as e:
-        log.error(f"Failed to load music {music_path}: {e}")
+        log.error(f"Failed to load music {normalized_path}: {e}")
         return None
 
     if bed.duration < total_duration:

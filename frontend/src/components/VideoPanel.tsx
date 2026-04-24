@@ -48,7 +48,7 @@ export default function VideoPanel({ project, onRefresh }: Props) {
   const audioRef = useRef<HTMLAudioElement | null>(null)
 
   // Per-scene music
-  const [sceneSuggestions, setSceneSuggestions] = useState<Record<number, { query: string; reasoning: string; tracks: MusicTrack[] }>>({})
+  const [sceneSuggestions, setSceneSuggestions] = useState<Record<number, { query: string; reasoning: string; tracks: MusicTrack[]; assignedTrack?: string | null }>>({})
   const [suggestingAll, setSuggestingAll] = useState(false)
   const [suggestingScene, setSuggestingScene] = useState<number | null>(null)
 
@@ -263,11 +263,26 @@ export default function VideoPanel({ project, onRefresh }: Props) {
     setSuggestingAll(true)
     try {
       const data = await api.suggestMusic(project.project_id)
-      const map: Record<number, { query: string; reasoning: string; tracks: MusicTrack[] }> = {}
+      const map: Record<number, { query: string; reasoning: string; tracks: MusicTrack[]; assignedTrack?: string | null }> = {}
       for (const s of data.scenes) {
-        map[s.scene_index] = { query: s.query, reasoning: s.reasoning, tracks: s.tracks }
+        map[s.scene_index] = {
+          query: s.query,
+          reasoning: s.reasoning,
+          tracks: s.tracks,
+          assignedTrack: s.assigned_track ?? null,
+        }
       }
       setSceneSuggestions(map)
+
+      // The backend downloaded the top tracks into data/music/ and wrote them into
+      // script.json as scene.music_track. Refresh the local music list so the newly
+      // cached files appear as options, and reload the project so the dropdowns
+      // pick up the auto-assigned values.
+      try {
+        const music = await api.music()
+        setMusicTracks(music.available)
+      } catch {}
+      onRefresh()
     } catch (e) {
       setError('Music suggestion failed: ' + (e as Error).message)
     } finally {

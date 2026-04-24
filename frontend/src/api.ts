@@ -253,7 +253,7 @@ export const api = {
     post<{ name: string; path: string; size_bytes: number }>('/api/music/download', { url }),
 
   suggestMusic: (id: string) =>
-    post<{ scenes: { scene_index: number; query: string; reasoning: string; tracks: MusicTrack[] }[] }>(`/api/projects/${id}/suggest-music`, {}),
+    post<{ scenes: { scene_index: number; query: string; reasoning: string; tracks: MusicTrack[]; assigned_track?: string | null }[] }>(`/api/projects/${id}/suggest-music`, {}),
   updateSceneMusic: (id: string, sceneIndex: number, body: { music_track?: string | null; music_volume?: number | null }) =>
     put<Scene>(`/api/projects/${id}/scenes/${sceneIndex}/music`, body),
 

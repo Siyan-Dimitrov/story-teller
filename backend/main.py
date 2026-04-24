@@ -1115,36 +1115,100 @@ async def suggest_music(project_id: str):
     except Exception as e:
         log.warning(f"LLM music suggestion failed: {e}")
 
-    # Fallback to heuristic if LLM failed
-    if not queries:
-        queries = [
-            {"scene_index": i, "query": _mood_to_query(scene.get("mood", "cinematic")), "reasoning": "Fallback from mood heuristic"}
-            for i, scene in enumerate(scenes)
-        ]
+    # Normalize LLM-returned indexes and fill in any scenes the LLM skipped with a
+    # mood-heuristic query so every scene gets a suggestion+assignment attempt.
+    queries_by_index: dict[int, dict] = {}
+    for q in queries:
+        try:
+            si = int(q.get("scene_index"))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= si < len(scenes) and q.get("query") and si not in queries_by_index:
+            queries_by_index[si] = {
+                "scene_index": si,
+                "query": str(q["query"]),
+                "reasoning": q.get("reasoning", ""),
+            }
+    for i, scene in enumerate(scenes):
+        if i not in queries_by_index:
+            queries_by_index[i] = {
+                "scene_index": i,
+                "query": _mood_to_query(scene.get("mood", "cinematic")),
+                "reasoning": "Fallback from mood heuristic",
+            }
+    queries = [queries_by_index[i] for i in sorted(queries_by_index)]
 
-    # Search Jamendo for each unique query
+    # Search Jamendo for each unique query. Include a generic fallback query that we
+    # fall back to when a scene-specific query returns zero tracks.
+    FALLBACK_QUERY = "cinematic background"
     unique_queries = {q["query"] for q in queries if q.get("query")}
+    unique_queries.add(FALLBACK_QUERY)
     query_results: dict[str, list[dict]] = {}
     for query in unique_queries:
         try:
-            tracks = await music_search.search_jamendo(query, limit=3)
+            tracks = await music_search.search_jamendo(query, limit=5)
             query_results[query] = tracks
         except Exception as e:
             log.warning(f"Jamendo search failed for '{query}': {e}")
             query_results[query] = []
 
-    # Build response
+    # Auto-download the top track per scene and assign it as scene.music_track.
+    # Download URLs are cached on disk by SHA1, so repeated calls are cheap.
+    import asyncio
+    download_cache: dict[str, str] = {}  # url -> local filename
+
+    async def _download_name(url: str) -> str | None:
+        if url in download_cache:
+            return download_cache[url]
+        path = await asyncio.to_thread(music_search.download_music_to_cache, url)
+        if path is None:
+            return None
+        download_cache[url] = path.name
+        return path.name
+
+    async def _assign_from_tracks(track_list: list[dict]) -> str | None:
+        """Walk the track list and return the filename of the first one that downloads."""
+        for t in track_list:
+            url = t.get("url")
+            if not url:
+                continue
+            name = await _download_name(url)
+            if name:
+                return name
+        return None
+
+    # Build response and mutate script scenes with auto-assigned tracks
     result_scenes = []
+    assigned_any = False
     for q in queries:
-        si = q.get("scene_index", 0)
-        query = q.get("query", "cinematic background")
+        si = q["scene_index"]
+        query = q["query"]
         tracks = query_results.get(query, [])
+
+        # Try the scene-specific query first, then fall back to the generic query
+        # if we couldn't download any of its tracks (common when Jamendo returns
+        # tracks whose audio URLs 404 or the query returned zero results).
+        assigned_track = await _assign_from_tracks(tracks)
+        if not assigned_track and query != FALLBACK_QUERY:
+            assigned_track = await _assign_from_tracks(query_results.get(FALLBACK_QUERY, []))
+
+        if assigned_track:
+            scenes[si]["music_track"] = assigned_track
+            assigned_any = True
+        else:
+            log.warning(f"suggest-music: no downloadable track for scene {si} (query='{query}')")
+
         result_scenes.append({
             "scene_index": si,
             "query": query,
             "reasoning": q.get("reasoning", ""),
             "tracks": tracks,
+            "assigned_track": assigned_track,
         })
+
+    if assigned_any:
+        script["scenes"] = scenes
+        store.save_json(project_id, "script.json", script)
 
     return {"scenes": result_scenes}
 
