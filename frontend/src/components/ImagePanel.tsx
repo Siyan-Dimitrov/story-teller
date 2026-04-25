@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react'
-import { ImageIcon, Loader2, RefreshCw } from 'lucide-react'
+import { useState, useEffect, useRef } from 'react'
+import { ImageIcon, Loader2, RefreshCw, ChevronDown, RotateCcw } from 'lucide-react'
 import type { ProjectState, LoraInfo } from '../api'
 import { api } from '../api'
 
@@ -11,6 +11,83 @@ interface Props {
 
 const DEFAULT_STYLE = 'dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting, Tim Burton inspired, rich colors, dramatic shadows'
 
+function LoraDropdown({
+  label,
+  sublabel,
+  value,
+  onChange,
+  entries,
+  disabledKey,
+}: {
+  label: string
+  sublabel?: string
+  value: string
+  onChange: (v: string) => void
+  entries: [string, LoraInfo][]
+  disabledKey?: string
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
+  const selected = entries.find(([k]) => k === value)
+  const displayName = selected ? selected[0].replace(/_/g, ' ') : 'None'
+
+  return (
+    <div className="flex-1" ref={ref}>
+      <label className="block text-xs text-[var(--text-secondary)] mb-1.5">
+        {label}
+        {sublabel && <span className="ml-1 text-[var(--text-muted)]">{sublabel}</span>}
+      </label>
+      <div className="relative">
+        <button
+          type="button"
+          onClick={() => setOpen(!open)}
+          className="w-full flex items-center justify-between bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)] text-left"
+        >
+          <span className="capitalize truncate">{displayName}</span>
+          <ChevronDown size={14} className={`ml-2 transition-transform ${open ? 'rotate-180' : ''}`} />
+        </button>
+        {open && (
+          <div className="absolute z-50 mt-1 w-full max-h-64 overflow-y-auto bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg shadow-lg">
+            <button
+              type="button"
+              onClick={() => { onChange(''); setOpen(false) }}
+              className={`w-full text-left px-3 py-2 text-sm hover:bg-[var(--bg-secondary)] ${!value ? 'text-[var(--accent)]' : 'text-[var(--text-primary)]'}`}
+            >
+              None
+            </button>
+            {entries.map(([key, lora]) => {
+              const disabled = key === disabledKey
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => { onChange(key); setOpen(false) }}
+                  className={`w-full text-left px-3 py-2 hover:bg-[var(--bg-secondary)] ${disabled ? 'opacity-40 cursor-not-allowed' : ''} ${key === value ? 'text-[var(--accent)]' : 'text-[var(--text-primary)]'}`}
+                >
+                  <div className="text-sm capitalize">{key.replace(/_/g, ' ')}</div>
+                  {lora.description && (
+                    <div className="text-[10px] text-[var(--text-muted)] mt-0.5 leading-tight">{lora.description}</div>
+                  )}
+                </button>
+              )
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export default function ImagePanel({ project, onRefresh, onNext }: Props) {
   const [backend, setBackend] = useState(project.image_backend || 'comfyui')
   const [stylePrompt, setStylePrompt] = useState(DEFAULT_STYLE)
@@ -18,6 +95,8 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
   const [availableLoras, setAvailableLoras] = useState<Record<string, LoraInfo>>({})
   const [primaryLora, setPrimaryLora] = useState('')
   const [secondaryLora, setSecondaryLora] = useState('')
+  const [characterConsistency, setCharacterConsistency] = useState(false)
+  const [regeneratingScene, setRegeneratingScene] = useState<number | null>(null)
 
   useEffect(() => {
     api.loras().then(data => {
@@ -34,13 +113,36 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
     setGenerating(true)
     try {
       const lora_keys = [primaryLora, secondaryLora].filter(Boolean)
-      await api.runImages(project.project_id, { backend, style_prompt: stylePrompt, lora_keys })
+      await api.runImages(project.project_id, {
+        backend,
+        style_prompt: stylePrompt,
+        lora_keys,
+        ...(characterConsistency && backend === 'replicate' ? { character_consistency: true } : {}),
+      })
       onRefresh()
     } catch (e) {
       alert('Image generation failed: ' + (e as Error).message)
       onRefresh()
     } finally {
       setGenerating(false)
+    }
+  }
+
+  const handleRegenerateScene = async (sceneIndex: number) => {
+    setRegeneratingScene(sceneIndex)
+    try {
+      const lora_keys = [primaryLora, secondaryLora].filter(Boolean)
+      await api.regenerateSceneImages(project.project_id, sceneIndex, {
+        backend,
+        style_prompt: stylePrompt,
+        lora_keys,
+        character_consistency: characterConsistency && backend === 'replicate',
+      })
+      onRefresh()
+    } catch (e) {
+      alert('Scene regeneration failed: ' + (e as Error).message)
+    } finally {
+      setRegeneratingScene(null)
     }
   }
 
@@ -68,6 +170,7 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
               >
                 <option value="comfyui">ComfyUI (Local)</option>
                 <option value="replicate">Replicate Flux (Cloud)</option>
+                <option value="gpt_image">GPT Image 2 (OpenAI)</option>
                 <option value="ollama">Ollama (Placeholder)</option>
               </select>
             </div>
@@ -84,49 +187,46 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
           {(backend === 'comfyui' || backend === 'replicate') && Object.keys(availableLoras).length > 0 && (() => {
             const loraEntries = Object.entries(availableLoras).filter(([, lora]) =>
               backend === 'replicate' ? lora.has_flux : true
-            )
+            ) as [string, LoraInfo][]
             if (loraEntries.length === 0) return null
             return (
               <div className="flex items-end gap-4">
-                <div className="flex-1">
-                  <label className="block text-xs text-[var(--text-secondary)] mb-1.5">
-                    Primary LoRA Style
-                    {backend === 'replicate' && <span className="ml-1 text-[var(--text-muted)]">— FLUX LoRA</span>}
-                  </label>
-                  <select
-                    value={primaryLora}
-                    onChange={e => setPrimaryLora(e.target.value)}
-                    className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
-                  >
-                    <option value="">None</option>
-                    {loraEntries.map(([key, lora]) => (
-                      <option key={key} value={key} disabled={key === secondaryLora}>
-                        {key.replace(/_/g, ' ')} ({lora.trigger})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div className="flex-1">
-                  <label className="block text-xs text-[var(--text-secondary)] mb-1.5">
-                    Secondary LoRA Style
-                    <span className="ml-1 text-[var(--text-muted)]">— optional</span>
-                  </label>
-                  <select
-                    value={secondaryLora}
-                    onChange={e => setSecondaryLora(e.target.value)}
-                    className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
-                  >
-                    <option value="">None</option>
-                    {loraEntries.map(([key, lora]) => (
-                      <option key={key} value={key} disabled={key === primaryLora}>
-                        {key.replace(/_/g, ' ')} ({lora.trigger})
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                <LoraDropdown
+                  label="Primary LoRA Style"
+                  sublabel={backend === 'replicate' ? '-- FLUX LoRA' : undefined}
+                  value={primaryLora}
+                  onChange={setPrimaryLora}
+                  entries={loraEntries}
+                  disabledKey={secondaryLora}
+                />
+                <LoraDropdown
+                  label="Secondary LoRA Style"
+                  sublabel="-- optional"
+                  value={secondaryLora}
+                  onChange={setSecondaryLora}
+                  entries={loraEntries}
+                  disabledKey={primaryLora}
+                />
               </div>
             )
           })()}
+          {backend === 'replicate' && (
+            <label className="flex items-center gap-2 text-sm text-[var(--text-secondary)] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={characterConsistency}
+                onChange={e => setCharacterConsistency(e.target.checked)}
+                className="rounded border-[var(--border)]"
+              />
+              <span>Character Consistency</span>
+              <span className="text-[10px] text-[var(--text-muted)]">First image used as visual reference for all subsequent images</span>
+            </label>
+          )}
+          {backend === 'gpt_image' && (
+            <p className="text-xs text-[var(--text-muted)]">
+              Uses <code>OPENAI_API_KEY</code> from the backend <code>.env</code> file. LoRA selections are ignored; style is taken from the prompt.
+            </p>
+          )}
           <div className="flex justify-end">
             <button
               onClick={handleGenerate}
@@ -160,6 +260,14 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
                   <div className="flex items-center gap-2">
                     <span className="text-[10px] text-[var(--text-muted)]">{paths.length} image{paths.length !== 1 ? 's' : ''}</span>
                     <span className="text-[10px] text-[var(--text-muted)]">{scene.mood}</span>
+                    <button
+                      onClick={() => handleRegenerateScene(i)}
+                      disabled={regeneratingScene === i || generating}
+                      className="p-1 rounded text-[var(--text-muted)] hover:text-[var(--accent)] transition-colors disabled:opacity-40"
+                      title="Regenerate this scene"
+                    >
+                      {regeneratingScene === i ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />}
+                    </button>
                   </div>
                 </div>
                 <div className="grid grid-cols-4 gap-1 p-1">

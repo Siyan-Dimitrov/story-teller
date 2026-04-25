@@ -5,6 +5,7 @@ export interface HealthStatus {
   voicebox: boolean
   comfyui: boolean
   replicate: boolean
+  openai: boolean
   ffmpeg: boolean
 }
 
@@ -20,7 +21,7 @@ export interface Scene {
   image_path?: string | null
   image_paths?: string[]
   kb_effect: string
-  qc_results?: { image_index: number; passed: boolean; scores: Record<string, number>; average_score: number; reasoning: string; attempts: number }[]
+  qc_results?: { image_index: number; passed: boolean; scores: Record<string, number>; average_score: number; reasoning: string; attempts: number; error?: string | null }[]
   qc_passed?: boolean
   animation_types?: string[]
   motion_presets?: string[]
@@ -213,6 +214,7 @@ export interface LoraInfo {
   trigger: string
   file: string
   has_flux: boolean
+  description?: string
 }
 
 export interface LorasResponse {
@@ -288,6 +290,7 @@ export const api = {
     image_backend?: string
     style_prompt?: string
     lora_keys?: string[]
+    character_consistency?: boolean
   }) => post<{ status: string }>(`/api/batch/${groupId}/run`, body),
 
   batchProgress: (groupId: string) =>
@@ -319,7 +322,7 @@ export const api = {
   runVoice: (id: string, body: { profile_id: string; language: string; instruct?: string }) =>
     post<{ scenes: Scene[] }>(`/api/projects/${id}/voice`, body),
 
-  runImages: (id: string, body: { backend: string; style_prompt: string; lora_keys?: string[] }) =>
+  runImages: (id: string, body: { backend: string; style_prompt: string; lora_keys?: string[]; character_consistency?: boolean }) =>
     post<{ scenes: Scene[] }>(`/api/projects/${id}/images`, body),
 
   regenerateSceneImages: (id: string, sceneIndex: number, body: { backend: string; style_prompt: string; lora_keys?: string[]; character_consistency?: boolean }) =>

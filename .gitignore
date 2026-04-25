@@ -7,6 +7,8 @@ node_modules/
 dist/
 data/
 projects/
+output/
+.claude/
 *.egg-info/
 .env
 *.log

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Plus, BookOpen, Trash2, Clock, ChevronRight, Search, Loader2, Globe, ChevronDown, Layers, Play, Palette } from 'lucide-react'
+import { Plus, BookOpen, Trash2, Clock, ChevronRight, Search, Loader2, Globe, ChevronDown, Layers, Play, Palette, Copy } from 'lucide-react'
 import type { ProjectSummary, Tale, StorySearchResult, GutenbergBook, AnalyzedChapter, VoiceProfile } from '../api'
 import { api } from '../api'
 
@@ -49,12 +49,14 @@ const GUTENBERG_LANGUAGES = [
 ]
 
 const STYLE_PRESETS = [
-  { label: 'Tim Burton Gothic', prompt: 'Tim Burton style, dark whimsical illustration, exaggerated proportions, stark contrasts, eerie charm, spiral motifs, gothic fairy tale', loras: ['tim_burton'] },
-  { label: 'Dark Fantasy', prompt: 'dark fantasy illustration, dramatic lighting, rich shadows, mythical atmosphere, intricate detail, oil painting style', loras: ['dark_fantasy'] },
-  { label: 'Gothic Horror', prompt: 'dark gothic horror illustration, Victorian atmosphere, candlelit shadows, decaying grandeur, haunting beauty, sepia undertones', loras: ['dark_gothic'] },
-  { label: 'Dark Storybook', prompt: 'dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting, pen and ink with watercolor', loras: ['storybook'] },
-  { label: 'Surreal Macabre', prompt: 'Mark Ryden style, pop surrealism, porcelain skin, unsettling beauty, meat and roses, wide-eyed figures, hyper-detailed oil painting', loras: ['mark_ryden'] },
-  { label: 'Ghibli Dark', prompt: 'Studio Ghibli style, dark fairy tale mood, lush environments, melancholic atmosphere, hand-painted animation aesthetic', loras: [] },
+  { label: 'Victorian Gothic', prompt: 'Tim Burton style, dark whimsical illustration, exaggerated proportions, stark contrasts, eerie charm, spiral motifs, gothic fairy tale', loras: ['tim_burton'] },
+  { label: 'Dark Fantasy', prompt: 'dark fantasy illustration, dramatic lighting, rich shadows, mythical atmosphere, intricate detail, oil painting style', loras: ['dark_gothic'] },
+  { label: 'Whimsical Storybook', prompt: 'dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting, pen and ink with watercolor', loras: ['storybook'] },
+  { label: 'Surreal Dreams', prompt: 'surrealist pop art, porcelain skin, unsettling beauty, hyper-detailed oil painting, dreamlike atmosphere', loras: ['mark_ryden'] },
+  { label: 'Ghibli Whimsical', prompt: 'Studio Ghibli style, lush environments, warm atmosphere, hand-painted animation aesthetic, whimsical landscapes', loras: ['ghibli_whimsical'] },
+  { label: 'Golden Hour', prompt: 'golden hour photography, warm sun-drenched light, luminous dust particles, atmospheric glow', loras: ['golden_atmosphere'] },
+  { label: 'Concept Art', prompt: 'cinematic concept art, dramatic composition, rich painterly detail, professional illustration', loras: ['concept_art'] },
+  { label: "Children's Book", prompt: 'simple hand-drawn illustration, soft pastel colors, gentle linework, children storybook art', loras: ['children_sketch'] },
   { label: 'No Style (default)', prompt: '', loras: [] },
 ]
 
@@ -76,6 +78,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
   const [projects, setProjects] = useState<ProjectSummary[]>([])
   const [tales, setTales] = useState<Tale[]>([])
   const [showCreate, setShowCreate] = useState(false)
+  const [projectSearch, setProjectSearch] = useState('')
   const [sourceMode, setSourceMode] = useState<SourceMode>('grimm')
   const [selectedTale, setSelectedTale] = useState('')
   const [targetMinutes, setTargetMinutes] = useState(5)
@@ -128,6 +131,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
   const [batchImageBackend, setBatchImageBackend] = useState('replicate')
   const [batchStylePrompt, setBatchStylePrompt] = useState(STYLE_PRESETS[0].prompt)
   const [batchLoraKeys, setBatchLoraKeys] = useState<string[]>(STYLE_PRESETS[0].loras)
+  const [batchCharacterConsistency, setBatchCharacterConsistency] = useState(false)
   const [selectedPreset, setSelectedPreset] = useState(0)
 
   // Collapsible book groups
@@ -461,6 +465,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
         image_backend: batchImageBackend,
         ...(batchStylePrompt && { style_prompt: batchStylePrompt }),
         ...(batchLoraKeys.length > 0 && { lora_keys: batchLoraKeys }),
+        ...(batchCharacterConsistency && batchImageBackend === 'replicate' && { character_consistency: true }),
       })
 
       if (onBatchStart) {
@@ -518,6 +523,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
         image_backend: batchImageBackend,
         ...(batchStylePrompt && { style_prompt: batchStylePrompt }),
         ...(batchLoraKeys.length > 0 && { lora_keys: batchLoraKeys }),
+        ...(batchCharacterConsistency && batchImageBackend === 'replicate' && { character_consistency: true }),
       })
       setRunConfigGroup(null)
       if (onBatchStart) {
@@ -588,6 +594,17 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
     refresh()
   }
 
+  const handleDuplicate = async (e: React.MouseEvent, id: string) => {
+    e.stopPropagation()
+    try {
+      const duplicated = await api.duplicateProject(id)
+      refresh()
+      onSelect(duplicated.project_id)
+    } catch (err) {
+      alert('Failed to duplicate project: ' + (err as Error).message)
+    }
+  }
+
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
@@ -599,6 +616,20 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
           <Plus size={16} /> New Story
         </button>
       </div>
+
+      {/* Search */}
+      {projects.length > 5 && (
+        <div className="mb-4 relative">
+          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" />
+          <input
+            type="text"
+            value={projectSearch}
+            onChange={e => setProjectSearch(e.target.value)}
+            placeholder="Search projects by title or source..."
+            className="w-full pl-9 pr-3 py-2 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--border-focus)]"
+          />
+        </div>
+      )}
 
       {/* Create form */}
       {showCreate && (
@@ -1148,6 +1179,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                           className="w-full bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
                         >
                           <option value="replicate">Replicate (FLUX)</option>
+                          <option value="gpt_image">GPT Image 2 (OpenAI)</option>
                           <option value="comfyui">ComfyUI (local)</option>
                           <option value="ollama">Ollama (local)</option>
                         </select>
@@ -1183,6 +1215,18 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                       />
                       {batchLoraKeys.length > 0 && (
                         <p className="text-[10px] text-[var(--text-muted)] mt-1">LoRA: {batchLoraKeys.join(', ')}</p>
+                      )}
+                      {batchImageBackend === 'replicate' && (
+                        <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)] mt-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={batchCharacterConsistency}
+                            onChange={e => setBatchCharacterConsistency(e.target.checked)}
+                            className="rounded border-[var(--border)]"
+                          />
+                          <span>Character Consistency</span>
+                          <span className="text-[10px] text-[var(--text-muted)]">Use first image as reference</span>
+                        </label>
                       )}
                     </div>
 
@@ -1306,10 +1350,19 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
           </div>
         )}
         {(() => {
+          const query = projectSearch.trim().toLowerCase()
+          const filtered = query
+            ? projects.filter(p =>
+                p.title.toLowerCase().includes(query) ||
+                p.source_tale.toLowerCase().includes(query) ||
+                (STEP_LABELS[p.step] || p.step).toLowerCase().includes(query)
+              )
+            : projects
+
           // Group projects: book groups first, then standalone projects
           const groups = new Map<string, ProjectSummary[]>()
           const standalone: ProjectSummary[] = []
-          for (const p of projects) {
+          for (const p of filtered) {
             if (p.book_group_id) {
               const list = groups.get(p.book_group_id) || []
               list.push(p)
@@ -1357,8 +1410,16 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                   {STEP_LABELS[p.step] || p.step}
                 </span>
                 <button
+                  onClick={e => handleDuplicate(e, p.project_id)}
+                  className="shrink-0 p-1 rounded text-[var(--text-muted)] hover:text-[var(--accent)] transition-colors"
+                  title="Duplicate project"
+                >
+                  <Copy size={14} />
+                </button>
+                <button
                   onClick={e => handleDelete(e, p.project_id)}
                   className="shrink-0 p-1 rounded text-[var(--text-muted)] hover:text-[var(--error)] transition-colors"
+                  title="Delete project"
                 >
                   <Trash2 size={14} />
                 </button>
@@ -1710,6 +1771,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                             <label className="block text-[10px] text-[var(--text-muted)] mb-1">Image Backend</label>
                             <select value={batchImageBackend} onChange={e => setBatchImageBackend(e.target.value)} className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]">
                               <option value="replicate">Replicate (FLUX)</option>
+                              <option value="gpt_image">GPT Image 2 (OpenAI)</option>
                               <option value="comfyui">ComfyUI (local)</option>
                               <option value="ollama">Ollama (local)</option>
                             </select>
@@ -1744,6 +1806,18 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                           />
                           {batchLoraKeys.length > 0 && (
                             <p className="text-[10px] text-[var(--text-muted)] mt-1">LoRA: {batchLoraKeys.join(', ')}</p>
+                          )}
+                          {batchImageBackend === 'replicate' && (
+                            <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)] mt-2 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={batchCharacterConsistency}
+                                onChange={e => setBatchCharacterConsistency(e.target.checked)}
+                                className="rounded border-[var(--border)]"
+                              />
+                              <span>Character Consistency</span>
+                              <span className="text-[10px] text-[var(--text-muted)]">Use first image as reference</span>
+                            </label>
                           )}
                         </div>
                         {(() => {

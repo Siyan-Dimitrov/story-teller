@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { Film, Download, Loader2, Play, Pause, X, FolderOpen, Music, Volume2, Search, CloudDownload, Wand2, Trash2 } from 'lucide-react'
+import { Film, Download, Loader2, Play, Pause, X, FolderOpen, Music, Volume2, Search, Wand2, Trash2 } from 'lucide-react'
 import type { ProjectState, MusicTrack } from '../api'
 import { api } from '../api'
 
@@ -50,7 +50,6 @@ export default function VideoPanel({ project, onRefresh }: Props) {
   // Per-scene music
   const [sceneSuggestions, setSceneSuggestions] = useState<Record<number, { query: string; reasoning: string; tracks: MusicTrack[]; assignedTrack?: string | null }>>({})
   const [suggestingAll, setSuggestingAll] = useState(false)
-  const [suggestingScene, setSuggestingScene] = useState<number | null>(null)
 
   const isAssembled = project.step === 'assembled'
   const scenes = project.script?.scenes || []
@@ -531,7 +530,11 @@ export default function VideoPanel({ project, onRefresh }: Props) {
                             </div>
                           </div>
                         </div>
-                        {selectedTrack === track.id && (
+                        {downloadingTrack === track.id ? (
+                          <span className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-[var(--bg-secondary)] text-[var(--text-muted)] shrink-0 ml-2">
+                            <Loader2 size={8} className="animate-spin" /> Downloading
+                          </span>
+                        ) : selectedTrack === track.id && (
                           <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--accent)] text-white shrink-0 ml-2">Selected</span>
                         )}
                       </div>

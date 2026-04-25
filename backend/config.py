@@ -4,8 +4,26 @@ import shutil
 import os
 from pathlib import Path
 
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - allows startup before deps are installed
+    def load_dotenv(path: Path) -> None:
+        if not path.exists():
+            return
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
 # ── Directories ──────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
+
 PROJECTS_DIR = BASE_DIR / "projects"
 OUTPUT_DIR = BASE_DIR / "output"
 DATA_DIR = BASE_DIR / "data"
@@ -26,6 +44,20 @@ COMFYUI_URL = os.getenv("COMFYUI_URL", "http://127.0.0.1:8188")
 
 # ── Stock media + music APIs ─────────────────────────────────
 # Shared with yt_facts_video_gen — keys live in start_full.bat
+# OpenAI GPT Image backend. The key is loaded from the repo-root .env file.
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+if OPENAI_API_KEY:
+    os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+OPENAI_ORG_ID = os.getenv("OPENAI_ORG_ID", "").strip()
+OPENAI_IMAGE_BASE_URL = os.getenv("OPENAI_IMAGE_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2").strip()
+OPENAI_IMAGE_QUALITY = os.getenv("OPENAI_IMAGE_QUALITY", "medium").strip()
+OPENAI_IMAGE_SIZE = os.getenv("OPENAI_IMAGE_SIZE", "2048x1152").strip()
+OPENAI_IMAGE_FORMAT = os.getenv("OPENAI_IMAGE_FORMAT", "png").strip()
+OPENAI_IMAGE_BACKGROUND = os.getenv("OPENAI_IMAGE_BACKGROUND", "auto").strip()
+OPENAI_IMAGE_TIMEOUT_SECONDS = float(os.getenv("OPENAI_IMAGE_TIMEOUT_SECONDS", "240.0"))
+OPENAI_IMAGE_DELAY_SECONDS = float(os.getenv("OPENAI_IMAGE_DELAY_SECONDS", "12.0"))
+
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "").strip()
 PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY", "").strip()
 SERPAPI_KEY = os.getenv("SERPAPI_KEY", "").strip()

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Wand2, Save, Plus, Trash2, GripVertical, ChevronDown, ChevronRight } from 'lucide-react'
+import { Wand2, Save, Plus, Trash2, GripVertical, ChevronDown, ChevronRight, ArrowUp, ArrowDown } from 'lucide-react'
 import type { ProjectState, Scene } from '../api'
 import { api } from '../api'
 
@@ -98,6 +98,18 @@ export default function ScriptPanel({ project, onRefresh, onNext }: Props) {
     setDirty(true)
   }
 
+  const moveScene = (index: number, direction: -1 | 1) => {
+    setScenes(prev => {
+      const next = [...prev]
+      const target = index + direction
+      if (target < 0 || target >= next.length) return prev
+      const [removed] = next.splice(index, 1)
+      next.splice(target, 0, removed)
+      return next.map((s, i) => ({ ...s, index: i }))
+    })
+    setDirty(true)
+  }
+
   return (
     <div className="space-y-4">
       {/* Generate controls */}
@@ -154,6 +166,22 @@ export default function ScriptPanel({ project, onRefresh, onNext }: Props) {
               <div key={i} className="p-4 rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)]">
                 <div className="flex items-center gap-2 mb-3">
                   <GripVertical size={14} className="text-[var(--text-muted)]" />
+                  <button
+                    onClick={() => moveScene(i, -1)}
+                    disabled={i === 0}
+                    className="p-0.5 rounded text-[var(--text-muted)] hover:text-[var(--accent)] disabled:opacity-30 transition-colors"
+                    title="Move up"
+                  >
+                    <ArrowUp size={12} />
+                  </button>
+                  <button
+                    onClick={() => moveScene(i, 1)}
+                    disabled={i === scenes.length - 1}
+                    className="p-0.5 rounded text-[var(--text-muted)] hover:text-[var(--accent)] disabled:opacity-30 transition-colors"
+                    title="Move down"
+                  >
+                    <ArrowDown size={12} />
+                  </button>
                   <span className="text-xs font-medium text-[var(--accent)]">Scene {i + 1}</span>
                   <select
                     value={scene.mood}

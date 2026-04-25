@@ -415,6 +415,14 @@ async def regenerate_and_evaluate(
                         seed=new_seed,
                         lora_keys=lora_keys,
                     )
+                elif image_backend == "gpt_image":
+                    await image_gen.generate_image_gpt_image(
+                        prompt=prompt,
+                        style_prompt=style_prompt,
+                        output_path=abs_path,
+                        seed=new_seed,
+                        lora_keys=lora_keys,
+                    )
                 else:
                     await image_gen.generate_image_ollama(
                         prompt=prompt,

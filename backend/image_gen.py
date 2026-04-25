@@ -1,5 +1,6 @@
-"""Image generation via ComfyUI API or Ollama."""
+"""Image generation via ComfyUI, Replicate, OpenAI GPT Image, or Ollama."""
 
+import base64
 import time
 import uuid
 import logging
@@ -16,46 +17,84 @@ log = logging.getLogger(__name__)
 # For Replicate: Uses flux_lora_key to look up URL in config.FLUX_LORA_URLS
 AVAILABLE_LORAS = {
     "tim_burton": {
-        "file": "Tim_Burton_Painting_Style_SDXL.safetensors",  # ComfyUI local (SDXL)
-        "trigger": "vicgoth",  # FLUX trigger for Keltezaa/victorian-gothic-horror
+        "file": "Tim_Burton_Painting_Style_SDXL.safetensors",
+        "trigger": "vicgoth",
         "strength_model": 1.0,
         "strength_clip": 0.7,
-        "flux_lora_key": "tim_burton",  # Key in config.FLUX_LORA_URLS
+        "flux_lora_key": "tim_burton",
+        "description": "Sepia-toned Victorian horror with aged, haunting aesthetic and dramatic contrasts",
     },
     "storybook": {
-        "file": "StorybookRedmondV2.safetensors",  # ComfyUI local (SDXL)
-        "trigger": "d00dlet00n",  # FLUX trigger for renderartist/doodletoonflux
+        "file": "StorybookRedmondV2.safetensors",
+        "trigger": "d00dlet00n",
         "strength_model": 0.8,
         "strength_clip": 0.6,
         "flux_lora_key": "storybook",
+        "description": "Hand-drawn storybook illustration with marker and pencil textures",
     },
     "dark_gothic": {
-        "file": "dark_gothic_fantasy_xl.safetensors",  # ComfyUI local (SDXL)
-        "trigger": "",  # FLUX: nerijs/dark-fantasy-illustration-flux (no trigger needed)
+        "file": "dark_gothic_fantasy_xl.safetensors",
+        "trigger": "",
         "strength_model": 1.2,
         "strength_clip": 0.65,
         "flux_lora_key": "dark_gothic",
-    },
-    "dark_fantasy": {
-        "file": "dark_fantasy_flux.safetensors",  # ComfyUI local
-        "trigger": "",  # FLUX: Shakker-Labs Dark Fantasy (no trigger needed)
-        "strength_model": 0.7,
-        "strength_clip": 0.75,
-        "flux_lora_key": "dark_fantasy",
+        "description": "Rich, painterly dark fantasy with deep shadows and atmospheric lighting",
     },
     "mark_ryden": {
-        "file": "Mark_Ryden_Style.safetensors",  # ComfyUI local (SDXL)
-        "trigger": "evangsurreal",  # FLUX trigger for brushpenbob/Flux-surrealism
+        "file": "Mark_Ryden_Style.safetensors",
+        "trigger": "evangsurreal",
         "strength_model": 0.8,
         "strength_clip": 0.7,
         "flux_lora_key": "mark_ryden",
+        "description": "Dreamlike surrealist art with otherworldly atmosphere and sci-fi undertones",
     },
-    "dave_mckean": {
-        "file": "Dave_McKean_Style.safetensors",  # ComfyUI local (SDXL)
-        "trigger": "w3irdth1ngs",  # FLUX trigger for renderartist/weirdthingsflux
+    "painterly_illustration": {
+        "file": "",
+        "trigger": "artistic style blends reality and illustration elements",
         "strength_model": 0.8,
-        "strength_clip": 0.65,
-        "flux_lora_key": "weird_surreal",  # Uses alternatives dict
+        "strength_clip": 0.7,
+        "flux_lora_key": "painterly_illustration",
+        "description": "Illustrated characters with realistic backgrounds, blending painterly and photographic styles",
+    },
+    "golden_atmosphere": {
+        "file": "",
+        "trigger": "Golden Dust",
+        "strength_model": 0.8,
+        "strength_clip": 0.7,
+        "flux_lora_key": "golden_atmosphere",
+        "description": "Warm golden hour tones with luminous dust particles and sun-drenched light",
+    },
+    "ghibli_whimsical": {
+        "file": "",
+        "trigger": "GHIBSKY style",
+        "strength_model": 0.8,
+        "strength_clip": 0.7,
+        "flux_lora_key": "ghibli_whimsical",
+        "description": "Studio Ghibli meets Makoto Shinkai — warm, lush landscapes with hand-painted feel",
+    },
+    "children_sketch": {
+        "file": "",
+        "trigger": "sketched style",
+        "strength_model": 0.8,
+        "strength_clip": 0.7,
+        "flux_lora_key": "children_sketch",
+        "description": "Simple hand-drawn children's illustration with soft pastel colors and gentle linework",
+    },
+    "concept_art": {
+        "file": "",
+        "trigger": "mj painterly",
+        "strength_model": 0.8,
+        "strength_clip": 0.7,
+        "flux_lora_key": "concept_art",
+        "description": "Cinematic concept art with dramatic composition and rich painterly detail",
+    },
+    "sketch_paint": {
+        "file": "",
+        "trigger": "sk3tchpa1nt",
+        "strength_model": 0.8,
+        "strength_clip": 0.7,
+        "flux_lora_key": "sketch_paint",
+        "description": "Blend of sketch linework and painterly color washes, mixing drawing and painting",
     },
 }
 
@@ -313,11 +352,12 @@ def _flux_aspect_ratio() -> str:
     return min(supported, key=lambda x: abs(x[1] - ratio))[0]
 
 
-def _build_flux_lora_input(
+def _build_kontext_input(
     prompt: str,
     style_prompt: str,
     seed: int,
     lora_keys: list[str] | None = None,
+    reference_image: "Path | None" = None,
 ) -> dict:
     """Build Replicate FLUX LoRA input parameters.
 
@@ -336,8 +376,7 @@ def _build_flux_lora_input(
                     triggers.append(lora_info["trigger"])
                 flux_key = lora_info.get("flux_lora_key")
                 if flux_key:
-                    # Check primary URLs first, then alternatives
-                    lora_url = config.FLUX_LORA_URLS.get(flux_key) or config.FLUX_LORA_ALTERNATIVES.get(flux_key)
+                    lora_url = config.FLUX_LORA_URLS.get(flux_key)
                     if lora_url:
                         lora_urls.append(lora_url)
                         lora_scales.append(lora_info.get("strength_model", 0.7))
@@ -360,7 +399,11 @@ def _build_flux_lora_input(
         "seed": seed,
         "num_outputs": 1,
         "output_format": "png",
+        "guidance_scale": 3.5,
     }
+
+    if reference_image is not None:
+        inp["image"] = reference_image
 
     # Add LoRA weights if available
     if len(lora_urls) >= 1:
@@ -388,6 +431,7 @@ async def generate_image_replicate(
     output_path: Path,
     seed: int | None = None,
     lora_keys: list[str] | None = None,
+    reference_image: "Path | None" = None,
 ) -> Path:
     """Generate an image using Replicate's FLUX model with LoRA support.
 
@@ -401,7 +445,7 @@ async def generate_image_replicate(
         seed = int(time.time() * 1000) % (2**32)
 
     model = config.REPLICATE_MODEL
-    inp = _build_flux_lora_input(prompt, style_prompt, seed, lora_keys)
+    inp = _build_kontext_input(prompt, style_prompt, seed, lora_keys, reference_image=reference_image)
 
     # Add inference steps based on model variant
     if "schnell" in model:
@@ -453,12 +497,202 @@ async def generate_image_replicate(
     raise last_error  # shouldn't reach here, but just in case
 
 
+def _build_gpt_image_prompt(
+    prompt: str,
+    style_prompt: str,
+    lora_keys: list[str] | None = None,
+) -> str:
+    style_parts = []
+    if style_prompt:
+        style_parts.append(style_prompt)
+
+    # GPT Image cannot load LoRA weights, but preserving the selected style
+    # descriptions keeps batch presets meaningful when this backend is selected.
+    if lora_keys:
+        descriptions = [
+            AVAILABLE_LORAS[key]["description"]
+            for key in lora_keys
+            if key in AVAILABLE_LORAS and AVAILABLE_LORAS[key].get("description")
+        ]
+        if descriptions:
+            style_parts.append("Visual style references: " + "; ".join(descriptions))
+
+    style_text = ", ".join(style_parts) or "cinematic dark fairy tale illustration"
+
+    return (
+        "Create a cinematic 16:9 illustration for a dark fairy tale story video.\n"
+        f"Scene: {prompt}\n"
+        f"Style: {style_text}\n"
+        "Use atmospheric lighting, strong composition, rich detail, and no captions, "
+        "watermarks, UI elements, logos, or unintended text."
+    )
+
+
+async def generate_image_gpt_image(
+    prompt: str,
+    style_prompt: str,
+    output_path: Path,
+    seed: int | None = None,
+    lora_keys: list[str] | None = None,
+) -> Path:
+    """Generate an image using OpenAI GPT Image 2 through the Images API."""
+    if not config.OPENAI_API_KEY:
+        raise RuntimeError("OpenAI image backend requires OPENAI_API_KEY in the repo .env file.")
+
+    headers = {
+        "Authorization": f"Bearer {config.OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    if config.OPENAI_ORG_ID:
+        headers["OpenAI-Organization"] = config.OPENAI_ORG_ID
+
+    payload = {
+        "model": config.OPENAI_IMAGE_MODEL,
+        "prompt": _build_gpt_image_prompt(prompt, style_prompt, lora_keys),
+        "n": 1,
+        "size": config.OPENAI_IMAGE_SIZE,
+        "quality": config.OPENAI_IMAGE_QUALITY,
+        "output_format": config.OPENAI_IMAGE_FORMAT,
+    }
+    if config.OPENAI_IMAGE_BACKGROUND:
+        payload["background"] = config.OPENAI_IMAGE_BACKGROUND
+
+    log.info(
+        "OpenAI image [%s]: generating size=%s quality=%s seed=%s",
+        config.OPENAI_IMAGE_MODEL,
+        config.OPENAI_IMAGE_SIZE,
+        config.OPENAI_IMAGE_QUALITY,
+        seed,
+    )
+
+    async with httpx.AsyncClient(
+        timeout=config.OPENAI_IMAGE_TIMEOUT_SECONDS,
+        headers=headers,
+    ) as client:
+        resp = await client.post(
+            f"{config.OPENAI_IMAGE_BASE_URL}/images/generations",
+            json=payload,
+        )
+
+        if resp.status_code >= 400:
+            detail = resp.text
+            try:
+                detail = resp.json().get("error", {}).get("message", detail)
+            except Exception:
+                pass
+            raise RuntimeError(f"OpenAI image generation failed ({resp.status_code}): {detail}")
+
+        data = resp.json()
+        images = data.get("data") or []
+        if not images:
+            raise RuntimeError("OpenAI image generation returned no image data")
+
+        image_info = images[0]
+        b64_json = image_info.get("b64_json")
+        if b64_json:
+            image_bytes = base64.b64decode(b64_json)
+        elif image_info.get("url"):
+            image_resp = await client.get(image_info["url"], timeout=60)
+            image_resp.raise_for_status()
+            image_bytes = image_resp.content
+        else:
+            raise RuntimeError("OpenAI image generation response had no b64_json or url")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(image_bytes)
+    log.info(f"OpenAI image saved to {output_path}")
+    return output_path
+
+
+async def generate_scene_images(
+    scene: dict,
+    project_dir: Path,
+    backend: str = "comfyui",
+    style_prompt: str = "dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting",
+    lora_keys: list[str] | None = None,
+    reference_image: Path | None = None,
+) -> dict:
+    """Generate images for a single scene. Returns updated scene with image_paths."""
+    images_dir = project_dir / "images"
+    images_dir.mkdir(exist_ok=True)
+
+    idx = scene["index"]
+    prompts = scene.get("image_prompts") or []
+    if not prompts:
+        single = scene.get("image_prompt", "")
+        prompts = [single] if single else []
+
+    scene["image_paths"] = []
+    scene.pop("image_error", None)
+
+    for img_idx, prompt in enumerate(prompts):
+        output_path = images_dir / f"scene_{idx:04d}_img_{img_idx}.png"
+
+        if backend == "gpt_image" and img_idx > 0 and config.OPENAI_IMAGE_DELAY_SECONDS > 0:
+            delay = config.OPENAI_IMAGE_DELAY_SECONDS
+            log.info(f"Throttling: waiting {delay:.1f}s before next OpenAI image call")
+            await _async_sleep(delay)
+
+        try:
+            if backend == "comfyui":
+                await generate_image_comfyui(
+                    prompt=prompt,
+                    style_prompt=style_prompt,
+                    output_path=output_path,
+                    seed=idx * 1000 + img_idx * 42,
+                    lora_keys=lora_keys,
+                )
+            elif backend == "replicate":
+                await generate_image_replicate(
+                    prompt=prompt,
+                    style_prompt=style_prompt,
+                    output_path=output_path,
+                    seed=idx * 1000 + img_idx * 42,
+                    lora_keys=lora_keys,
+                    reference_image=reference_image,
+                )
+            elif backend == "gpt_image":
+                await generate_image_gpt_image(
+                    prompt=prompt,
+                    style_prompt=style_prompt,
+                    output_path=output_path,
+                    seed=idx * 1000 + img_idx * 42,
+                    lora_keys=lora_keys,
+                )
+            else:
+                await generate_image_ollama(
+                    prompt=prompt,
+                    style_prompt=style_prompt,
+                    output_path=output_path,
+                )
+            rel = str(output_path.relative_to(project_dir))
+            scene["image_paths"].append(rel)
+            log.info(f"Scene {idx} image {img_idx + 1}/{len(prompts)} done")
+        except Exception as e:
+            log.error(f"Image generation failed for scene {idx} img {img_idx}: {e}")
+            try:
+                await generate_image_ollama(
+                    prompt=prompt,
+                    style_prompt="",
+                    output_path=output_path,
+                )
+                rel = str(output_path.relative_to(project_dir))
+                scene["image_paths"].append(rel)
+            except Exception as e2:
+                log.error(f"Placeholder also failed for scene {idx} img {img_idx}: {e2}")
+                scene["image_error"] = str(e)
+
+    scene["image_path"] = scene["image_paths"][0] if scene["image_paths"] else None
+    return scene
+
+
 async def generate_all_scenes(
     scenes: list[dict],
     project_dir: Path,
     backend: str = "comfyui",
     style_prompt: str = "dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting",
     lora_keys: list[str] | None = None,
+    character_consistency: bool = False,
 ) -> list[dict]:
     """Generate images for all scenes. Returns updated scenes with image_paths."""
     images_dir = project_dir / "images"
@@ -471,6 +705,7 @@ async def generate_all_scenes(
         for s in scenes
     )
     generated = 0
+    reference_image_path: Path | None = None
 
     for scene in scenes:
         idx = scene["index"]
@@ -486,11 +721,14 @@ async def generate_all_scenes(
         for img_idx, prompt in enumerate(prompts):
             output_path = images_dir / f"scene_{idx:04d}_img_{img_idx}.png"
 
-            # Throttle Replicate calls to avoid rate-limiting
-            # Rate limit: 6 requests/min with <$5 credit = 1 request every 10s minimum
+            # Throttle cloud image calls to avoid common low-tier rate limits.
             if backend == "replicate" and generated > 0:
                 delay = config.REPLICATE_DELAY_SECONDS
-                log.info(f"Throttling: waiting {delay:.1f}s before next Replicate call (rate limit: 6 req/min with <$5 credit)")
+                log.info(f"Throttling: waiting {delay:.1f}s before next Replicate call")
+                await asyncio.sleep(delay)
+            elif backend == "gpt_image" and generated > 0 and config.OPENAI_IMAGE_DELAY_SECONDS > 0:
+                delay = config.OPENAI_IMAGE_DELAY_SECONDS
+                log.info(f"Throttling: waiting {delay:.1f}s before next OpenAI image call")
                 await asyncio.sleep(delay)
 
             try:
@@ -509,6 +747,15 @@ async def generate_all_scenes(
                         output_path=output_path,
                         seed=idx * 1000 + img_idx * 42,
                         lora_keys=lora_keys,
+                        reference_image=reference_image_path,
+                    )
+                elif backend == "gpt_image":
+                    await generate_image_gpt_image(
+                        prompt=prompt,
+                        style_prompt=style_prompt,
+                        output_path=output_path,
+                        seed=idx * 1000 + img_idx * 42,
+                        lora_keys=lora_keys,
                     )
                 else:
                     await generate_image_ollama(
@@ -518,6 +765,10 @@ async def generate_all_scenes(
                     )
                 rel = str(output_path.relative_to(project_dir))
                 scene["image_paths"].append(rel)
+                # Capture first image as reference for character consistency
+                if character_consistency and backend == "replicate" and reference_image_path is None:
+                    reference_image_path = output_path
+                    log.info(f"Character consistency: using {output_path} as reference image")
                 generated += 1
                 log.info(f"Scene {idx} image {img_idx + 1}/{len(prompts)} done ({generated}/{total_prompts} total)")
             except Exception as e:

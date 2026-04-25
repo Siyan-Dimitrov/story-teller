@@ -89,6 +89,7 @@ async def health() -> HealthStatus:
         except Exception:
             pass
     status.replicate = bool(config.REPLICATE_API_TOKEN)
+    status.openai = bool(config.OPENAI_API_KEY)
     status.ffmpeg = shutil.which("ffmpeg") is not None or Path(config.FFMPEG_PATH).exists()
     return status
 
@@ -240,6 +241,7 @@ async def batch_run(group_id: str, req: BatchRunRequest):
                     image_backend=req.image_backend,
                     style_prompt=req.style_prompt,
                     lora_keys=req.lora_keys,
+                    character_consistency=req.character_consistency,
                 )
             )
         except Exception as e:
@@ -292,6 +294,7 @@ async def batch_resume(group_id: str):
                     image_backend=run_config["image_backend"],
                     style_prompt=run_config["style_prompt"],
                     lora_keys=run_config["lora_keys"],
+                    character_consistency=run_config.get("character_consistency", False),
                 )
             )
         except Exception as e:
@@ -325,6 +328,7 @@ async def get_loras():
             key: {
                 "trigger": v["trigger"],
                 "file": v["file"],
+                "description": v.get("description", ""),
                 "has_flux": v.get("flux_lora_key") is not None
                     and (v["flux_lora_key"] in config.FLUX_LORA_URLS
                          or v["flux_lora_key"] in config.FLUX_LORA_ALTERNATIVES),
@@ -656,6 +660,7 @@ async def run_images(project_id: str, req: RunImagesRequest):
             backend=req.backend,
             style_prompt=req.style_prompt,
             lora_keys=req.lora_keys,
+            character_consistency=req.character_consistency,
         )
         script["scenes"] = scenes
         store.save_json(project_id, "script.json", script)

@@ -538,6 +538,7 @@ async def run_batch_pipeline(
     image_backend: str = "comfyui",
     style_prompt: str = "dark fairy tale illustration, gothic storybook art",
     lora_keys: list[str] | None = None,
+    character_consistency: bool = False,
 ):
     """Process chapters sequentially through the pipeline."""
     # Initialize progress — skip already-completed chapters
@@ -581,6 +582,7 @@ async def run_batch_pipeline(
         "image_backend": image_backend,
         "style_prompt": style_prompt,
         "lora_keys": lora_keys,
+        "character_consistency": character_consistency,
     }
 
     for i, pid in enumerate(project_ids):
@@ -611,6 +613,7 @@ async def run_batch_pipeline(
                 image_backend=image_backend,
                 style_prompt=style_prompt,
                 lora_keys=lora_keys,
+                character_consistency=character_consistency,
             )
             progress["completed"] += 1
             progress["chapters"][i]["status"] = "completed"
@@ -647,6 +650,7 @@ async def _run_chapter_pipeline(
     image_backend: str = "comfyui",
     style_prompt: str = "dark fairy tale illustration, gothic storybook art",
     lora_keys: list[str] | None = None,
+    character_consistency: bool = False,
 ):
     """Run pipeline steps for a single chapter project."""
     state = store.load_state(project_id)
@@ -704,6 +708,7 @@ async def _run_chapter_pipeline(
             backend=image_backend,
             style_prompt=style_prompt,
             lora_keys=lora_keys,
+            character_consistency=character_consistency,
         )
         script["scenes"] = scenes
         store.save_json(project_id, "script.json", script)

@@ -2,12 +2,56 @@
 
 import json
 import logging
+import re
 import httpx
 
 from . import config
 from .grimm_tales import get_tale
 
 log = logging.getLogger(__name__)
+
+
+def _repair_truncated_json(raw: str) -> str:
+    """Attempt to repair JSON truncated by token limits.
+
+    Closes any open strings, arrays, and objects so json.loads can parse
+    whatever complete scenes the LLM managed to emit.
+    """
+    # Remove any trailing partial escape sequence
+    raw = re.sub(r'\\$', '', raw.rstrip())
+
+    in_string = False
+    escape = False
+    stack: list[str] = []  # tracks open { and [
+
+    for ch in raw:
+        if escape:
+            escape = False
+            continue
+        if ch == '\\' and in_string:
+            escape = True
+            continue
+        if ch == '"' and not escape:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch in ('{', '['):
+            stack.append(ch)
+        elif ch == '}' and stack and stack[-1] == '{':
+            stack.pop()
+        elif ch == ']' and stack and stack[-1] == '[':
+            stack.pop()
+
+    # Close the open string if we're inside one
+    if in_string:
+        raw += '"'
+
+    # Close open containers in reverse order
+    for opener in reversed(stack):
+        raw += ']' if opener == '[' else '}'
+
+    return raw
 
 
 def _extract_llm_content(data: dict) -> str:
@@ -136,9 +180,13 @@ Guidelines:
   2. Identify the two most visually striking moments or images described in it
   3. Write each prompt as a literal depiction of that moment: name the specific characters, objects, setting, and action happening
   4. Do NOT write generic prompts like "a dark forest" — instead write "the woodcutter's daughter kneeling beside the severed juniper branch, blood on her hands, moonlight through bare trees"
-- Each prompt must include: WHO (specific character/creature), WHAT (specific action), WHERE (specific setting detail), and style cues
-- Append style cues to every prompt: "dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting"
-- Vary composition between the two prompts (e.g. one wide shot, one close-up)
+- Each prompt must include: WHO (specific character/creature), WHAT (specific action), WHERE (specific setting detail), and WHEN/LIGHTING if relevant
+- Include continuity anchors for recurring characters: apparent age, clothing, hair, posture, and one memorable identifying feature
+- Include explicit camera/framing language in every prompt, such as "wide establishing shot", "low-angle medium shot", "over-the-shoulder shot", "close-up", or "silhouette against the doorway"
+- Vary composition between the two prompts: usually one wider environmental shot and one tighter emotional/action shot
+- Do NOT append generic art-style boilerplate to image_prompts. The selected image backend adds style separately via style_prompt.
+- Do NOT request captions, title cards, typography, subtitles, logos, or text inside the image unless the story explicitly requires a visible sign or written object
+- Keep each image_prompt concise: one vivid sentence, 35-70 words, concrete nouns and actions only
 - Aim for the number of scenes that fits the target length (roughly 1 scene per 30-60 seconds)
 - The narration should be vivid and engaging when read aloud — this is a voiceover script
 - Never break the fourth wall or reference that this is a video/script
@@ -214,13 +262,23 @@ async def generate_script(
     data = resp.json()
     content = _extract_llm_content(data)
 
+    # Check if response was truncated by token limit
+    done_reason = data.get("done_reason", "")
+    if done_reason == "length":
+        log.warning("LLM response was truncated (hit token limit). Will attempt JSON repair.")
+
     # Strip markdown fences if present
     if content.startswith("```"):
         lines = content.split("\n")
         lines = [l for l in lines if not l.strip().startswith("```")]
         content = "\n".join(lines)
 
-    script = json.loads(content)
+    try:
+        script = json.loads(content)
+    except json.JSONDecodeError:
+        log.warning("JSON parse failed — attempting to repair truncated response")
+        repaired = _repair_truncated_json(content)
+        script = json.loads(repaired)
 
     # Normalize scene indices and image prompts
     for i, scene in enumerate(script.get("scenes", [])):
