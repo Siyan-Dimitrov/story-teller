@@ -11,6 +11,10 @@ from . import config
 
 log = logging.getLogger(__name__)
 
+
+class OpenAIImageAccessError(RuntimeError):
+    """Raised when OpenAI rejects the image request for auth or org access."""
+
 # ── Available LoRAs ─────────────────────────────────────────────
 # Each entry: filename, trigger words to prepend, strength_model, strength_clip
 # For ComfyUI: Uses local .safetensors files
@@ -580,7 +584,10 @@ async def generate_image_gpt_image(
                 detail = resp.json().get("error", {}).get("message", detail)
             except Exception:
                 pass
-            raise RuntimeError(f"OpenAI image generation failed ({resp.status_code}): {detail}")
+            message = f"OpenAI image generation failed ({resp.status_code}): {detail}"
+            if resp.status_code in (401, 403):
+                raise OpenAIImageAccessError(message)
+            raise RuntimeError(message)
 
         data = resp.json()
         images = data.get("data") or []
@@ -668,6 +675,10 @@ async def generate_scene_images(
             rel = str(output_path.relative_to(project_dir))
             scene["image_paths"].append(rel)
             log.info(f"Scene {idx} image {img_idx + 1}/{len(prompts)} done")
+        except OpenAIImageAccessError as e:
+            log.error(f"OpenAI image access failed for scene {idx} img {img_idx}: {e}")
+            scene["image_error"] = str(e)
+            raise
         except Exception as e:
             log.error(f"Image generation failed for scene {idx} img {img_idx}: {e}")
             try:
@@ -771,6 +782,10 @@ async def generate_all_scenes(
                     log.info(f"Character consistency: using {output_path} as reference image")
                 generated += 1
                 log.info(f"Scene {idx} image {img_idx + 1}/{len(prompts)} done ({generated}/{total_prompts} total)")
+            except OpenAIImageAccessError as e:
+                log.error(f"OpenAI image access failed for scene {idx} img {img_idx}: {e}")
+                scene["image_error"] = str(e)
+                raise
             except Exception as e:
                 log.error(f"Image generation failed for scene {idx} img {img_idx}: {e}")
                 # Fallback to text placeholder
