@@ -20,6 +20,8 @@ export interface Scene {
   audio_duration?: number | null
   image_path?: string | null
   image_paths?: string[]
+  image_errors?: (string | null)[]
+  image_safety_error?: boolean
   kb_effect: string
   qc_results?: { image_index: number; passed: boolean; scores: Record<string, number>; average_score: number; reasoning: string; attempts: number; error?: string | null }[]
   qc_passed?: boolean
@@ -222,6 +224,19 @@ export interface LorasResponse {
   defaults: string[]
 }
 
+export interface ImageStyle {
+  id: string
+  label: string
+  description: string
+  supports_loras: boolean
+  default_lora_keys?: string[]
+}
+
+export interface ImageStylesResponse {
+  styles: ImageStyle[]
+  default_style_id: string
+}
+
 export interface MusicTrack {
   id: string
   title: string
@@ -248,6 +263,7 @@ export const api = {
   tale: (id: string) => request<Tale>(`/api/tales/${id}`),
   profiles: () => request<VoiceProfile[]>('/api/profiles'),
   loras: () => request<LorasResponse>('/api/loras'),
+  imageStyles: () => request<ImageStylesResponse>('/api/image-styles'),
   music: () => request<MusicListResponse>('/api/music'),
   musicSearch: (query: string, limit?: number) =>
     request<{ query: string; results: MusicTrack[] }>(`/api/music/search?query=${encodeURIComponent(query)}&limit=${limit || 8}`),
@@ -288,6 +304,8 @@ export const api = {
     voice_language?: string
     voice_instruct?: string
     image_backend?: string
+    style_id?: string
+    custom_style_prompt?: string
     style_prompt?: string
     lora_keys?: string[]
     character_consistency?: boolean
@@ -322,16 +340,16 @@ export const api = {
   runVoice: (id: string, body: { profile_id: string; language: string; instruct?: string }) =>
     post<{ scenes: Scene[] }>(`/api/projects/${id}/voice`, body),
 
-  runImages: (id: string, body: { backend: string; style_prompt: string; lora_keys?: string[]; character_consistency?: boolean }) =>
+  runImages: (id: string, body: { backend: string; style_id?: string; custom_style_prompt?: string; style_prompt?: string; lora_keys?: string[]; character_consistency?: boolean }) =>
     post<{ scenes: Scene[] }>(`/api/projects/${id}/images`, body),
 
-  regenerateSceneImages: (id: string, sceneIndex: number, body: { backend: string; style_prompt: string; lora_keys?: string[]; character_consistency?: boolean }) =>
+  regenerateSceneImages: (id: string, sceneIndex: number, body: { backend: string; style_id?: string; custom_style_prompt?: string; style_prompt?: string; lora_keys?: string[]; character_consistency?: boolean }) =>
     post<{ scene: Scene }>(`/api/projects/${id}/images/${sceneIndex}`, body),
 
-  runQC: (id: string, body: { vision_model?: string; pass_threshold?: number; style_prompt?: string; targets?: { scene_index: number; image_index: number }[] }) =>
+  runQC: (id: string, body: { vision_model?: string; pass_threshold?: number; style_id?: string; custom_style_prompt?: string; style_prompt?: string; targets?: { scene_index: number; image_index: number }[] }) =>
     post<{ status: string }>(`/api/projects/${id}/qc`, body),
 
-  regenerateQC: (id: string, body: { targets: { scene_index: number; image_index: number }[]; style_prompt?: string; lora_keys?: string[] }) =>
+  regenerateQC: (id: string, body: { targets: { scene_index: number; image_index: number }[]; style_id?: string; custom_style_prompt?: string; style_prompt?: string; lora_keys?: string[] }) =>
     post<{ status: string }>(`/api/projects/${id}/qc-regenerate`, body),
 
   qcProgress: (id: string) =>

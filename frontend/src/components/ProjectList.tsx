@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Plus, BookOpen, Trash2, Clock, ChevronRight, Search, Loader2, Globe, ChevronDown, Layers, Play, Palette, Copy } from 'lucide-react'
-import type { ProjectSummary, Tale, StorySearchResult, GutenbergBook, AnalyzedChapter, VoiceProfile } from '../api'
+import type { ProjectSummary, Tale, StorySearchResult, GutenbergBook, AnalyzedChapter, VoiceProfile, ImageStyle } from '../api'
 import { api } from '../api'
 
 const ADAPTATION_TONES = [
@@ -46,18 +46,6 @@ const GUTENBERG_LANGUAGES = [
   { value: 'fi', label: 'Finnish' },
   { value: 'zh', label: 'Chinese' },
   { value: 'ja', label: 'Japanese' },
-]
-
-const STYLE_PRESETS = [
-  { label: 'Victorian Gothic', prompt: 'Tim Burton style, dark whimsical illustration, exaggerated proportions, stark contrasts, eerie charm, spiral motifs, gothic fairy tale', loras: ['tim_burton'] },
-  { label: 'Dark Fantasy', prompt: 'dark fantasy illustration, dramatic lighting, rich shadows, mythical atmosphere, intricate detail, oil painting style', loras: ['dark_gothic'] },
-  { label: 'Whimsical Storybook', prompt: 'dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting, pen and ink with watercolor', loras: ['storybook'] },
-  { label: 'Surreal Dreams', prompt: 'surrealist pop art, porcelain skin, unsettling beauty, hyper-detailed oil painting, dreamlike atmosphere', loras: ['mark_ryden'] },
-  { label: 'Ghibli Whimsical', prompt: 'Studio Ghibli style, lush environments, warm atmosphere, hand-painted animation aesthetic, whimsical landscapes', loras: ['ghibli_whimsical'] },
-  { label: 'Golden Hour', prompt: 'golden hour photography, warm sun-drenched light, luminous dust particles, atmospheric glow', loras: ['golden_atmosphere'] },
-  { label: 'Concept Art', prompt: 'cinematic concept art, dramatic composition, rich painterly detail, professional illustration', loras: ['concept_art'] },
-  { label: "Children's Book", prompt: 'simple hand-drawn illustration, soft pastel colors, gentle linework, children storybook art', loras: ['children_sketch'] },
-  { label: 'No Style (default)', prompt: '', loras: [] },
 ]
 
 const STEP_LABELS: Record<string, string> = {
@@ -129,10 +117,10 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
   const [voiceProfiles, setVoiceProfiles] = useState<VoiceProfile[]>([])
   const [batchVoiceProfile, setBatchVoiceProfile] = useState('')
   const [batchImageBackend, setBatchImageBackend] = useState('replicate')
-  const [batchStylePrompt, setBatchStylePrompt] = useState(STYLE_PRESETS[0].prompt)
-  const [batchLoraKeys, setBatchLoraKeys] = useState<string[]>(STYLE_PRESETS[0].loras)
+  const [imageStyles, setImageStyles] = useState<ImageStyle[]>([])
+  const [batchStyleId, setBatchStyleId] = useState('')
+  const [batchCustomStylePrompt, setBatchCustomStylePrompt] = useState('')
   const [batchCharacterConsistency, setBatchCharacterConsistency] = useState(false)
-  const [selectedPreset, setSelectedPreset] = useState(0)
 
   // Collapsible book groups
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
@@ -161,7 +149,17 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
       setVoiceProfiles(p)
       if (p.length > 0) setBatchVoiceProfile(p[0].id)
     }).catch(() => {})
+    api.imageStyles().then(data => {
+      setImageStyles(data.styles)
+      setBatchStyleId(data.default_style_id || data.styles[0]?.id || '')
+    }).catch(() => {})
   }, [])
+
+  const selectedBatchStyle = imageStyles.find(style => style.id === batchStyleId)
+  const customBatchStyle = batchCustomStylePrompt.trim()
+  const batchStyleRequest = customBatchStyle
+    ? { custom_style_prompt: customBatchStyle, style_prompt: customBatchStyle }
+    : batchStyleId ? { style_id: batchStyleId } : {}
 
   const handleSearch = async () => {
     if (!searchQuery.trim()) return
@@ -463,8 +461,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
         voice_profile_id: batchVoiceProfile,
         voice_language: 'en',
         image_backend: batchImageBackend,
-        ...(batchStylePrompt && { style_prompt: batchStylePrompt }),
-        ...(batchLoraKeys.length > 0 && { lora_keys: batchLoraKeys }),
+        ...batchStyleRequest,
         ...(batchCharacterConsistency && batchImageBackend === 'replicate' && { character_consistency: true }),
       })
 
@@ -521,8 +518,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
         voice_profile_id: batchVoiceProfile,
         voice_language: 'en',
         image_backend: batchImageBackend,
-        ...(batchStylePrompt && { style_prompt: batchStylePrompt }),
-        ...(batchLoraKeys.length > 0 && { lora_keys: batchLoraKeys }),
+        ...batchStyleRequest,
         ...(batchCharacterConsistency && batchImageBackend === 'replicate' && { character_consistency: true }),
       })
       setRunConfigGroup(null)
@@ -604,6 +600,50 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
       alert('Failed to duplicate project: ' + (err as Error).message)
     }
   }
+
+  const renderBatchStylePicker = (fieldBgClass: string, wrapperClass = '') => (
+    <div className={wrapperClass}>
+      <label className="flex items-center gap-1.5 text-[10px] text-[var(--text-muted)] font-medium mb-1.5">
+        <Palette size={10} /> Image Style
+      </label>
+      <select
+        value={batchStyleId}
+        onChange={e => setBatchStyleId(e.target.value)}
+        disabled={imageStyles.length === 0}
+        className={`w-full ${fieldBgClass} border border-[var(--border)] rounded px-2 py-1.5 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]`}
+      >
+        {imageStyles.length === 0 && <option value="">Loading styles...</option>}
+        {imageStyles.map(style => (
+          <option key={style.id} value={style.id}>{style.label}</option>
+        ))}
+      </select>
+      {selectedBatchStyle?.description && !customBatchStyle && (
+        <p className="text-[10px] text-[var(--text-muted)] mt-1 leading-snug">{selectedBatchStyle.description}</p>
+      )}
+      <textarea
+        value={batchCustomStylePrompt}
+        onChange={e => setBatchCustomStylePrompt(e.target.value)}
+        placeholder="Advanced custom style override..."
+        rows={2}
+        className={`mt-2 w-full ${fieldBgClass} border border-[var(--border)] rounded px-2 py-1.5 text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--border-focus)] resize-none`}
+      />
+      {(selectedBatchStyle?.default_lora_keys?.length || 0) > 0 && (
+        <p className="text-[10px] text-[var(--text-muted)] mt-1">LoRA defaults: {selectedBatchStyle?.default_lora_keys?.join(', ')}</p>
+      )}
+      {batchImageBackend === 'replicate' && (
+        <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)] mt-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={batchCharacterConsistency}
+            onChange={e => setBatchCharacterConsistency(e.target.checked)}
+            className="rounded border-[var(--border)]"
+          />
+          <span>Character Consistency</span>
+          <span className="text-[10px] text-[var(--text-muted)]">Use first image as reference</span>
+        </label>
+      )}
+    </div>
+  )
 
   return (
     <div>
@@ -1186,49 +1226,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                       </div>
                     </div>
 
-                    {/* Image style prompt */}
-                    <div className="mb-3">
-                      <label className="flex items-center gap-1.5 text-[10px] text-[var(--text-muted)] font-medium mb-1.5">
-                        <Palette size={10} /> Image Style
-                      </label>
-                      <div className="flex flex-wrap gap-1 mb-2">
-                        {STYLE_PRESETS.map((preset, i) => (
-                          <button
-                            key={preset.label}
-                            onClick={() => { setSelectedPreset(i); setBatchStylePrompt(preset.prompt); setBatchLoraKeys(preset.loras) }}
-                            className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors ${
-                              selectedPreset === i
-                                ? 'border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--accent)]'
-                                : 'border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:border-[var(--border-focus)]'
-                            }`}
-                          >
-                            {preset.label}
-                          </button>
-                        ))}
-                      </div>
-                      <textarea
-                        value={batchStylePrompt}
-                        onChange={e => { setBatchStylePrompt(e.target.value); setSelectedPreset(-1) }}
-                        placeholder="Custom style prompt for image generation..."
-                        rows={2}
-                        className="w-full bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-2 py-1.5 text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--border-focus)] resize-none"
-                      />
-                      {batchLoraKeys.length > 0 && (
-                        <p className="text-[10px] text-[var(--text-muted)] mt-1">LoRA: {batchLoraKeys.join(', ')}</p>
-                      )}
-                      {batchImageBackend === 'replicate' && (
-                        <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)] mt-2 cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={batchCharacterConsistency}
-                            onChange={e => setBatchCharacterConsistency(e.target.checked)}
-                            className="rounded border-[var(--border)]"
-                          />
-                          <span>Character Consistency</span>
-                          <span className="text-[10px] text-[var(--text-muted)]">Use first image as reference</span>
-                        </label>
-                      )}
-                    </div>
+                    {renderBatchStylePicker('bg-[var(--bg-secondary)]', 'mb-3')}
 
                     {/* Save / Save & Run buttons */}
                     {(() => {
@@ -1777,49 +1775,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                             </select>
                           </div>
                         </div>
-                        {/* Image style prompt */}
-                        <div>
-                          <label className="flex items-center gap-1.5 text-[10px] text-[var(--text-muted)] font-medium mb-1.5">
-                            <Palette size={10} /> Image Style
-                          </label>
-                          <div className="flex flex-wrap gap-1 mb-2">
-                            {STYLE_PRESETS.map((preset, i) => (
-                              <button
-                                key={preset.label}
-                                onClick={() => { setSelectedPreset(i); setBatchStylePrompt(preset.prompt); setBatchLoraKeys(preset.loras) }}
-                                className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors ${
-                                  selectedPreset === i
-                                    ? 'border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--accent)]'
-                                    : 'border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:border-[var(--border-focus)]'
-                                }`}
-                              >
-                                {preset.label}
-                              </button>
-                            ))}
-                          </div>
-                          <textarea
-                            value={batchStylePrompt}
-                            onChange={e => { setBatchStylePrompt(e.target.value); setSelectedPreset(-1) }}
-                            placeholder="Custom style prompt for image generation..."
-                            rows={2}
-                            className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-2 py-1.5 text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--border-focus)] resize-none"
-                          />
-                          {batchLoraKeys.length > 0 && (
-                            <p className="text-[10px] text-[var(--text-muted)] mt-1">LoRA: {batchLoraKeys.join(', ')}</p>
-                          )}
-                          {batchImageBackend === 'replicate' && (
-                            <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)] mt-2 cursor-pointer">
-                              <input
-                                type="checkbox"
-                                checked={batchCharacterConsistency}
-                                onChange={e => setBatchCharacterConsistency(e.target.checked)}
-                                className="rounded border-[var(--border)]"
-                              />
-                              <span>Character Consistency</span>
-                              <span className="text-[10px] text-[var(--text-muted)]">Use first image as reference</span>
-                            </label>
-                          )}
-                        </div>
+                        {renderBatchStylePicker('bg-[var(--bg-tertiary)]')}
                         {(() => {
                           const selectedCount = (selectedRunChapters.get(groupId) ?? new Set()).size;
                           return (

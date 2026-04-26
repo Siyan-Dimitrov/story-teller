@@ -57,6 +57,7 @@ class ProjectState(BaseModel):
     voice_language: str = "en"
     ollama_model: str = "kimi-k2.5:cloud"
     image_backend: str = "comfyui"  # comfyui | ollama | replicate | gpt_image
+    project_seed: Optional[int] = None
     target_minutes: float = 5.0
     suggested_length: Optional[str] = None  # e.g., "5 min", "short story", "flash fiction"
     created_at: str = ""
@@ -106,7 +107,9 @@ class RunVoiceRequest(BaseModel):
 
 class RunImagesRequest(BaseModel):
     backend: str = "comfyui"  # comfyui | ollama | replicate | gpt_image
-    style_prompt: str = "dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting"
+    style_id: Optional[str] = None
+    custom_style_prompt: Optional[str] = None
+    style_prompt: Optional[str] = None  # legacy clients can still send a full prompt
     lora_keys: Optional[list[str]] = None  # e.g. ["tim_burton", "dark_fantasy"] - None uses defaults for backend
     character_consistency: bool = False
     # For Replicate: Uses FLUX LoRA URLs from config.FLUX_LORA_URLS
@@ -115,7 +118,9 @@ class RunImagesRequest(BaseModel):
 
 class RegenerateSceneImagesRequest(BaseModel):
     backend: str = "comfyui"
-    style_prompt: str = "dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting"
+    style_id: Optional[str] = None
+    custom_style_prompt: Optional[str] = None
+    style_prompt: Optional[str] = None
     lora_keys: Optional[list[str]] = None
     character_consistency: bool = False
 
@@ -169,7 +174,9 @@ class GutenbergTextRequest(BaseModel):
 class RunQCRequest(BaseModel):
     vision_model: Optional[str] = None
     pass_threshold: float = 3.0
-    style_prompt: str = "dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting"
+    style_id: Optional[str] = None
+    custom_style_prompt: Optional[str] = None
+    style_prompt: Optional[str] = None
     targets: Optional[list["QCTarget"]] = None  # None = all images
 
 
@@ -182,7 +189,9 @@ class RegenerateQCRequest(BaseModel):
     targets: list[QCTarget] = Field(default_factory=list)
     vision_model: Optional[str] = None
     pass_threshold: float = 3.0
-    style_prompt: str = "dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting"
+    style_id: Optional[str] = None
+    custom_style_prompt: Optional[str] = None
+    style_prompt: Optional[str] = None
     lora_keys: Optional[list[str]] = None
 
 
@@ -306,7 +315,9 @@ class BatchRunRequest(BaseModel):
     voice_language: str = "en"
     voice_instruct: str = DEFAULT_VOICE_INSTRUCT
     image_backend: str = "comfyui"
-    style_prompt: str = "dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting"
+    style_id: Optional[str] = None
+    custom_style_prompt: Optional[str] = None
+    style_prompt: Optional[str] = None
     lora_keys: Optional[list[str]] = None
     character_consistency: bool = False
 

@@ -10,7 +10,7 @@ import httpx
 
 from . import config
 from . import project_store as store
-from . import script_gen, voice_gen, image_gen
+from . import script_gen, voice_gen, image_gen, image_styles
 from .video_assembly import assemble_video
 from .models import DEFAULT_VOICE_INSTRUCT
 
@@ -536,7 +536,7 @@ async def run_batch_pipeline(
     voice_language: str = "en",
     voice_instruct: str = DEFAULT_VOICE_INSTRUCT,
     image_backend: str = "comfyui",
-    style_prompt: str = "dark fairy tale illustration, gothic storybook art",
+    style_prompt: str = image_styles.DEFAULT_STYLE_PROMPT,
     lora_keys: list[str] | None = None,
     character_consistency: bool = False,
 ):
@@ -648,7 +648,7 @@ async def _run_chapter_pipeline(
     voice_language: str = "en",
     voice_instruct: str = DEFAULT_VOICE_INSTRUCT,
     image_backend: str = "comfyui",
-    style_prompt: str = "dark fairy tale illustration, gothic storybook art",
+    style_prompt: str = image_styles.DEFAULT_STYLE_PROMPT,
     lora_keys: list[str] | None = None,
     character_consistency: bool = False,
 ):
@@ -709,6 +709,7 @@ async def _run_chapter_pipeline(
             style_prompt=style_prompt,
             lora_keys=lora_keys,
             character_consistency=character_consistency,
+            project_seed=store.get_project_seed(project_id),
         )
         script["scenes"] = scenes
         store.save_json(project_id, "script.json", script)

@@ -18,7 +18,7 @@ import httpx
 
 from . import config
 from . import project_store as store
-from . import script_gen, voice_gen, image_gen, gutenberg, batch, music_search
+from . import script_gen, voice_gen, image_gen, image_styles, gutenberg, batch, music_search
 from .video_assembly import assemble_video, get_assembly_progress, cancel_assembly
 from .animation import prepare_animations, get_animation_progress
 from .grimm_tales import list_tales, get_tale
@@ -68,6 +68,23 @@ app.add_middleware(
 
 
 # ── Health ───────────────────────────────────────────────────
+
+def _resolve_image_style_request(req) -> tuple[str, list[str] | None]:
+    style_id = getattr(req, "style_id", None)
+    if style_id and not image_styles.get_style(style_id):
+        raise HTTPException(400, f"Unknown image style: {style_id}")
+
+    style_prompt = image_styles.resolve_style_prompt(
+        style_id=style_id,
+        custom_style_prompt=getattr(req, "custom_style_prompt", None),
+        legacy_style_prompt=getattr(req, "style_prompt", None),
+    )
+    lora_keys = image_styles.resolve_style_loras(
+        style_id=style_id,
+        request_lora_keys=getattr(req, "lora_keys", None),
+    )
+    return style_prompt, lora_keys
+
 
 @app.get("/api/health")
 async def health() -> HealthStatus:
@@ -225,6 +242,8 @@ async def batch_run(group_id: str, req: BatchRunRequest):
     if not existing.get("finished", True):
         return {"status": "already_running"}
 
+    style_prompt, lora_keys = _resolve_image_style_request(req)
+
     # Launch in background thread
     def _run():
         import asyncio as _asyncio
@@ -239,8 +258,8 @@ async def batch_run(group_id: str, req: BatchRunRequest):
                     voice_language=req.voice_language,
                     voice_instruct=req.voice_instruct,
                     image_backend=req.image_backend,
-                    style_prompt=req.style_prompt,
-                    lora_keys=req.lora_keys,
+                    style_prompt=style_prompt,
+                    lora_keys=lora_keys,
                     character_consistency=req.character_consistency,
                 )
             )
@@ -337,6 +356,12 @@ async def get_loras():
         },
         "defaults": image_gen.DEFAULT_LORAS,
     }
+
+
+@app.get("/api/image-styles")
+async def get_image_styles():
+    """List backend-owned image style presets for image generation."""
+    return image_styles.public_styles_response()
 
 
 @app.get("/api/music")
@@ -653,19 +678,24 @@ async def run_images(project_id: str, req: RunImagesRequest):
     )
 
     try:
+        style_prompt, lora_keys = _resolve_image_style_request(req)
         pdir = store.project_dir(project_id)
         scenes = await image_gen.generate_all_scenes(
             scenes=script["scenes"],
             project_dir=pdir,
             backend=req.backend,
-            style_prompt=req.style_prompt,
-            lora_keys=req.lora_keys,
+            style_prompt=style_prompt,
+            lora_keys=lora_keys,
             character_consistency=req.character_consistency,
+            project_seed=store.get_project_seed(project_id),
         )
         script["scenes"] = scenes
         store.save_json(project_id, "script.json", script)
         store.update_state(project_id, step="illustrated")
         return {"scenes": scenes}
+    except image_gen.OpenAIImageSafetyError as e:
+        store.update_state(project_id, step="voiced", error=str(e))
+        raise HTTPException(422, str(e))
     except Exception as e:
         tb = traceback.format_exc()
         log.error(f"Image generation failed: {tb}")
@@ -697,18 +727,22 @@ async def regenerate_scene_images(project_id: str, scene_index: int, req: Regene
                 reference_image = ref_path
 
     try:
+        style_prompt, lora_keys = _resolve_image_style_request(req)
         updated_scene = await image_gen.generate_scene_images(
             scene=scene,
             project_dir=pdir,
             backend=req.backend,
-            style_prompt=req.style_prompt,
-            lora_keys=req.lora_keys,
+            style_prompt=style_prompt,
+            lora_keys=lora_keys,
             reference_image=reference_image,
+            project_seed=store.get_project_seed(project_id),
         )
         scenes[scene_index] = updated_scene
         script["scenes"] = scenes
         store.save_json(project_id, "script.json", script)
         return {"scene": updated_scene}
+    except image_gen.OpenAIImageSafetyError as e:
+        raise HTTPException(422, str(e))
     except Exception as e:
         tb = traceback.format_exc()
         log.error(f"Scene image regeneration failed: {tb}")
@@ -732,6 +766,7 @@ async def run_qc(project_id: str, req: RunQCRequest):
     store.update_state(project_id, step="qc_running", error=None)
     pdir = store.project_dir(project_id)
     vision_model = req.vision_model or config.OLLAMA_VISION_MODEL
+    style_prompt, _ = _resolve_image_style_request(req)
 
     def _run():
         import asyncio as _asyncio
@@ -743,7 +778,7 @@ async def run_qc(project_id: str, req: RunQCRequest):
                     scenes=script["scenes"],
                     project_dir=pdir,
                     vision_model=vision_model,
-                    style_prompt=req.style_prompt,
+                    style_prompt=style_prompt,
                     pass_threshold=req.pass_threshold,
                     project_id=project_id,
                     targets=targets,
@@ -789,7 +824,7 @@ async def qc_retry_image(project_id: str, scene_index: int, image_index: int):
         image_index=image_index,
         project_dir=pdir,
         vision_model=vision_model,
-        style_prompt="dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting",
+        style_prompt=image_styles.resolve_style_prompt(),
     )
 
     # Update scene QC results
@@ -832,6 +867,7 @@ async def qc_regenerate(project_id: str, req: RegenerateQCRequest):
     vision_model = req.vision_model or config.OLLAMA_VISION_MODEL
     image_backend = state.get("image_backend", "comfyui")
     targets = [t.model_dump() for t in req.targets]
+    style_prompt, lora_keys = _resolve_image_style_request(req)
 
     def _run():
         import asyncio as _asyncio
@@ -843,11 +879,12 @@ async def qc_regenerate(project_id: str, req: RegenerateQCRequest):
                     project_dir=pdir,
                     targets=targets,
                     vision_model=vision_model,
-                    style_prompt=req.style_prompt,
+                    style_prompt=style_prompt,
                     image_backend=image_backend,
-                    lora_keys=req.lora_keys,
+                    lora_keys=lora_keys,
                     pass_threshold=req.pass_threshold,
                     project_id=project_id,
+                    project_seed=store.get_project_seed(project_id),
                 )
             )
             script["scenes"] = scenes

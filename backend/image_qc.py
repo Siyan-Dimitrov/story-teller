@@ -17,6 +17,7 @@ import httpx
 
 from . import config
 from . import image_gen
+from . import project_store as store
 
 log = logging.getLogger(__name__)
 
@@ -355,6 +356,7 @@ async def regenerate_and_evaluate(
     lora_keys: list[str] | None,
     pass_threshold: float,
     project_id: str | None = None,
+    project_seed: int | None = None,
 ) -> list[dict]:
     """Regenerate specific images and re-evaluate them.
 
@@ -396,8 +398,9 @@ async def regenerate_and_evaluate(
                     progress=i / total,
                 )
 
-            # Regenerate with a new seed
-            new_seed = int(time.time() * 1000) % (2**32) + si * 1000 + ii * 42 + i * 7919
+            # Keep retries in the project's seed family, but vary each retry.
+            base_seed = store.derive_image_seed(project_seed, si, ii)
+            new_seed = (base_seed + int(time.time() * 1000) + (i + 1) * 7919) % (2**32)
             try:
                 if image_backend == "comfyui":
                     await image_gen.generate_image_comfyui(
@@ -430,6 +433,35 @@ async def regenerate_and_evaluate(
                         output_path=abs_path,
                     )
                 log.info(f"[QC] Regenerated scene {si} img {ii}")
+            except image_gen.OpenAIImageSafetyError as e:
+                log.error(f"[QC] OpenAI safety rejection for scene {si} img {ii}: {e}")
+                image_errors = scene.setdefault("image_errors", [])
+                while len(image_errors) <= ii:
+                    image_errors.append(None)
+                image_errors[ii] = str(e)
+                scene["image_error"] = str(e)
+                scene["image_safety_error"] = True
+
+                qc_results = scene.get("qc_results") or []
+                while len(qc_results) <= ii:
+                    qc_results.append({})
+                old_attempts = (
+                    qc_results[ii].get("attempts", 0)
+                    if ii < len(qc_results) and isinstance(qc_results[ii], dict)
+                    else 0
+                )
+                qc_results[ii] = {
+                    "image_index": ii,
+                    "passed": False,
+                    "scores": {},
+                    "average_score": 0,
+                    "reasoning": "OpenAI rejected this prompt after the safe retry.",
+                    "error": str(e),
+                    "attempts": old_attempts + 1,
+                }
+                scene["qc_results"] = qc_results
+                scene["qc_passed"] = False
+                continue
             except Exception as e:
                 log.error(f"[QC] Regeneration failed for scene {si} img {ii}: {e}")
                 continue

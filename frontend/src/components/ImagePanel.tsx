@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { ImageIcon, Loader2, RefreshCw, ChevronDown, RotateCcw } from 'lucide-react'
-import type { ProjectState, LoraInfo } from '../api'
+import type { ProjectState, LoraInfo, ImageStyle } from '../api'
 import { api } from '../api'
 
 interface Props {
@@ -8,8 +8,6 @@ interface Props {
   onRefresh: () => void
   onNext: () => void
 }
-
-const DEFAULT_STYLE = 'dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting, Tim Burton inspired, rich colors, dramatic shadows'
 
 function LoraDropdown({
   label,
@@ -90,7 +88,9 @@ function LoraDropdown({
 
 export default function ImagePanel({ project, onRefresh, onNext }: Props) {
   const [backend, setBackend] = useState(project.image_backend || 'comfyui')
-  const [stylePrompt, setStylePrompt] = useState(DEFAULT_STYLE)
+  const [imageStyles, setImageStyles] = useState<ImageStyle[]>([])
+  const [selectedStyleId, setSelectedStyleId] = useState('')
+  const [customStylePrompt, setCustomStylePrompt] = useState('')
   const [generating, setGenerating] = useState(false)
   const [availableLoras, setAvailableLoras] = useState<Record<string, LoraInfo>>({})
   const [primaryLora, setPrimaryLora] = useState('')
@@ -106,8 +106,28 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
     }).catch(() => {})
   }, [])
 
+  useEffect(() => {
+    api.imageStyles().then(data => {
+      setImageStyles(data.styles)
+      setSelectedStyleId(data.default_style_id || data.styles[0]?.id || '')
+    }).catch(() => {})
+  }, [])
+
+  const selectedStyle = imageStyles.find(s => s.id === selectedStyleId)
+  const customStyle = customStylePrompt.trim()
+  const styleRequest = customStyle
+    ? { custom_style_prompt: customStyle, style_prompt: customStyle }
+    : selectedStyleId ? { style_id: selectedStyleId } : {}
+
+  useEffect(() => {
+    const defaults = selectedStyle?.default_lora_keys || []
+    setPrimaryLora(defaults[0] || '')
+    setSecondaryLora(defaults[1] || '')
+  }, [selectedStyle])
+
   const scenes = project.script?.scenes || []
-  const hasImages = scenes.some(s => (s.image_paths && s.image_paths.length > 0) || s.image_path)
+  const hasGeneratedImages = scenes.some(s => (s.image_paths && s.image_paths.length > 0) || s.image_path)
+  const hasImageResults = scenes.some(s => (s.image_paths && s.image_paths.length > 0) || s.image_path || s.image_error)
 
   const handleGenerate = async () => {
     setGenerating(true)
@@ -115,8 +135,8 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
       const lora_keys = [primaryLora, secondaryLora].filter(Boolean)
       await api.runImages(project.project_id, {
         backend,
-        style_prompt: stylePrompt,
-        lora_keys,
+        ...styleRequest,
+        ...(lora_keys.length > 0 && { lora_keys }),
         ...(characterConsistency && backend === 'replicate' ? { character_consistency: true } : {}),
       })
       onRefresh()
@@ -134,8 +154,8 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
       const lora_keys = [primaryLora, secondaryLora].filter(Boolean)
       await api.regenerateSceneImages(project.project_id, sceneIndex, {
         backend,
-        style_prompt: stylePrompt,
-        lora_keys,
+        ...styleRequest,
+        ...(lora_keys.length > 0 && { lora_keys }),
         character_consistency: characterConsistency && backend === 'replicate',
       })
       onRefresh()
@@ -175,14 +195,32 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
               </select>
             </div>
             <div className="flex-1">
-              <label className="block text-xs text-[var(--text-secondary)] mb-1.5">Style Prompt (prepended to each scene)</label>
-              <input
-                type="text"
-                value={stylePrompt}
-                onChange={e => setStylePrompt(e.target.value)}
+              <label className="block text-xs text-[var(--text-secondary)] mb-1.5">Image Style</label>
+              <select
+                value={selectedStyleId}
+                onChange={e => setSelectedStyleId(e.target.value)}
+                disabled={imageStyles.length === 0}
                 className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
-              />
+              >
+                {imageStyles.length === 0 && <option value="">Loading styles...</option>}
+                {imageStyles.map(style => (
+                  <option key={style.id} value={style.id}>{style.label}</option>
+                ))}
+              </select>
             </div>
+          </div>
+          {selectedStyle?.description && !customStyle && (
+            <p className="text-xs text-[var(--text-muted)]">{selectedStyle.description}</p>
+          )}
+          <div>
+            <label className="block text-xs text-[var(--text-secondary)] mb-1.5">Advanced Custom Style Override</label>
+            <textarea
+              value={customStylePrompt}
+              onChange={e => setCustomStylePrompt(e.target.value)}
+              placeholder="Optional custom style prompt. When set, it overrides the selected style."
+              rows={2}
+              className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--border-focus)] resize-none"
+            />
           </div>
           {(backend === 'comfyui' || backend === 'replicate') && Object.keys(availableLoras).length > 0 && (() => {
             const loraEntries = Object.entries(availableLoras).filter(([, lora]) =>
@@ -224,7 +262,7 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
           )}
           {backend === 'gpt_image' && (
             <p className="text-xs text-[var(--text-muted)]">
-              Uses <code>OPENAI_API_KEY</code> from the backend <code>.env</code> file. LoRA selections are ignored; style is taken from the prompt.
+              Uses <code>OPENAI_API_KEY</code> from the backend <code>.env</code> file. LoRA selections are ignored; style is taken from the selected style or custom prompt.
             </p>
           )}
           <div className="flex justify-end">
@@ -234,14 +272,14 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
               className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-sm font-medium transition-colors disabled:opacity-50"
             >
               {generating ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-              {generating ? 'Generating...' : hasImages ? 'Regenerate All' : 'Generate Images'}
+              {generating ? 'Generating...' : hasGeneratedImages ? 'Regenerate All' : 'Generate Images'}
             </button>
           </div>
         </div>
       </div>
 
       {/* Image grid */}
-      {hasImages && (
+      {hasImageResults && (
         <div className="space-y-4">
           {scenes.map((scene, i) => {
             const paths = (scene.image_paths && scene.image_paths.length > 0)
@@ -285,7 +323,7 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
                       )}
                     </div>
                   ))}
-                  {scene.image_error && paths.length === 0 && (
+                  {scene.image_error && (
                     <div className="col-span-4 p-3 text-xs text-[var(--error)] text-center">
                       {scene.image_error}
                     </div>
@@ -298,7 +336,7 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
       )}
 
       {/* Next */}
-      {hasImages && (
+      {hasGeneratedImages && (
         <div className="flex justify-end">
           <button
             onClick={onNext}

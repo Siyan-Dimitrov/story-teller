@@ -1,19 +1,29 @@
 """Image generation via ComfyUI, Replicate, OpenAI GPT Image, or Ollama."""
 
 import base64
+import re
 import time
 import uuid
 import logging
 from pathlib import Path
 import httpx
 
-from . import config
+from . import config, image_styles
+from . import project_store as store
 
 log = logging.getLogger(__name__)
 
 
 class OpenAIImageAccessError(RuntimeError):
     """Raised when OpenAI rejects the image request for auth or org access."""
+
+
+class OpenAIImageSafetyError(RuntimeError):
+    """Raised when OpenAI rejects the image request for safety reasons."""
+
+    def __init__(self, message: str, request_id: str | None = None):
+        super().__init__(message)
+        self.request_id = request_id
 
 # ── Available LoRAs ─────────────────────────────────────────────
 # Each entry: filename, trigger words to prepend, strength_model, strength_clip
@@ -501,10 +511,129 @@ async def generate_image_replicate(
     raise last_error  # shouldn't reach here, but just in case
 
 
+GPT_IMAGE_STYLE_BOILERPLATE = [
+    "dark fairy tale illustration",
+    "gothic storybook art",
+    "atmospheric",
+    "detailed",
+    "moody lighting",
+    "dramatic shadows",
+    "rich colors",
+]
+
+GPT_IMAGE_SAFETY_REPLACEMENTS = [
+    (r"\bTim Burton(?: inspired| style)?\b", "whimsical gothic silhouettes"),
+    (r"\bStudio Ghibli(?: style)?\b", "warm hand-painted animation aesthetic"),
+    (r"\bYoung Talia\b", "adult Talia"),
+    (r"\bTalia's\b", "adult Talia's"),
+    (r"\bhis daughter\b", "his adult daughter"),
+    (r"\blittle girl\b", "young princess"),
+    (r"\bparanoid intensity\b", "grave concern"),
+    (r"\bcollapsing backward\b", "sinking backward in a dramatic faint"),
+    (r"\bvisible splinter of flax under her fingernail\b", "tiny golden flax fiber near her hand"),
+    (r"\bsplinter of flax under her fingernail\b", "tiny golden flax fiber near her hand"),
+    (r"\bfingernail\b", "hand"),
+    (r"\bblood on her hands\b", "dark red ribbon around her hands"),
+    (r"\bblood\b", "deep red color"),
+    (r"\bsevered\b", "broken"),
+    (r"\bcorpse\b", "motionless figure"),
+    (r"\bbody lying\b", "resting figure"),
+    (r"\bdead\b", "silent"),
+    (r"\bdeath\b", "sleep"),
+    (r"\bpregnant beneath her velvet gown\b", "wearing a full velvet gown"),
+    (r"\bpregnant\b", "wearing a full velvet gown"),
+    (r"\brounded belly under the rich velvet fabric\b", "rich velvet gown arranged in soft folds"),
+    (r"\bbelly\b", "gown"),
+    (r"\bhands resting passively on it\b", "hands resting calmly on the velvet fabric"),
+    (r"\bdisheveled\b", "rumpled"),
+    (r"\bnewborn baby nursing from Talia's breast while she sleeps\b", "newborn baby resting safely beside adult Talia while she sleeps"),
+    (r"\bnewborn baby nursing from adult Talia's breast while she sleeps\b", "newborn baby resting safely beside adult Talia while she sleeps"),
+    (r"\bnewborn baby nursing from adult Talia's blanket while she sleeps\b", "newborn baby resting safely beside adult Talia while she sleeps"),
+    (r"\bnursing from Talia's breast\b", "resting safely beside adult Talia"),
+    (r"\bnursing infants\b", "newborn twins"),
+    (r"\bbreast\b", "blanket"),
+    (r"\bsucking on Talia's finger\b", "gently holding adult Talia's hand"),
+    (r"\bBaby Moon sucking on adult Talia's finger\b", "Baby Moon gently holding adult Talia's hand"),
+    (r"\btiny flax splinter\b", "tiny golden flax fiber"),
+    (r"\binfant's tongue\b", "fold of golden cloth"),
+    (r"\binfant's small hand against her skin\b", "infant's small hand on a blanket"),
+    (r"\btongue\b", "golden cloth"),
+    (r"\bmouth\b", "expression"),
+    (r"\bscream of horror\b", "startled gasp"),
+    (r"\bhorror\b", "shock"),
+    (r"\bnewborn twins crying\b", "newborn twins resting safely"),
+    (r"\bdrag a screaming Talia away\b", "escort adult Talia away in a tense court scene"),
+    (r"\bCook holding the twins as soldiers escort adult Talia away\b", "Cook keeping the twins safely aside while guards escort adult Talia through the room"),
+    (r"\bshe reaches for them desperately\b", "she looks back with worry"),
+    (r"\bscreaming\b", "distressed"),
+    (r"\bguards holding her arms\b", "guards standing nearby"),
+    (r"\bbound with ropes\b", "surrounded by guards"),
+    (r"\biron chains\b", "shadowed court garments"),
+    (r"\bchains\b", "dark ribbons"),
+    (r"\bcarving knives\b", "copper utensils"),
+    (r"\bhunting knife\b", "small ceremonial blade"),
+    (r"\bsmall ceremonial blade\b", "small ceremonial tool"),
+    (r"\bcutting the ropes binding\b", "loosening the ceremonial ribbons around"),
+    (r"\baround Talia to a wooden stake\b", "near adult Talia beside a wooden post"),
+    (r"\baround adult Talia to a wooden stake\b", "near adult Talia beside a wooden post"),
+    (r"\bloosening the ceremonial ribbons around adult Talia to a wooden wooden post\b", "loosening ceremonial ribbons near adult Talia beside a wooden post"),
+    (r"\baround adult Talia to a wooden wooden post\b", "near adult Talia beside a wooden post"),
+    (r"\bwooden pyre\b", "ceremonial wooden platform"),
+    (r"\bpyre\b", "ceremonial platform"),
+    (r"\bflames nearby catching the edge of her velvet dress\b", "firelight glowing at a safe distance"),
+    (r"\bflames beginning around her feet\b", "firelight glowing on the stones nearby"),
+    (r"\bhair catching fire\b", "hair lit by orange firelight"),
+    (r"\bwatching the burning\b", "watching the firelit courtyard"),
+    (r"\badult Talia watching the firelit courtyard, holding both twins close to her chest\b", "adult Talia standing safely away from the firelit courtyard with both twins nearby"),
+    (r"\bholding both twins close to her chest\b", "with both twins nearby at a safe distance"),
+    (r"\bburning\b", "firelit courtyard scene"),
+    (r"\bthe flames firelit courtyard scene brightly\b", "warm firelight glowing"),
+    (r"\bmeat on his plate\b", "covered dish on his plate"),
+    (r"\btied to the wooden stake\b", "standing before a wooden post"),
+    (r"\btied to\b", "standing beside"),
+    (r"\bstake\b", "wooden post"),
+    (r"\bcannibalism\b", "cruel banquet intrigue"),
+    (r"\bcannibal\b", "cruel banquet"),
+    (r"\broasted meat\b", "covered banquet dish"),
+    (r"\bsmall children are concealed\b", "children are hidden safely"),
+]
+
+
+def _normalize_prompt_text(text: str) -> str:
+    text = re.sub(r"\s+", " ", text or "")
+    text = re.sub(r"\s+,", ",", text)
+    text = re.sub(r",\s*,+", ", ", text)
+    return text.strip(" ,")
+
+
+def _strip_gpt_image_style_boilerplate(text: str) -> str:
+    cleaned = text or ""
+    for phrase in GPT_IMAGE_STYLE_BOILERPLATE:
+        cleaned = re.sub(rf"(?:,\s*)?\b{re.escape(phrase)}\b", "", cleaned, flags=re.IGNORECASE)
+    return _normalize_prompt_text(cleaned)
+
+
+def _make_gpt_image_safe_text(text: str) -> str:
+    safe_text = _strip_gpt_image_style_boilerplate(text)
+    for pattern, replacement in GPT_IMAGE_SAFETY_REPLACEMENTS:
+        safe_text = re.sub(pattern, replacement, safe_text, flags=re.IGNORECASE)
+
+    if re.search(r"\bTalia\b", safe_text, flags=re.IGNORECASE) and not re.search(
+        r"\badult Talia\b|\bLord Talia\b|\bnewborn\b|\binfant\b|\bbaby\b",
+        safe_text,
+        flags=re.IGNORECASE,
+    ):
+        safe_text = re.sub(r"\bTalia\b", "adult Talia", safe_text, count=1, flags=re.IGNORECASE)
+
+    safe_text = re.sub(r"\bLord adult Talia\b", "Lord Talia", safe_text, flags=re.IGNORECASE)
+    return _normalize_prompt_text(safe_text)
+
+
 def _build_gpt_image_prompt(
     prompt: str,
     style_prompt: str,
     lora_keys: list[str] | None = None,
+    safety_mode: bool = False,
 ) -> str:
     style_parts = []
     if style_prompt:
@@ -521,15 +650,109 @@ def _build_gpt_image_prompt(
         if descriptions:
             style_parts.append("Visual style references: " + "; ".join(descriptions))
 
-    style_text = ", ".join(style_parts) or "cinematic dark fairy tale illustration"
+    style_text = ", ".join(style_parts) or "cinematic storybook illustration"
+    scene_text = _strip_gpt_image_style_boilerplate(prompt)
+
+    if safety_mode:
+        scene_text = _make_gpt_image_safe_text(scene_text)
+        style_text = _make_gpt_image_safe_text(style_text)
+        return (
+            "Create a cinematic 16:9 storybook illustration for an adult folklore video.\n"
+            f"Scene: {scene_text}\n"
+            f"Style: {style_text}\n"
+            "Keep the visual symbolic and non-graphic: no gore, no visible injury, "
+            "no sexual content, no intimate contact, no restraint, no torture, "
+            "no explicit burning, and no minors in danger. Use atmospheric lighting, "
+            "strong composition, rich detail, and no captions, watermarks, UI elements, "
+            "logos, or unintended text."
+        )
+
+    style_text = _strip_gpt_image_style_boilerplate(style_text)
 
     return (
-        "Create a cinematic 16:9 illustration for a dark fairy tale story video.\n"
-        f"Scene: {prompt}\n"
+        "Create a cinematic 16:9 illustration for an adult folklore story video.\n"
+        f"Scene: {scene_text}\n"
         f"Style: {style_text}\n"
         "Use atmospheric lighting, strong composition, rich detail, and no captions, "
         "watermarks, UI elements, logos, or unintended text."
     )
+
+
+def _extract_openai_error(resp: httpx.Response) -> tuple[str, dict, str | None]:
+    detail = resp.text
+    error_obj: dict = {}
+    request_id = resp.headers.get("x-request-id") or resp.headers.get("openai-request-id")
+    try:
+        parsed = resp.json()
+        if isinstance(parsed, dict) and isinstance(parsed.get("error"), dict):
+            error_obj = parsed["error"]
+            detail = error_obj.get("message") or detail
+    except Exception:
+        pass
+    return detail, error_obj, request_id
+
+
+def _is_openai_safety_error(status_code: int, detail: str, error_obj: dict) -> bool:
+    fields = [detail]
+    for key in ("message", "code", "type", "param"):
+        value = error_obj.get(key)
+        if value:
+            fields.append(str(value))
+    haystack = " ".join(fields).lower()
+    markers = (
+        "safety",
+        "content_policy",
+        "content policy",
+        "moderation",
+        "unsafe",
+        "disallowed",
+        "rejected",
+    )
+    return status_code == 400 and any(marker in haystack for marker in markers)
+
+
+def _raise_openai_image_error(resp: httpx.Response) -> None:
+    detail, error_obj, request_id = _extract_openai_error(resp)
+    request_text = f" Request ID: {request_id}." if request_id else ""
+
+    if resp.status_code in (401, 403):
+        raise OpenAIImageAccessError(
+            f"OpenAI image generation failed ({resp.status_code}): {detail}{request_text}"
+        )
+
+    if _is_openai_safety_error(resp.status_code, detail, error_obj):
+        raise OpenAIImageSafetyError(
+            "OpenAI rejected this image prompt for safety reasons."
+            f"{request_text} Try a symbolic, non-graphic version of the scene.",
+            request_id=request_id,
+        )
+
+    raise RuntimeError(f"OpenAI image generation failed ({resp.status_code}): {detail}{request_text}")
+
+
+async def _request_gpt_image(client: httpx.AsyncClient, payload: dict) -> bytes:
+    resp = await client.post(
+        f"{config.OPENAI_IMAGE_BASE_URL}/images/generations",
+        json=payload,
+    )
+
+    if resp.status_code >= 400:
+        _raise_openai_image_error(resp)
+
+    data = resp.json()
+    images = data.get("data") or []
+    if not images:
+        raise RuntimeError("OpenAI image generation returned no image data")
+
+    image_info = images[0]
+    b64_json = image_info.get("b64_json")
+    if b64_json:
+        return base64.b64decode(b64_json)
+    if image_info.get("url"):
+        image_resp = await client.get(image_info["url"], timeout=60)
+        image_resp.raise_for_status()
+        return image_resp.content
+    raise RuntimeError("OpenAI image generation response had no b64_json or url")
 
 
 async def generate_image_gpt_image(
@@ -573,37 +796,28 @@ async def generate_image_gpt_image(
         timeout=config.OPENAI_IMAGE_TIMEOUT_SECONDS,
         headers=headers,
     ) as client:
-        resp = await client.post(
-            f"{config.OPENAI_IMAGE_BASE_URL}/images/generations",
-            json=payload,
-        )
-
-        if resp.status_code >= 400:
-            detail = resp.text
+        try:
+            image_bytes = await _request_gpt_image(client, payload)
+        except OpenAIImageSafetyError as first_error:
+            log.warning(
+                "OpenAI safety rejected image prompt; retrying with sanitized prompt%s",
+                f" (request_id={first_error.request_id})" if first_error.request_id else "",
+            )
+            safe_payload = dict(payload)
+            safe_payload["prompt"] = _build_gpt_image_prompt(
+                prompt,
+                style_prompt,
+                lora_keys,
+                safety_mode=True,
+            )
             try:
-                detail = resp.json().get("error", {}).get("message", detail)
-            except Exception:
-                pass
-            message = f"OpenAI image generation failed ({resp.status_code}): {detail}"
-            if resp.status_code in (401, 403):
-                raise OpenAIImageAccessError(message)
-            raise RuntimeError(message)
-
-        data = resp.json()
-        images = data.get("data") or []
-        if not images:
-            raise RuntimeError("OpenAI image generation returned no image data")
-
-        image_info = images[0]
-        b64_json = image_info.get("b64_json")
-        if b64_json:
-            image_bytes = base64.b64decode(b64_json)
-        elif image_info.get("url"):
-            image_resp = await client.get(image_info["url"], timeout=60)
-            image_resp.raise_for_status()
-            image_bytes = image_resp.content
-        else:
-            raise RuntimeError("OpenAI image generation response had no b64_json or url")
+                image_bytes = await _request_gpt_image(client, safe_payload)
+            except OpenAIImageSafetyError as retry_error:
+                raise OpenAIImageSafetyError(
+                    "OpenAI rejected this image prompt after a safe retry."
+                    " Rewrite the scene as symbolic, non-graphic folklore imagery and retry.",
+                    request_id=retry_error.request_id or first_error.request_id,
+                ) from retry_error
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(image_bytes)
@@ -611,13 +825,44 @@ async def generate_image_gpt_image(
     return output_path
 
 
+def _record_scene_image_error(
+    scene: dict,
+    image_index: int,
+    message: str,
+    *,
+    safety: bool = False,
+) -> None:
+    image_errors = scene.setdefault("image_errors", [])
+    while len(image_errors) <= image_index:
+        image_errors.append(None)
+    image_errors[image_index] = message
+
+    active_errors = [err for err in image_errors if err]
+    if len(active_errors) == 1:
+        scene["image_error"] = active_errors[0]
+    elif active_errors:
+        scene["image_error"] = f"{len(active_errors)} image prompts failed. First error: {active_errors[0]}"
+
+    if safety:
+        scene["image_safety_error"] = True
+
+
+def _finalize_scene_image_errors(scene: dict) -> None:
+    image_errors = scene.get("image_errors") or []
+    if not any(image_errors):
+        scene.pop("image_errors", None)
+        scene.pop("image_error", None)
+        scene.pop("image_safety_error", None)
+
+
 async def generate_scene_images(
     scene: dict,
     project_dir: Path,
     backend: str = "comfyui",
-    style_prompt: str = "dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting",
+    style_prompt: str = image_styles.DEFAULT_STYLE_PROMPT,
     lora_keys: list[str] | None = None,
     reference_image: Path | None = None,
+    project_seed: int | None = None,
 ) -> dict:
     """Generate images for a single scene. Returns updated scene with image_paths."""
     images_dir = project_dir / "images"
@@ -630,10 +875,13 @@ async def generate_scene_images(
         prompts = [single] if single else []
 
     scene["image_paths"] = []
+    scene["image_errors"] = []
     scene.pop("image_error", None)
+    scene.pop("image_safety_error", None)
 
     for img_idx, prompt in enumerate(prompts):
         output_path = images_dir / f"scene_{idx:04d}_img_{img_idx}.png"
+        image_seed = store.derive_image_seed(project_seed, idx, img_idx)
 
         if backend == "gpt_image" and img_idx > 0 and config.OPENAI_IMAGE_DELAY_SECONDS > 0:
             delay = config.OPENAI_IMAGE_DELAY_SECONDS
@@ -646,7 +894,7 @@ async def generate_scene_images(
                     prompt=prompt,
                     style_prompt=style_prompt,
                     output_path=output_path,
-                    seed=idx * 1000 + img_idx * 42,
+                    seed=image_seed,
                     lora_keys=lora_keys,
                 )
             elif backend == "replicate":
@@ -654,7 +902,7 @@ async def generate_scene_images(
                     prompt=prompt,
                     style_prompt=style_prompt,
                     output_path=output_path,
-                    seed=idx * 1000 + img_idx * 42,
+                    seed=image_seed,
                     lora_keys=lora_keys,
                     reference_image=reference_image,
                 )
@@ -663,7 +911,7 @@ async def generate_scene_images(
                     prompt=prompt,
                     style_prompt=style_prompt,
                     output_path=output_path,
-                    seed=idx * 1000 + img_idx * 42,
+                    seed=image_seed,
                     lora_keys=lora_keys,
                 )
             else:
@@ -679,6 +927,9 @@ async def generate_scene_images(
             log.error(f"OpenAI image access failed for scene {idx} img {img_idx}: {e}")
             scene["image_error"] = str(e)
             raise
+        except OpenAIImageSafetyError as e:
+            log.error(f"OpenAI image safety rejection for scene {idx} img {img_idx}: {e}")
+            _record_scene_image_error(scene, img_idx, str(e), safety=True)
         except Exception as e:
             log.error(f"Image generation failed for scene {idx} img {img_idx}: {e}")
             try:
@@ -689,11 +940,17 @@ async def generate_scene_images(
                 )
                 rel = str(output_path.relative_to(project_dir))
                 scene["image_paths"].append(rel)
+                _record_scene_image_error(
+                    scene,
+                    img_idx,
+                    f"Generated placeholder after image backend failed: {e}",
+                )
             except Exception as e2:
                 log.error(f"Placeholder also failed for scene {idx} img {img_idx}: {e2}")
-                scene["image_error"] = str(e)
+                _record_scene_image_error(scene, img_idx, str(e))
 
     scene["image_path"] = scene["image_paths"][0] if scene["image_paths"] else None
+    _finalize_scene_image_errors(scene)
     return scene
 
 
@@ -701,9 +958,10 @@ async def generate_all_scenes(
     scenes: list[dict],
     project_dir: Path,
     backend: str = "comfyui",
-    style_prompt: str = "dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting",
+    style_prompt: str = image_styles.DEFAULT_STYLE_PROMPT,
     lora_keys: list[str] | None = None,
     character_consistency: bool = False,
+    project_seed: int | None = None,
 ) -> list[dict]:
     """Generate images for all scenes. Returns updated scenes with image_paths."""
     images_dir = project_dir / "images"
@@ -727,10 +985,13 @@ async def generate_all_scenes(
             prompts = [single] if single else []
 
         scene["image_paths"] = []
+        scene["image_errors"] = []
         scene.pop("image_error", None)  # clear previous errors
+        scene.pop("image_safety_error", None)
 
         for img_idx, prompt in enumerate(prompts):
             output_path = images_dir / f"scene_{idx:04d}_img_{img_idx}.png"
+            image_seed = store.derive_image_seed(project_seed, idx, img_idx)
 
             # Throttle cloud image calls to avoid common low-tier rate limits.
             if backend == "replicate" and generated > 0:
@@ -748,7 +1009,7 @@ async def generate_all_scenes(
                         prompt=prompt,
                         style_prompt=style_prompt,
                         output_path=output_path,
-                        seed=idx * 1000 + img_idx * 42,
+                        seed=image_seed,
                         lora_keys=lora_keys,
                     )
                 elif backend == "replicate":
@@ -756,7 +1017,7 @@ async def generate_all_scenes(
                         prompt=prompt,
                         style_prompt=style_prompt,
                         output_path=output_path,
-                        seed=idx * 1000 + img_idx * 42,
+                        seed=image_seed,
                         lora_keys=lora_keys,
                         reference_image=reference_image_path,
                     )
@@ -765,7 +1026,7 @@ async def generate_all_scenes(
                         prompt=prompt,
                         style_prompt=style_prompt,
                         output_path=output_path,
-                        seed=idx * 1000 + img_idx * 42,
+                        seed=image_seed,
                         lora_keys=lora_keys,
                     )
                 else:
@@ -786,6 +1047,10 @@ async def generate_all_scenes(
                 log.error(f"OpenAI image access failed for scene {idx} img {img_idx}: {e}")
                 scene["image_error"] = str(e)
                 raise
+            except OpenAIImageSafetyError as e:
+                log.error(f"OpenAI image safety rejection for scene {idx} img {img_idx}: {e}")
+                _record_scene_image_error(scene, img_idx, str(e), safety=True)
+                generated += 1
             except Exception as e:
                 log.error(f"Image generation failed for scene {idx} img {img_idx}: {e}")
                 # Fallback to text placeholder
@@ -797,13 +1062,19 @@ async def generate_all_scenes(
                     )
                     rel = str(output_path.relative_to(project_dir))
                     scene["image_paths"].append(rel)
+                    _record_scene_image_error(
+                        scene,
+                        img_idx,
+                        f"Generated placeholder after image backend failed: {e}",
+                    )
                 except Exception as e2:
                     log.error(f"Placeholder also failed for scene {idx} img {img_idx}: {e2}")
-                    scene["image_error"] = str(e)
+                    _record_scene_image_error(scene, img_idx, str(e))
                 generated += 1
 
         # Backward compat: set image_path to first image
         scene["image_path"] = scene["image_paths"][0] if scene["image_paths"] else None
+        _finalize_scene_image_errors(scene)
 
     return scenes
 

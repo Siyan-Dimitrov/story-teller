@@ -179,13 +179,15 @@ Guidelines:
   1. Read the narration you wrote for the scene
   2. Identify the two most visually striking moments or images described in it
   3. Write each prompt as a literal depiction of that moment: name the specific characters, objects, setting, and action happening
-  4. Do NOT write generic prompts like "a dark forest" — instead write "the woodcutter's daughter kneeling beside the severed juniper branch, blood on her hands, moonlight through bare trees"
+  4. Do NOT write generic prompts like "a dark forest" — instead write "the woodcutter's adult daughter kneeling beside a broken juniper branch, a crimson ribbon in her hands, moonlight through bare trees"
 - Each prompt must include: WHO (specific character/creature), WHAT (specific action), WHERE (specific setting detail), and WHEN/LIGHTING if relevant
 - Include continuity anchors for recurring characters: apparent age, clothing, hair, posture, and one memorable identifying feature
 - Include explicit camera/framing language in every prompt, such as "wide establishing shot", "low-angle medium shot", "over-the-shoulder shot", "close-up", or "silhouette against the doorway"
 - Vary composition between the two prompts: usually one wider environmental shot and one tighter emotional/action shot
 - Do NOT append generic art-style boilerplate to image_prompts. The selected image backend adds style separately via style_prompt.
 - Do NOT request captions, title cards, typography, subtitles, logos, or text inside the image unless the story explicitly requires a visible sign or written object
+- For image_prompts, adapt disturbing story beats as symbolic, non-graphic folklore imagery. Avoid gore, visible injury, sexual content, intimate contact, restraint, torture, explicit burning, cannibalism, and children in danger.
+- When a recurring character is grown, say "adult" in the image prompt so image backends do not infer a minor.
 - Keep each image_prompt concise: one vivid sentence, 35-70 words, concrete nouns and actions only
 - Aim for the number of scenes that fits the target length (roughly 1 scene per 30-60 seconds)
 - The narration should be vivid and engaging when read aloud — this is a voiceover script
