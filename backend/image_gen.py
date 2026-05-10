@@ -9,6 +9,7 @@ import httpx
 
 from . import config, image_styles
 from . import project_store as store
+from .agents.budget import cost_logged
 
 log = logging.getLogger(__name__)
 
@@ -237,6 +238,7 @@ def _build_kontext_input(
     return inp
 
 
+@cost_logged("replicate", "REPLICATE_MODEL")
 async def generate_image_replicate(
     prompt: str,
     style_prompt: str,
@@ -553,6 +555,7 @@ async def _request_gpt_image(client: httpx.AsyncClient, payload: dict) -> bytes:
     raise RuntimeError("OpenAI image generation response had no b64_json or url")
 
 
+@cost_logged("openai", "OPENAI_IMAGE_MODEL")
 async def generate_image_gpt_image(
     prompt: str,
     style_prompt: str,

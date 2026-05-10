@@ -153,7 +153,12 @@ def export_project(
     if script_file.exists():
         shutil.copy2(script_file, output_dir / "script.json")
 
-    # Write YouTube metadata
+    # Copy Publisher-prepared YouTube metadata if present
+    yt_meta = project_dir / "youtube_metadata.json"
+    if yt_meta.exists():
+        shutil.copy2(yt_meta, output_dir / "youtube_metadata.json")
+
+    # Legacy plaintext metadata fallback (only if explicitly passed)
     if metadata_text:
         (output_dir / "youtube_metadata.txt").write_text(metadata_text, encoding="utf-8")
 

@@ -158,6 +158,10 @@ export interface ChapterProgress {
   current_step?: string | null
   failed_step?: string | null
   error?: string | null
+  // Producer-only extras (optional; legacy batch runs omit these)
+  critic_attempts?: number
+  critic_verdict?: AgentVerdict | null
+  retry_count?: number
 }
 
 export interface BatchProgress {
@@ -170,6 +174,92 @@ export interface BatchProgress {
   chapters: ChapterProgress[]
   finished: boolean
   paused: boolean
+  // Producer-only extras
+  source?: 'legacy' | 'producer'
+  cost_cents?: number
+  cap_cents?: number
+}
+
+// ── Agent types (slice 2) ────────────────────────────────────
+
+export interface AgentIssue {
+  kind: string
+  severity: 'ok' | 'minor' | 'major' | 'fatal'
+  description: string
+  scene_index?: number | null
+  suggested_fix?: string | null
+}
+
+export interface AgentVerdict {
+  agent: string
+  accept: boolean
+  severity: 'ok' | 'minor' | 'major' | 'fatal'
+  issues: AgentIssue[]
+  feedback: string
+  metadata?: Record<string, unknown>
+}
+
+export interface AgentRun {
+  ts: string
+  group_id: string
+  project_id: string
+  agent: string
+  phase: 'start' | 'step_complete' | 'paused' | 'done' | 'failed'
+  step?: string
+  attempt?: number
+  critic_severity?: string
+  retry_count?: number
+  error?: string
+}
+
+export interface CostRow {
+  ts: string
+  project_id: string | null
+  group_id: string | null
+  agent: string
+  provider: string
+  model: string
+  image_count: number
+  cents: number
+  ok: boolean
+}
+
+export interface BudgetStatus {
+  group_id: string
+  used_cents: number
+  cap_cents: number
+  warn_pct: number
+  ok: boolean
+  percent: number
+}
+
+export interface Skill {
+  id: string
+  name: string
+  description: string
+  tone?: string | null
+  image_backend?: string | null
+  style_id?: string | null
+  style_prompt?: string | null
+  lora_keys?: string[] | null
+  voice_profile_id?: string | null
+  voice_instruct?: string | null
+  music_query?: string | null
+  script_prompt_addendum?: string | null
+  target_minutes?: number | null
+  extra?: Record<string, unknown>
+}
+
+export interface PublisherOutput {
+  title_candidates: { mold: string; title: string }[]
+  selected_index: number
+  selected_title: string | null
+  selected_rationale: string
+  description: string
+  description_hook: string
+  tags: string[]
+  thumbnail_caption: string
+  chapter_marks: { time_seconds: number; title: string }[]
 }
 
 // ── HTTP client ─────────────────────────────────────────────
@@ -312,6 +402,44 @@ export const api = {
 
   batchResume: (groupId: string) =>
     post<{ status: string }>(`/api/batch/${groupId}/resume`, {}),
+
+  // ── Agents (slice 2) ───────────────────────────────────
+  producerRun: (body: {
+    group_id: string
+    project_ids?: string[]
+    skill_id?: string
+    voice_profile_id?: string
+    voice_language?: string
+    voice_instruct?: string
+    image_backend?: string
+    style_id?: string
+    custom_style_prompt?: string
+    style_prompt?: string
+    lora_keys?: string[]
+    character_consistency?: boolean
+    critic_skip_llm?: boolean
+  }) => post<{ status: string; group_id: string; project_ids: string[]; applied_skill?: string | null }>(
+    `/api/agents/producer/run`, body
+  ),
+  agentSkills: () => request<{ skills: Skill[] }>(`/api/agents/skills`),
+  agentRuns: (groupId?: string, limit = 200) =>
+    request<{ rows: AgentRun[]; count: number }>(
+      `/api/agents/runs?limit=${limit}${groupId ? `&group_id=${groupId}` : ''}`
+    ),
+  agentCosts: (groupId?: string, limit = 500) =>
+    request<{ rows: CostRow[]; count: number }>(
+      `/api/agents/costs?limit=${limit}${groupId ? `&group_id=${groupId}` : ''}`
+    ),
+  agentBudget: (groupId: string) =>
+    request<BudgetStatus>(`/api/agents/budget/${groupId}`),
+  agentBudgetSet: (groupId: string, body: { cap_cents: number; warn_pct?: number }) =>
+    post<{ group_id: string; cap_cents: number; warn_pct: number }>(
+      `/api/agents/budget/${groupId}`, body
+    ),
+  publisherRun: (id: string) =>
+    post<PublisherOutput>(`/api/projects/${id}/publisher`, {}),
+  scriptCritic: (id: string, skipLlm = false) =>
+    post<AgentVerdict>(`/api/projects/${id}/critic?skip_llm=${skipLlm}`, {}),
 
   createProject: (body: { source_tale: string; custom_prompt?: string; target_minutes: number; ollama_model: string; tone?: string }) =>
     post<ProjectState>('/api/projects', body),

@@ -7,6 +7,7 @@ import httpx
 
 from . import config
 from .grimm_tales import get_tale
+from .agents.budget import cost_logged
 
 log = logging.getLogger(__name__)
 
@@ -195,6 +196,7 @@ Guidelines:
 """
 
 
+@cost_logged("ollama", "OLLAMA_MODEL")
 async def generate_script(
     source_tale: str = "",
     custom_prompt: str = "",

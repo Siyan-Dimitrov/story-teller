@@ -1,0 +1,11 @@
+{
+  "id": "whimsical_dark",
+  "name": "Whimsical Dark",
+  "description": "Childhood storybook surface with adult menace underneath. Ghibli-meets-Grimm.",
+  "tone": "whimsical dark",
+  "image_backend": "replicate",
+  "lora_keys": ["ghibli_whimsical", "storybook"],
+  "voice_instruct": "Narrate with warm, intimate cadence — like reading aloud to one specific child. Soften the consonants. Pause for the funny lines AND the disturbing ones; let the listener feel the gear-shift.",
+  "music_query": "gentle music box piano with low cello undertone",
+  "script_prompt_addendum": "Open warm and storybook-soft. Let the menace creep in by scene 3 through small wrong details (the mother's smile lasted a beat too long; the cat's shadow had four legs but the cat had three). Never break the fairy-tale register — keep the sentences short and lullaby-cadenced even when describing the worst moments."
+}

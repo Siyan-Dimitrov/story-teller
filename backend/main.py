@@ -19,6 +19,21 @@ import httpx
 from . import config
 from . import project_store as store
 from . import script_gen, voice_gen, image_gen, image_styles, gutenberg, batch, music_search
+from .agents import (
+    critique_script,
+    Publisher,
+    BudgetExceeded,
+    check_budget,
+    set_policy,
+    get_policy,
+    list_skills,
+    get_skill,
+    apply_skill_to_cfg,
+    reload_skills,
+)
+from .agents import producer as agents_producer
+from .agents import recovery as agents_recovery
+from .agents import log as agent_log
 from pydantic import BaseModel
 from .video_assembly import assemble_video, get_assembly_progress, cancel_assembly
 from .grimm_tales import list_tales, get_tale
@@ -741,6 +756,33 @@ async def regenerate_scene_images(project_id: str, scene_index: int, req: Regene
         raise HTTPException(500, str(e))
 
 
+# ── Agents: Script Critic ────────────────────────────────────
+
+@app.post("/api/projects/{project_id}/critic")
+async def run_script_critic(project_id: str, skip_llm: bool = False):
+    """Review the saved script and return a structured verdict.
+
+    Programmatic checks always run (truncation, empty image_prompts, scene-count
+    sanity). Set ?skip_llm=true to skip the narrative-completeness LLM pass.
+    """
+    try:
+        state = store.load_state(project_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Project not found")
+    script = store.load_json(project_id, "script.json")
+    if not script:
+        raise HTTPException(400, "No script found — generate a script first")
+
+    verdict = await critique_script(
+        script=script,
+        target_minutes=state.get("target_minutes", 5.0),
+        tone=state.get("tone", ""),
+        ollama_model=state.get("ollama_model"),
+        skip_llm=skip_llm,
+    )
+    return verdict.to_dict()
+
+
 # ── Stage 4: Video assembly ──────────────────────────────────
 
 @app.post("/api/projects/{project_id}/assemble")
@@ -770,38 +812,25 @@ async def run_assemble(project_id: str, req: RunAssembleRequest):
             )
             store.update_state(project_id, step="assembled")
 
-            # Export to output folder with YouTube metadata
+            # Generate YouTube metadata via Publisher agent (writes
+            # youtube_metadata.json into the project dir; export_project copies
+            # it into the output dir alongside script.json).
             try:
                 title = script.get("title", state.get("title", ""))
-                synopsis = script.get("synopsis", "")
-                tone = state.get("tone", "dark")
-                themes = []
-                for s in script.get("scenes", []):
-                    mood = s.get("mood", "")
-                    if mood and mood not in themes:
-                        themes.append(mood)
-
-                # Generate YouTube metadata via LLM (run async in new event loop)
                 import asyncio as _asyncio
                 loop = _asyncio.new_event_loop()
-                metadata = loop.run_until_complete(
-                    generate_youtube_metadata(
-                        title=title,
-                        synopsis=synopsis,
-                        tone=tone,
-                        themes=themes,
-                        scene_count=len(script.get("scenes", [])),
-                        ollama_model=state.get("ollama_model"),
-                        book_title=state.get("book_title", ""),
+                try:
+                    loop.run_until_complete(
+                        Publisher().publish(project_id, ollama_model=state.get("ollama_model"))
                     )
-                )
-                loop.close()
+                finally:
+                    loop.close()
 
                 out_dir = export_project(
                     project_dir=pdir,
                     title=title,
                     project_id=project_id,
-                    metadata_text=metadata,
+                    metadata_text=None,
                 )
                 store.update_state(project_id, output_dir=str(out_dir))
                 log.info(f"Export complete: {out_dir}")
@@ -1784,6 +1813,134 @@ async def split_project_intelligent(project_id: str, req: IntelligentSplitReques
             for p in parts
         ],
     }
+
+
+# ── Agents: Producer, Budget, Publisher endpoints ────────────
+
+class ProducerRunRequest(BaseModel):
+    group_id: str
+    project_ids: list[str] | None = None
+    skill_id: str | None = None
+    voice_profile_id: str | None = None
+    voice_language: str = "en"
+    voice_instruct: str | None = None
+    image_backend: str | None = None
+    style_id: str | None = None
+    custom_style_prompt: str | None = None
+    style_prompt: str | None = None
+    lora_keys: list[str] | None = None
+    character_consistency: bool = False
+    critic_skip_llm: bool = False
+
+
+class BudgetUpdateRequest(BaseModel):
+    cap_cents: int
+    warn_pct: int = 80
+
+
+@app.post("/api/agents/producer/run")
+async def producer_run(req: ProducerRunRequest):
+    if not req.project_ids:
+        all_projects = store.list_projects()
+        req.project_ids = [
+            p["project_id"] for p in all_projects if p.get("book_group_id") == req.group_id
+        ]
+    if not req.project_ids:
+        raise HTTPException(400, f"No projects found for group {req.group_id}")
+
+    style_prompt, lora_keys = _resolve_image_style_request(req)
+
+    cfg: dict = {
+        "voice_profile_id": req.voice_profile_id or "",
+        "voice_language": req.voice_language,
+        "voice_instruct": req.voice_instruct,
+        "image_backend": req.image_backend,
+        "style_prompt": style_prompt,
+        "lora_keys": req.lora_keys or lora_keys,
+        "character_consistency": req.character_consistency,
+        "critic_skip_llm": req.critic_skip_llm,
+    }
+
+    skill_id = req.skill_id
+    applied_skill = None
+    if skill_id:
+        skill = get_skill(skill_id)
+        if not skill:
+            raise HTTPException(404, f"Unknown skill: {skill_id}")
+        cfg = apply_skill_to_cfg(skill, cfg)
+        applied_skill = skill.id
+
+    asyncio.create_task(
+        agents_producer.run_producer_pipeline(req.group_id, req.project_ids, cfg=cfg)
+    )
+    return {
+        "status": "started",
+        "group_id": req.group_id,
+        "project_ids": req.project_ids,
+        "applied_skill": applied_skill,
+    }
+
+
+@app.get("/api/agents/skills")
+async def agents_skills():
+    return {"skills": [s.to_dict() for s in list_skills()]}
+
+
+@app.post("/api/agents/skills/reload")
+async def agents_skills_reload():
+    skills = reload_skills()
+    return {"count": len(skills), "ids": sorted(skills)}
+
+
+@app.get("/api/agents/runs")
+async def agents_runs(group_id: str | None = None, limit: int = 200):
+    rows = agent_log.read_all(agent_log.RUNS_PATH)
+    if group_id:
+        rows = [r for r in rows if r.get("group_id") == group_id]
+    if limit > 0:
+        rows = rows[-limit:]
+    return {"rows": rows, "count": len(rows)}
+
+
+@app.get("/api/agents/costs")
+async def agents_costs(group_id: str | None = None, limit: int = 500):
+    rows = agent_log.read_all(agent_log.COSTS_PATH)
+    if group_id:
+        rows = [r for r in rows if r.get("group_id") == group_id]
+    if limit > 0:
+        rows = rows[-limit:]
+    return {"rows": rows, "count": len(rows)}
+
+
+@app.get("/api/agents/budget/{group_id}")
+async def agents_budget(group_id: str):
+    return check_budget(group_id).to_dict()
+
+
+@app.post("/api/agents/budget/{group_id}")
+async def agents_budget_set(group_id: str, req: BudgetUpdateRequest):
+    saved = set_policy(group_id, cap_cents=req.cap_cents, warn_pct=req.warn_pct)
+    return {"group_id": group_id, **saved}
+
+
+@app.post("/api/projects/{project_id}/publisher")
+async def run_publisher(project_id: str):
+    try:
+        return await Publisher().publish(project_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Project not found")
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.on_event("startup")
+async def _resume_agents() -> None:
+    try:
+        resumed = await agents_recovery.resume_unfinished()
+        if resumed:
+            log.info(f"Recovery resumed Producer for: {resumed}")
+    except Exception as e:
+        log.error(f"Recovery on startup failed: {e}")
 
 
 # ── Run ──────────────────────────────────────────────────────

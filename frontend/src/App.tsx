@@ -1,15 +1,19 @@
 import { useState, useEffect } from 'react'
-import { BookOpen, Heart } from 'lucide-react'
+import { BookOpen, Heart, Activity, ListChecks } from 'lucide-react'
 import type { HealthStatus, ProjectState } from './api'
 import { api } from './api'
 import ProjectList from './components/ProjectList'
 import StoryWizard from './components/StoryWizard'
 import BatchProgress from './components/BatchProgress'
+import AgentsDashboard from './components/AgentsDashboard'
+
+type BatchView = 'progress' | 'agents'
 
 export default function App() {
   const [health, setHealth] = useState<HealthStatus | null>(null)
   const [activeProject, setActiveProject] = useState<string | null>(null)
   const [activeBatch, setActiveBatch] = useState<string | null>(null)
+  const [batchView, setBatchView] = useState<BatchView>('progress')
   const [project, setProject] = useState<ProjectState | null>(null)
 
   useEffect(() => {
@@ -41,9 +45,33 @@ export default function App() {
           <span className="text-xs text-[var(--text-muted)]">dark fairy tales for grown-ups</span>
         </div>
         <div className="flex items-center gap-4">
+          {activeBatch && (
+            <div className="flex items-center gap-1 p-0.5 rounded-lg bg-[var(--bg-tertiary)]">
+              <button
+                onClick={() => setBatchView('progress')}
+                className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-md transition-colors ${
+                  batchView === 'progress'
+                    ? 'bg-[var(--bg-secondary)] text-[var(--text-primary)]'
+                    : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
+                }`}
+              >
+                <ListChecks size={12} /> Progress
+              </button>
+              <button
+                onClick={() => setBatchView('agents')}
+                className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-md transition-colors ${
+                  batchView === 'agents'
+                    ? 'bg-[var(--bg-secondary)] text-[var(--text-primary)]'
+                    : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
+                }`}
+              >
+                <Activity size={12} /> Agents
+              </button>
+            </div>
+          )}
           {(activeProject || activeBatch) && (
             <button
-              onClick={() => { setActiveProject(null); setActiveBatch(null) }}
+              onClick={() => { setActiveProject(null); setActiveBatch(null); setBatchView('progress') }}
               className="text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
             >
               All Projects
@@ -58,15 +86,23 @@ export default function App() {
         {activeProject && project ? (
           <StoryWizard project={project} onRefresh={refreshProject} />
         ) : activeBatch ? (
-          <BatchProgress
-            groupId={activeBatch}
-            onBack={() => setActiveBatch(null)}
-            onSelectProject={(id) => { setActiveBatch(null); setActiveProject(id) }}
-          />
+          batchView === 'agents' ? (
+            <AgentsDashboard
+              groupId={activeBatch}
+              onBack={() => { setActiveBatch(null); setBatchView('progress') }}
+              onSelectProject={(id) => { setActiveBatch(null); setBatchView('progress'); setActiveProject(id) }}
+            />
+          ) : (
+            <BatchProgress
+              groupId={activeBatch}
+              onBack={() => { setActiveBatch(null); setBatchView('progress') }}
+              onSelectProject={(id) => { setActiveBatch(null); setBatchView('progress'); setActiveProject(id) }}
+            />
+          )
         ) : (
           <ProjectList
             onSelect={setActiveProject}
-            onBatchStart={(groupId) => setActiveBatch(groupId)}
+            onBatchStart={(groupId) => { setActiveBatch(groupId); setBatchView('progress') }}
           />
         )}
       </main>

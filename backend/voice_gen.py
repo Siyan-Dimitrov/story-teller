@@ -17,6 +17,7 @@ import numpy as np
 import soundfile as sf
 
 from . import config
+from .agents.budget import cost_logged
 
 log = logging.getLogger(__name__)
 
@@ -223,6 +224,7 @@ async def generate_voice(
     return duration
 
 
+@cost_logged("voicebox", None)
 async def generate_all_scenes(
     scenes: list[dict],
     profile_id: str,
