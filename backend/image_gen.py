@@ -1,9 +1,8 @@
-"""Image generation via ComfyUI, Replicate, OpenAI GPT Image, or Ollama."""
+"""Image generation via Replicate (FLUX LoRAs), OpenAI GPT Image, or Ollama placeholder."""
 
 import base64
 import re
 import time
-import uuid
 import logging
 from pathlib import Path
 import httpx
@@ -26,87 +25,66 @@ class OpenAIImageSafetyError(RuntimeError):
         self.request_id = request_id
 
 # ── Available LoRAs ─────────────────────────────────────────────
-# Each entry: filename, trigger words to prepend, strength_model, strength_clip
-# For ComfyUI: Uses local .safetensors files
-# For Replicate: Uses flux_lora_key to look up URL in config.FLUX_LORA_URLS
+# Each entry maps a friendly name to a Replicate FLUX LoRA URL via flux_lora_key,
+# plus trigger words and per-image strength.
 AVAILABLE_LORAS = {
     "tim_burton": {
-        "file": "Tim_Burton_Painting_Style_SDXL.safetensors",
         "trigger": "vicgoth",
         "strength_model": 1.0,
-        "strength_clip": 0.7,
         "flux_lora_key": "tim_burton",
         "description": "Sepia-toned Victorian horror with aged, haunting aesthetic and dramatic contrasts",
     },
     "storybook": {
-        "file": "StorybookRedmondV2.safetensors",
         "trigger": "d00dlet00n",
         "strength_model": 0.8,
-        "strength_clip": 0.6,
         "flux_lora_key": "storybook",
         "description": "Hand-drawn storybook illustration with marker and pencil textures",
     },
     "dark_gothic": {
-        "file": "dark_gothic_fantasy_xl.safetensors",
         "trigger": "",
         "strength_model": 1.2,
-        "strength_clip": 0.65,
         "flux_lora_key": "dark_gothic",
         "description": "Rich, painterly dark fantasy with deep shadows and atmospheric lighting",
     },
     "mark_ryden": {
-        "file": "Mark_Ryden_Style.safetensors",
         "trigger": "evangsurreal",
         "strength_model": 0.8,
-        "strength_clip": 0.7,
         "flux_lora_key": "mark_ryden",
         "description": "Dreamlike surrealist art with otherworldly atmosphere and sci-fi undertones",
     },
     "painterly_illustration": {
-        "file": "",
         "trigger": "artistic style blends reality and illustration elements",
         "strength_model": 0.8,
-        "strength_clip": 0.7,
         "flux_lora_key": "painterly_illustration",
         "description": "Illustrated characters with realistic backgrounds, blending painterly and photographic styles",
     },
     "golden_atmosphere": {
-        "file": "",
         "trigger": "Golden Dust",
         "strength_model": 0.8,
-        "strength_clip": 0.7,
         "flux_lora_key": "golden_atmosphere",
         "description": "Warm golden hour tones with luminous dust particles and sun-drenched light",
     },
     "ghibli_whimsical": {
-        "file": "",
         "trigger": "GHIBSKY style",
         "strength_model": 0.8,
-        "strength_clip": 0.7,
         "flux_lora_key": "ghibli_whimsical",
         "description": "Studio Ghibli meets Makoto Shinkai — warm, lush landscapes with hand-painted feel",
     },
     "children_sketch": {
-        "file": "",
         "trigger": "sketched style",
         "strength_model": 0.8,
-        "strength_clip": 0.7,
         "flux_lora_key": "children_sketch",
         "description": "Simple hand-drawn children's illustration with soft pastel colors and gentle linework",
     },
     "concept_art": {
-        "file": "",
         "trigger": "mj painterly",
         "strength_model": 0.8,
-        "strength_clip": 0.7,
         "flux_lora_key": "concept_art",
         "description": "Cinematic concept art with dramatic composition and rich painterly detail",
     },
     "sketch_paint": {
-        "file": "",
         "trigger": "sk3tchpa1nt",
         "strength_model": 0.8,
-        "strength_clip": 0.7,
         "flux_lora_key": "sketch_paint",
         "description": "Blend of sketch linework and painterly color washes, mixing drawing and painting",
     },
@@ -117,190 +95,10 @@ AVAILABLE_LORAS = {
 DEFAULT_LORAS = ["tim_burton", "dark_gothic"]
 
 
-def _build_workflow(
-    prompt_text: str,
-    negative_text: str,
-    lora_keys: list[str] | None = None,
-    seed: int = 0,
-) -> dict:
-    """Build a ComfyUI workflow dict with optional LoRA chain.
-
-    Nodes:
-      4  -> CheckpointLoaderSimple
-      10, 11, ... -> LoraLoader chain (one per LoRA)
-      6  -> CLIPTextEncode (positive)
-      7  -> CLIPTextEncode (negative)
-      5  -> EmptyLatentImage
-      3  -> KSampler
-      8  -> VAEDecode
-      9  -> SaveImage
-    """
-    if lora_keys is None:
-        lora_keys = DEFAULT_LORAS
-
-    workflow: dict = {}
-
-    # Checkpoint loader — always node "4"
-    workflow["4"] = {
-        "class_type": "CheckpointLoaderSimple",
-        "inputs": {"ckpt_name": "sd_xl_base_1.0.safetensors"},
-    }
-
-    # Build LoRA chain: each LoraLoader takes model+clip from previous
-    # First LoRA connects to checkpoint ("4"), subsequent connect to previous LoRA node
-    lora_nodes = []
-    valid_loras = [k for k in lora_keys if k in AVAILABLE_LORAS]
-
-    prev_model_ref = ["4", 0]  # model output
-    prev_clip_ref = ["4", 1]   # clip output
-
-    for i, key in enumerate(valid_loras):
-        lora = AVAILABLE_LORAS[key]
-        node_id = str(10 + i)
-        workflow[node_id] = {
-            "class_type": "LoraLoader",
-            "inputs": {
-                "lora_name": lora["file"],
-                "strength_model": lora["strength_model"],
-                "strength_clip": lora["strength_clip"],
-                "model": prev_model_ref,
-                "clip": prev_clip_ref,
-            },
-        }
-        prev_model_ref = [node_id, 0]
-        prev_clip_ref = [node_id, 1]
-        lora_nodes.append(key)
-
-    # Collect trigger words from active LoRAs (skip empty triggers)
-    triggers = ", ".join(t for k in valid_loras if (t := AVAILABLE_LORAS[k]["trigger"]))
-    full_prompt = f"{triggers}, {prompt_text}" if triggers else prompt_text
-
-    # CLIP text encoders — connect to last LoRA (or checkpoint if no LoRAs)
-    workflow["6"] = {
-        "class_type": "CLIPTextEncode",
-        "inputs": {"text": full_prompt, "clip": prev_clip_ref},
-    }
-    workflow["7"] = {
-        "class_type": "CLIPTextEncode",
-        "inputs": {"text": negative_text, "clip": prev_clip_ref},
-    }
-
-    # Empty latent
-    workflow["5"] = {
-        "class_type": "EmptyLatentImage",
-        "inputs": {
-            "width": config.IMAGE_WIDTH,
-            "height": config.IMAGE_HEIGHT,
-            "batch_size": 1,
-        },
-    }
-
-    # KSampler — model from last LoRA (or checkpoint)
-    workflow["3"] = {
-        "class_type": "KSampler",
-        "inputs": {
-            "seed": seed,
-            "steps": 40,
-            "cfg": 7.5,
-            "sampler_name": "dpmpp_2m",
-            "scheduler": "karras",
-            "denoise": 1.0,
-            "model": prev_model_ref,
-            "positive": ["6", 0],
-            "negative": ["7", 0],
-            "latent_image": ["5", 0],
-        },
-    }
-
-    # VAE Decode — vae always from checkpoint node "4" output slot 2
-    workflow["8"] = {
-        "class_type": "VAEDecode",
-        "inputs": {"samples": ["3", 0], "vae": ["4", 2]},
-    }
-
-    # Save image
-    workflow["9"] = {
-        "class_type": "SaveImage",
-        "inputs": {"filename_prefix": "storyteller", "images": ["8", 0]},
-    }
-
-    return workflow
-
-
 NEGATIVE_PROMPT = (
     "blurry, low quality, text, watermark, signature, jpeg artifacts, "
     "deformed, ugly, modern, photograph, realistic photo, 3d render"
 )
-
-
-async def generate_image_comfyui(
-    prompt: str,
-    style_prompt: str,
-    output_path: Path,
-    seed: int | None = None,
-    lora_keys: list[str] | None = None,
-) -> Path:
-    """Generate an image using ComfyUI's SDXL workflow with LoRA support."""
-    if seed is None:
-        seed = int(time.time() * 1000) % (2**32)
-
-    # Combine style prompt with scene prompt
-    full_prompt = f"{style_prompt}, {prompt}" if style_prompt else prompt
-
-    workflow = _build_workflow(
-        prompt_text=full_prompt,
-        negative_text=NEGATIVE_PROMPT,
-        lora_keys=lora_keys,
-        seed=seed,
-    )
-
-    # Unique client ID for tracking
-    client_id = uuid.uuid4().hex[:8]
-
-    async with httpx.AsyncClient(timeout=config.IMAGE_TIMEOUT_SECONDS) as client:
-        # Queue the prompt
-        resp = await client.post(
-            f"{config.COMFYUI_URL}/prompt",
-            json={"prompt": workflow, "client_id": client_id},
-        )
-        resp.raise_for_status()
-        prompt_data = resp.json()
-        prompt_id = prompt_data["prompt_id"]
-
-        log.info(f"ComfyUI prompt queued: {prompt_id}")
-
-        # Poll for completion
-        while True:
-            hist_resp = await client.get(f"{config.COMFYUI_URL}/history/{prompt_id}")
-            hist_resp.raise_for_status()
-            history = hist_resp.json()
-
-            if prompt_id in history:
-                outputs = history[prompt_id].get("outputs", {})
-                # Find the SaveImage node output
-                for node_id, node_out in outputs.items():
-                    if "images" in node_out:
-                        img_info = node_out["images"][0]
-                        filename = img_info["filename"]
-                        subfolder = img_info.get("subfolder", "")
-                        img_type = img_info.get("type", "output")
-
-                        # Download the image
-                        params = {"filename": filename, "subfolder": subfolder, "type": img_type}
-                        img_resp = await client.get(
-                            f"{config.COMFYUI_URL}/view",
-                            params=params,
-                        )
-                        img_resp.raise_for_status()
-
-                        output_path.parent.mkdir(parents=True, exist_ok=True)
-                        output_path.write_bytes(img_resp.content)
-                        log.info(f"Image saved to {output_path}")
-                        return output_path
-
-                raise RuntimeError(f"No image output found in ComfyUI response")
-
-            await _async_sleep(1.0)
 
 
 async def generate_image_ollama(
@@ -858,7 +656,7 @@ def _finalize_scene_image_errors(scene: dict) -> None:
 async def generate_scene_images(
     scene: dict,
     project_dir: Path,
-    backend: str = "comfyui",
+    backend: str = "replicate",
     style_prompt: str = image_styles.DEFAULT_STYLE_PROMPT,
     lora_keys: list[str] | None = None,
     reference_image: Path | None = None,
@@ -889,15 +687,7 @@ async def generate_scene_images(
             await _async_sleep(delay)
 
         try:
-            if backend == "comfyui":
-                await generate_image_comfyui(
-                    prompt=prompt,
-                    style_prompt=style_prompt,
-                    output_path=output_path,
-                    seed=image_seed,
-                    lora_keys=lora_keys,
-                )
-            elif backend == "replicate":
+            if backend == "replicate":
                 await generate_image_replicate(
                     prompt=prompt,
                     style_prompt=style_prompt,
@@ -957,7 +747,7 @@ async def generate_scene_images(
 async def generate_all_scenes(
     scenes: list[dict],
     project_dir: Path,
-    backend: str = "comfyui",
+    backend: str = "replicate",
     style_prompt: str = image_styles.DEFAULT_STYLE_PROMPT,
     lora_keys: list[str] | None = None,
     character_consistency: bool = False,
@@ -1004,15 +794,7 @@ async def generate_all_scenes(
                 await asyncio.sleep(delay)
 
             try:
-                if backend == "comfyui":
-                    await generate_image_comfyui(
-                        prompt=prompt,
-                        style_prompt=style_prompt,
-                        output_path=output_path,
-                        seed=image_seed,
-                        lora_keys=lora_keys,
-                    )
-                elif backend == "replicate":
+                if backend == "replicate":
                     await generate_image_replicate(
                         prompt=prompt,
                         style_prompt=style_prompt,

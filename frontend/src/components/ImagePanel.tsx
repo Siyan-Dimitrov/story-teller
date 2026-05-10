@@ -87,7 +87,7 @@ function LoraDropdown({
 }
 
 export default function ImagePanel({ project, onRefresh, onNext }: Props) {
-  const [backend, setBackend] = useState(project.image_backend || 'comfyui')
+  const [backend, setBackend] = useState(project.image_backend || 'replicate')
   const [imageStyles, setImageStyles] = useState<ImageStyle[]>([])
   const [selectedStyleId, setSelectedStyleId] = useState('')
   const [customStylePrompt, setCustomStylePrompt] = useState('')
@@ -188,7 +188,6 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
                 onChange={e => setBackend(e.target.value)}
                 className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
               >
-                <option value="comfyui">ComfyUI (Local)</option>
                 <option value="replicate">Replicate Flux (Cloud)</option>
                 <option value="gpt_image">GPT Image 2 (OpenAI)</option>
                 <option value="ollama">Ollama (Placeholder)</option>
@@ -222,7 +221,7 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
               className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--border-focus)] resize-none"
             />
           </div>
-          {(backend === 'comfyui' || backend === 'replicate') && Object.keys(availableLoras).length > 0 && (() => {
+          {backend === 'replicate' && Object.keys(availableLoras).length > 0 && (() => {
             const loraEntries = Object.entries(availableLoras).filter(([, lora]) =>
               backend === 'replicate' ? lora.has_flux : true
             ) as [string, LoraInfo][]

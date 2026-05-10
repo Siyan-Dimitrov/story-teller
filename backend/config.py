@@ -40,7 +40,6 @@ MUSIC_DIR.mkdir(exist_ok=True)
 VOICEBOX_URL = os.getenv("VOICEBOX_URL", "http://localhost:17493")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "kimi-k2.5:cloud")
-COMFYUI_URL = os.getenv("COMFYUI_URL", "http://127.0.0.1:8188")
 
 # ── Stock media + music APIs ─────────────────────────────────
 # Shared with yt_facts_video_gen — keys live in start_full.bat
@@ -177,22 +176,6 @@ IMAGE_TIMEOUT_SECONDS = 120.0
 IMAGE_WIDTH = 1920
 IMAGE_HEIGHT = 1080
 
-# ── AnimateDiff ─────────────────────────────────────────────
-ANIMATEDIFF_ENABLED = True
-ANIMATEDIFF_SD15_CHECKPOINT = "v1-5-pruned-emaonly.safetensors"
-ANIMATEDIFF_MOTION_MODULE = "v3_sd15_mm.ckpt"
-ANIMATEDIFF_WIDTH = 768   # must be divisible by 8
-ANIMATEDIFF_HEIGHT = 512   # must be divisible by 8
-ANIMATEDIFF_DEFAULT_FRAMES = 16
-ANIMATEDIFF_DEFAULT_FPS = 8
-ANIMATEDIFF_TIMEOUT_SECONDS = 300.0
-
-# ── Image QC ────────────────────────────────────────────────
-OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "llava:7b")
-QC_PASS_THRESHOLD = float(os.getenv("QC_PASS_THRESHOLD", "3.0"))
-QC_MAX_RETRIES = int(os.getenv("QC_MAX_RETRIES", "2"))
-QC_TIMEOUT_SECONDS = float(os.getenv("QC_TIMEOUT_SECONDS", "300.0"))
-
 # ── Background music ─────────────────────────────────────────
 # Default volume for background music relative to voice (0.0-1.0)
 MUSIC_DEFAULT_VOLUME = float(os.getenv("MUSIC_DEFAULT_VOLUME", "0.18"))
@@ -203,10 +186,6 @@ MUSIC_EXTENSIONS = (".mp3", ".wav", ".ogg", ".flac", ".m4a")
 # ── Ken Burns defaults ───────────────────────────────────────
 KB_ZOOM_RANGE = (1.0, 1.15)  # start/end zoom range
 KB_DIRECTIONS = ["zoom_in", "zoom_out", "pan_left", "pan_right"]
-
-# ── Animation / Depth Parallax ──────────────────────────────
-PARALLAX_STRENGTH = 80.0  # max displacement in pixels at overscan resolution
-DEPTH_METHOD = "gradient"  # "gradient" (fast, no deps), "comfyui" (MiDaS node required), "auto" (try comfyui, fallback gradient)
 
 # ── FFmpeg ───────────────────────────────────────────────────
 FFMPEG_PATH = shutil.which("ffmpeg") or "ffmpeg"

@@ -50,7 +50,7 @@ def create_project() -> tuple[str, Path]:
         "voice_profile_id": None,
         "voice_language": "en",
         "ollama_model": "kimi-k2.5:cloud",
-        "image_backend": "comfyui",
+        "image_backend": "replicate",
         "project_seed": seed_from_project_id(project_id),
         "target_minutes": 5.0,
         "created_at": datetime.now(timezone.utc).isoformat(),

@@ -19,8 +19,8 @@ import httpx
 from . import config
 from . import project_store as store
 from . import script_gen, voice_gen, image_gen, image_styles, gutenberg, batch, music_search
+from pydantic import BaseModel
 from .video_assembly import assemble_video, get_assembly_progress, cancel_assembly
-from .animation import prepare_animations, get_animation_progress
 from .grimm_tales import list_tales, get_tale
 from .export import export_project, generate_youtube_metadata
 from .models import (
@@ -30,8 +30,6 @@ from .models import (
     RunVoiceRequest,
     RunImagesRequest,
     RegenerateSceneImagesRequest,
-    RunQCRequest,
-    RegenerateQCRequest,
     RunAssembleRequest,
     SearchStoriesRequest,
     GutenbergSearchRequest,
@@ -49,7 +47,6 @@ from .models import (
     TextPart,
     UpdateSceneMusicRequest,
 )
-from .image_qc import run_qc_for_project, regenerate_and_evaluate, get_qc_progress, evaluate_single_image
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -98,11 +95,6 @@ async def health() -> HealthStatus:
         try:
             r = await client.get(f"{config.VOICEBOX_URL}/health")
             status.voicebox = r.status_code == 200
-        except Exception:
-            pass
-        try:
-            r = await client.get(f"{config.COMFYUI_URL}/system_stats")
-            status.comfyui = r.status_code == 200
         except Exception:
             pass
     status.replicate = bool(config.REPLICATE_API_TOKEN)
@@ -749,213 +741,7 @@ async def regenerate_scene_images(project_id: str, scene_index: int, req: Regene
         raise HTTPException(500, str(e))
 
 
-# ── Stage 3.5: Image QC ──────────────────────────────────
-
-@app.post("/api/projects/{project_id}/qc")
-async def run_qc(project_id: str, req: RunQCRequest):
-    state = store.load_state(project_id)
-    script = store.load_json(project_id, "script.json")
-    if not script:
-        raise HTTPException(400, "No script found")
-
-    # Check if already running
-    progress = get_qc_progress(project_id)
-    if progress["active"]:
-        return {"status": "already_running"}
-
-    store.update_state(project_id, step="qc_running", error=None)
-    pdir = store.project_dir(project_id)
-    vision_model = req.vision_model or config.OLLAMA_VISION_MODEL
-    style_prompt, _ = _resolve_image_style_request(req)
-
-    def _run():
-        import asyncio as _asyncio
-        loop = _asyncio.new_event_loop()
-        try:
-            targets = [t.model_dump() for t in req.targets] if req.targets else None
-            scenes = loop.run_until_complete(
-                run_qc_for_project(
-                    scenes=script["scenes"],
-                    project_dir=pdir,
-                    vision_model=vision_model,
-                    style_prompt=style_prompt,
-                    pass_threshold=req.pass_threshold,
-                    project_id=project_id,
-                    targets=targets,
-                )
-            )
-            script["scenes"] = scenes
-            store.save_json(project_id, "script.json", script)
-            store.update_state(project_id, step="qc_passed")
-        except Exception as e:
-            tb = traceback.format_exc()
-            log.error(f"QC failed: {tb}")
-            store.update_state(project_id, step="illustrated", error=f"{e}\n{tb}")
-        finally:
-            loop.close()
-
-    thread = threading.Thread(target=_run, daemon=True)
-    thread.start()
-
-    return {"status": "qc_running"}
-
-
-@app.get("/api/projects/{project_id}/qc-progress")
-async def qc_progress(project_id: str):
-    return get_qc_progress(project_id)
-
-
-@app.post("/api/projects/{project_id}/qc-retry/{scene_index}/{image_index}")
-async def qc_retry_image(project_id: str, scene_index: int, image_index: int):
-    state = store.load_state(project_id)
-    script = store.load_json(project_id, "script.json")
-    if not script:
-        raise HTTPException(400, "No script found")
-
-    scenes = script["scenes"]
-    if scene_index >= len(scenes):
-        raise HTTPException(404, "Scene not found")
-
-    pdir = store.project_dir(project_id)
-    vision_model = config.OLLAMA_VISION_MODEL
-
-    result = await evaluate_single_image(
-        scene=scenes[scene_index],
-        image_index=image_index,
-        project_dir=pdir,
-        vision_model=vision_model,
-        style_prompt=image_styles.resolve_style_prompt(),
-    )
-
-    # Update scene QC results
-    scene = scenes[scene_index]
-    qc_results = scene.get("qc_results", [])
-    while len(qc_results) <= image_index:
-        qc_results.append({})
-    qc_results[image_index] = {
-        "image_index": image_index,
-        "passed": result.get("average_score", 0) >= config.QC_PASS_THRESHOLD,
-        "scores": result.get("scores", {}),
-        "average_score": result.get("average_score", 0),
-        "reasoning": result.get("reasoning", ""),
-        "attempts": 1,
-    }
-    scene["qc_results"] = qc_results
-    scene["qc_passed"] = all(r.get("passed", False) for r in qc_results)
-    store.save_json(project_id, "script.json", script)
-
-    return result
-
-
-@app.post("/api/projects/{project_id}/qc-regenerate")
-async def qc_regenerate(project_id: str, req: RegenerateQCRequest):
-    """Regenerate selected images and re-evaluate them."""
-    state = store.load_state(project_id)
-    script = store.load_json(project_id, "script.json")
-    if not script:
-        raise HTTPException(400, "No script found")
-
-    if not req.targets:
-        raise HTTPException(400, "No targets specified")
-
-    progress = get_qc_progress(project_id)
-    if progress["active"]:
-        return {"status": "already_running"}
-
-    store.update_state(project_id, step="qc_running", error=None)
-    pdir = store.project_dir(project_id)
-    vision_model = req.vision_model or config.OLLAMA_VISION_MODEL
-    image_backend = state.get("image_backend", "comfyui")
-    targets = [t.model_dump() for t in req.targets]
-    style_prompt, lora_keys = _resolve_image_style_request(req)
-
-    def _run():
-        import asyncio as _asyncio
-        loop = _asyncio.new_event_loop()
-        try:
-            scenes = loop.run_until_complete(
-                regenerate_and_evaluate(
-                    scenes=script["scenes"],
-                    project_dir=pdir,
-                    targets=targets,
-                    vision_model=vision_model,
-                    style_prompt=style_prompt,
-                    image_backend=image_backend,
-                    lora_keys=lora_keys,
-                    pass_threshold=req.pass_threshold,
-                    project_id=project_id,
-                    project_seed=store.get_project_seed(project_id),
-                )
-            )
-            script["scenes"] = scenes
-            store.save_json(project_id, "script.json", script)
-            store.update_state(project_id, step="qc_passed")
-        except Exception as e:
-            tb = traceback.format_exc()
-            log.error(f"QC regeneration failed: {tb}")
-            store.update_state(project_id, step="illustrated", error=f"{e}\n{tb}")
-        finally:
-            loop.close()
-
-    thread = threading.Thread(target=_run, daemon=True)
-    thread.start()
-
-    return {"status": "qc_running"}
-
-
-# ── Stage 4: Animation preparation ───────────────────────
-
-@app.post("/api/projects/{project_id}/animate")
-async def run_animate(project_id: str):
-    state = store.load_state(project_id)
-    script = store.load_json(project_id, "script.json")
-    if not script:
-        raise HTTPException(400, "No script found")
-
-    # Check if already animating
-    progress = get_animation_progress(project_id)
-    if progress["active"]:
-        return {"status": "already_animating"}
-
-    store.update_state(project_id, step="animating", error=None)
-    pdir = store.project_dir(project_id)
-    ollama_model = state.get("ollama_model")
-
-    def _run():
-        import asyncio as _asyncio
-        loop = _asyncio.new_event_loop()
-        try:
-            scenes = loop.run_until_complete(
-                prepare_animations(
-                    scenes=script["scenes"],
-                    project_dir=pdir,
-                    ollama_model=ollama_model,
-                    project_id=project_id,
-                )
-            )
-            script["scenes"] = scenes
-            store.save_json(project_id, "script.json", script)
-            store.update_state(project_id, step="animated")
-        except Exception as e:
-            tb = traceback.format_exc()
-            log.error(f"Animation prep failed: {tb}")
-            fallback = "qc_passed" if state.get("step") in ("animating", "qc_passed") else "illustrated"
-            store.update_state(project_id, step=fallback, error=f"{e}\n{tb}")
-        finally:
-            loop.close()
-
-    thread = threading.Thread(target=_run, daemon=True)
-    thread.start()
-
-    return {"status": "animating"}
-
-
-@app.get("/api/projects/{project_id}/animation-progress")
-async def animation_progress(project_id: str):
-    return get_animation_progress(project_id)
-
-
-# ── Stage 5: Video assembly ──────────────────────────────────
+# ── Stage 4: Video assembly ──────────────────────────────────
 
 @app.post("/api/projects/{project_id}/assemble")
 async def run_assemble(project_id: str, req: RunAssembleRequest):
@@ -1024,9 +810,7 @@ async def run_assemble(project_id: str, req: RunAssembleRequest):
         except Exception as e:
             tb = traceback.format_exc()
             log.error(f"Assembly failed: {tb}")
-            # Fall back to animated if depth maps exist, else illustrated
-            fallback = "animated" if (pdir / "depth_maps").exists() else "illustrated"
-            store.update_state(project_id, step=fallback, error=f"{e}\n{tb}")
+            store.update_state(project_id, step="illustrated", error=f"{e}\n{tb}")
 
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
@@ -1043,8 +827,7 @@ async def assembly_progress(project_id: str):
 async def assembly_cancel_endpoint(project_id: str):
     cancelled = cancel_assembly(project_id)
     if cancelled:
-        fallback = "animated"  # preserve animation data on cancel
-        store.update_state(project_id, step=fallback, error="Assembly cancelled")
+        store.update_state(project_id, step="illustrated", error="Assembly cancelled")
     return {"cancelled": cancelled}
 
 
@@ -1373,7 +1156,7 @@ async def split_project(project_id: str, req: SplitProjectRequest):
     chapter_index = state.get("chapter_index", 0)
     base_title = state.get("title", "Untitled")
     ollama_model = state.get("ollama_model", config.OLLAMA_MODEL)
-    image_backend = state.get("image_backend", "comfyui")
+    image_backend = state.get("image_backend", "replicate")
     tone = state.get("tone", "")
     voice_profile_id = state.get("voice_profile_id")
     voice_language = state.get("voice_language", "en")
@@ -1440,7 +1223,7 @@ async def _do_regular_split(project_id: str, full_text: str, state: dict, num_pa
     chapter_index = state.get("chapter_index", 0)
     base_title = state.get("title", "Untitled")
     ollama_model = state.get("ollama_model", config.OLLAMA_MODEL)
-    image_backend = state.get("image_backend", "comfyui")
+    image_backend = state.get("image_backend", "replicate")
     tone = state.get("tone", "")
     voice_profile_id = state.get("voice_profile_id")
     voice_language = state.get("voice_language", "en")
@@ -1934,7 +1717,7 @@ async def split_project_intelligent(project_id: str, req: IntelligentSplitReques
     book_title = state.get("book_title", "")
     chapter_index = state.get("chapter_index", 0)
     base_title = state.get("title", "Untitled")
-    image_backend = state.get("image_backend", "comfyui")
+    image_backend = state.get("image_backend", "replicate")
     tone = state.get("tone", "")
     voice_profile_id = state.get("voice_profile_id")
     voice_language = state.get("voice_language", "en")

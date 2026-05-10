@@ -7,8 +7,6 @@ const STEP_LABELS: Record<string, string> = {
   script: 'Script',
   voice: 'Voice',
   images: 'Images',
-  qc: 'QC',
-  animate: 'Animate',
   assemble: 'Assemble',
 }
 

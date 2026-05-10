@@ -85,7 +85,6 @@ function StatusDots({ health }: { health: HealthStatus }) {
   const services = [
     { name: 'Ollama', ok: health.ollama },
     { name: 'VoiceBox', ok: health.voicebox },
-    { name: 'ComfyUI', ok: health.comfyui },
     { name: 'Replicate', ok: health.replicate },
     { name: 'OpenAI', ok: health.openai },
     { name: 'FFmpeg', ok: health.ffmpeg },

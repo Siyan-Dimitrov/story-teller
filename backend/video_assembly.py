@@ -1,7 +1,6 @@
-"""Video assembly using MoviePy — images + audio with Ken Burns & depth parallax effects."""
+"""Video assembly using MoviePy — images + audio with Ken Burns effects."""
 
 import logging
-import math
 import random
 import subprocess
 import threading
@@ -15,18 +14,11 @@ from moviepy import (
     VideoClip,
     AudioFileClip,
     CompositeAudioClip,
-    ImageSequenceClip,
     concatenate_videoclips,
 )
 from moviepy.audio.fx import MultiplyVolume, AudioFadeIn, AudioFadeOut, AudioLoop
 
 from . import config
-
-try:
-    import cv2
-    _HAS_CV2 = True
-except ImportError:
-    _HAS_CV2 = False
 
 log = logging.getLogger(__name__)
 
@@ -202,252 +194,6 @@ def _ken_burns_clip(
     return VideoClip(make_frame, duration=duration).with_fps(config.VIDEO_FPS)
 
 
-# ── Depth Parallax ──────────────────────────────────────
-
-# Motion preset definitions: each returns (dx, dy) pixel displacement
-# at a given progress t ∈ [0, 1]. Displacement is in normalized units
-# relative to PARALLAX_STRENGTH.
-
-def _ease(t: float) -> float:
-    """Sinusoidal ease-in-out for smooth motion."""
-    return 0.5 - 0.5 * math.cos(math.pi * t)
-
-
-def _motion_dolly_forward(t: float) -> tuple[float, float]:
-    # Slight lateral drift so parallax layers separate during zoom
-    p = _ease(t)
-    return p * 0.3, -p * 0.15
-
-
-def _motion_dolly_backward(t: float) -> tuple[float, float]:
-    p = _ease(1 - t)
-    return p * 0.3, -p * 0.15
-
-
-def _motion_pan_left(t: float) -> tuple[float, float]:
-    return -_ease(t) * 1.0, math.sin(_ease(t) * math.pi) * 0.15
-
-
-def _motion_pan_right(t: float) -> tuple[float, float]:
-    return _ease(t) * 1.0, math.sin(_ease(t) * math.pi) * 0.15
-
-
-def _motion_orbital_left(t: float) -> tuple[float, float]:
-    p = _ease(t)
-    return -p * 1.0, math.sin(p * math.pi) * 0.4
-
-
-def _motion_orbital_right(t: float) -> tuple[float, float]:
-    p = _ease(t)
-    return p * 1.0, math.sin(p * math.pi) * 0.4
-
-
-def _motion_gentle_rise(t: float) -> tuple[float, float]:
-    p = _ease(t)
-    return math.sin(p * math.pi) * 0.25, -p * 0.8
-
-
-def _motion_gentle_float(t: float) -> tuple[float, float]:
-    p = t  # raw t for sinusoidal
-    return math.sin(p * math.pi * 2) * 0.5, -math.sin(p * math.pi) * 0.5
-
-
-def _motion_portrait_breathe(t: float) -> tuple[float, float]:
-    # Gentle sway so face layers separate
-    p = t
-    return math.sin(p * math.pi * 2) * 0.2, math.sin(p * math.pi) * 0.1
-
-
-def _motion_portrait_reveal(t: float) -> tuple[float, float]:
-    p = _ease(t)
-    return p * 0.25, -p * 0.1
-
-
-def _motion_portrait_drift(t: float) -> tuple[float, float]:
-    return _ease(t) * 0.6, math.sin(_ease(t) * math.pi) * 0.15
-
-
-_MOTION_FUNCS = {
-    "dolly_forward": _motion_dolly_forward,
-    "dolly_backward": _motion_dolly_backward,
-    "pan_left": _motion_pan_left,
-    "pan_right": _motion_pan_right,
-    "orbital_left": _motion_orbital_left,
-    "orbital_right": _motion_orbital_right,
-    "gentle_rise": _motion_gentle_rise,
-    "gentle_float": _motion_gentle_float,
-    "portrait_breathe": _motion_portrait_breathe,
-    "portrait_reveal": _motion_portrait_reveal,
-    "portrait_drift": _motion_portrait_drift,
-}
-
-
-def _remap_image(src: np.ndarray, map_x: np.ndarray, map_y: np.ndarray) -> np.ndarray:
-    """Remap image pixels using coordinate maps. Uses cv2 if available, else numpy."""
-    if _HAS_CV2:
-        return cv2.remap(
-            src,
-            map_x.astype(np.float32),
-            map_y.astype(np.float32),
-            cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_REFLECT_101,
-        )
-    # Numpy nearest-neighbor fallback
-    h, w = src.shape[:2]
-    ix = np.clip(np.round(map_x).astype(int), 0, w - 1)
-    iy = np.clip(np.round(map_y).astype(int), 0, h - 1)
-    return src[iy, ix]
-
-
-def _depth_parallax_clip(
-    image_path: str,
-    depth_map_path: str,
-    duration: float,
-    motion_preset: str = "dolly_forward",
-    anim_type: str = "depthflow",
-    target_size: tuple[int, int] = (config.VIDEO_WIDTH, config.VIDEO_HEIGHT),
-) -> VideoClip:
-    """Create a clip with depth-based parallax animation.
-
-    Loads the image at overscan resolution, applies per-pixel displacement
-    based on a depth map, then center-crops to target size.
-    """
-    w, h = target_size
-    scale = 1.3  # overscan to allow displacement without black edges
-    iw, ih = int(w * scale), int(h * scale)
-
-    # Load source image at overscan res
-    pil_img = PILImage.open(image_path).convert("RGB").resize((iw, ih), PILImage.LANCZOS)
-    src = np.array(pil_img)
-
-    # Load depth map and resize to overscan
-    depth_pil = PILImage.open(depth_map_path).convert("L").resize((iw, ih), PILImage.BILINEAR)
-    depth = np.array(depth_pil).astype(np.float32) / 255.0  # 0=far, 1=near
-
-    # Build base coordinate grids
-    grid_x, grid_y = np.meshgrid(np.arange(iw, dtype=np.float32), np.arange(ih, dtype=np.float32))
-
-    # Crop offsets for center crop
-    cx = (iw - w) // 2
-    cy = (ih - h) // 2
-
-    motion_fn = _MOTION_FUNCS.get(motion_preset, _motion_dolly_forward)
-    strength = config.PARALLAX_STRENGTH
-    log.info(
-        f"[Parallax] {Path(image_path).name}: preset={motion_preset}, type={anim_type}, "
-        f"strength={strength}px, duration={duration:.1f}s"
-    )
-
-    # Determine zoom behavior
-    is_dolly_fwd = motion_preset in ("dolly_forward", "portrait_reveal")
-    is_dolly_bwd = motion_preset == "dolly_backward"
-    is_breathe = motion_preset == "portrait_breathe"
-
-    # Frame cache — quantize to ~13fps for perf (every other frame at 25fps)
-    _cache: dict[int, np.ndarray] = {}
-
-    def make_frame(t: float) -> np.ndarray:
-        p = t / duration if duration > 0 else 0
-        # Quantize to reduce redundant computation
-        frame_key = int(p * duration * 13)
-        if frame_key in _cache:
-            return _cache[frame_key]
-
-        # Get motion displacement
-        dx_norm, dy_norm = motion_fn(p)
-
-        # Per-pixel displacement scaled by depth (near pixels move more)
-        dx = depth * dx_norm * strength
-        dy = depth * dy_norm * strength
-
-        # Zoom for dolly/breathe presets — depth-dependent so near layers zoom more
-        if is_dolly_fwd:
-            zoom_map = 1.0 + depth * _ease(p) * 0.15
-        elif is_dolly_bwd:
-            zoom_map = 1.0 + depth * _ease(1 - p) * 0.15
-        elif is_breathe:
-            breath = math.sin(p * math.pi * 2) * 0.04
-            zoom_map = 1.0 + depth * breath
-        else:
-            zoom_map = None
-
-        # Build remapped coordinates
-        if zoom_map is not None:
-            # Zoom from center of image
-            center_x, center_y = iw / 2.0, ih / 2.0
-            map_x = center_x + (grid_x - center_x) / zoom_map + dx
-            map_y = center_y + (grid_y - center_y) / zoom_map + dy
-        else:
-            map_x = grid_x + dx
-            map_y = grid_y + dy
-
-        # Remap
-        warped = _remap_image(src, map_x, map_y)
-
-        # Center crop to target
-        frame = warped[cy:cy + h, cx:cx + w]
-
-        # Cache management — keep only ~3 entries to limit memory
-        if len(_cache) > 3:
-            _cache.clear()
-        _cache[frame_key] = frame
-
-        return frame
-
-    return VideoClip(make_frame, duration=duration).with_fps(config.VIDEO_FPS)
-
-
-# ── AnimateDiff clip loading ─────────────────────────────────
-
-def _animatediff_clip(
-    clip_dir: str,
-    duration: float,
-    target_size: tuple[int, int] = (config.VIDEO_WIDTH, config.VIDEO_HEIGHT),
-) -> VideoClip:
-    """Load AnimateDiff frames and create a clip that fills the required duration.
-
-    AnimateDiff produces ~16 frames at 8fps = 2 seconds. If the scene needs
-    longer, we ping-pong loop (forward then reverse) to fill the duration.
-    """
-    clip_path = Path(clip_dir)
-    frame_files = sorted(clip_path.glob("frame_*.png"))
-
-    if not frame_files:
-        raise RuntimeError(f"No frames found in {clip_dir}")
-
-    frame_paths = [str(f) for f in frame_files]
-    ad_fps = config.ANIMATEDIFF_DEFAULT_FPS
-
-    log.info(
-        f"[AnimateDiff clip] {clip_path.name}: {len(frame_paths)} frames, "
-        f"target duration={duration:.1f}s"
-    )
-
-    # Build ping-pong sequence: forward + reverse (minus endpoints to avoid stutter)
-    pingpong = frame_paths + frame_paths[-2:0:-1]
-
-    # How many frames do we need at ad_fps to fill the target duration?
-    total_frames_needed = int(duration * ad_fps)
-
-    # Repeat the ping-pong cycle to fill
-    repeated = []
-    while len(repeated) < total_frames_needed:
-        repeated.extend(pingpong)
-    repeated = repeated[:total_frames_needed]
-
-    # Create ImageSequenceClip
-    clip = ImageSequenceClip(repeated, fps=ad_fps)
-
-    # Adjust speed to match exact target duration
-    if abs(clip.duration - duration) > 0.1:
-        speed_factor = clip.duration / duration
-        clip = clip.with_speed_scaled(speed_factor)
-
-    clip = clip.with_duration(duration).with_fps(config.VIDEO_FPS)
-
-    return clip
-
-
 # ── Assembly ─────────────────────────────────────────────────
 
 def _resolve_music_path(music_track: str | None) -> Path | None:
@@ -618,62 +364,18 @@ def assemble_video(
             num_images = len(abs_images)
             per_image_duration = scene_duration / num_images
 
-            # Gather animation data
-            depth_map_paths = scene.get("depth_map_paths") or []
-            animation_types = scene.get("animation_types") or []
-            motion_presets = scene.get("motion_presets") or []
-            animatediff_clip_paths = scene.get("animatediff_clip_paths") or []
-
             scene_clips = []
             for img_idx, abs_img in enumerate(abs_images):
-                anim_type = animation_types[img_idx] if img_idx < len(animation_types) else "depthflow"
-
-                # Check if this image has an AnimateDiff clip
-                has_ad_clip = (
-                    anim_type == "animatediff"
-                    and img_idx < len(animatediff_clip_paths)
-                    and animatediff_clip_paths[img_idx]
-                    and (project_dir / animatediff_clip_paths[img_idx]).exists()
-                )
-
-                # Check if this image has a depth map for parallax
-                has_depth = (
-                    img_idx < len(depth_map_paths)
-                    and depth_map_paths[img_idx]
-                    and (project_dir / depth_map_paths[img_idx]).exists()
-                )
-
-                if has_ad_clip:
-                    # Use AnimateDiff generated clip
-                    abs_clip_dir = project_dir / animatediff_clip_paths[img_idx]
-                    clip = _animatediff_clip(
-                        clip_dir=str(abs_clip_dir),
-                        duration=per_image_duration,
-                    )
-                elif has_depth:
-                    # Use depth parallax animation
-                    preset = motion_presets[img_idx] if img_idx < len(motion_presets) else "dolly_forward"
-                    abs_depth = project_dir / depth_map_paths[img_idx]
-
-                    clip = _depth_parallax_clip(
-                        image_path=str(abs_img),
-                        depth_map_path=str(abs_depth),
-                        duration=per_image_duration,
-                        motion_preset=preset,
-                        anim_type=anim_type,
-                    )
+                if num_images > 1:
+                    effect = kb_effects[img_idx % len(kb_effects)]
                 else:
-                    # Fall back to Ken Burns
-                    if num_images > 1:
-                        effect = kb_effects[img_idx % len(kb_effects)]
-                    else:
-                        effect = scene.get("kb_effect", random.choice(kb_effects))
+                    effect = scene.get("kb_effect", random.choice(kb_effects))
 
-                    clip = _ken_burns_clip(
-                        image_path=str(abs_img),
-                        duration=per_image_duration,
-                        effect=effect,
-                    )
+                clip = _ken_burns_clip(
+                    image_path=str(abs_img),
+                    duration=per_image_duration,
+                    effect=effect,
+                )
                 scene_clips.append(clip)
 
             # Concatenate sub-clips for this scene

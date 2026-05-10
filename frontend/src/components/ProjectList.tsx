@@ -104,7 +104,6 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
   const [selectedChapters, setSelectedChapters] = useState<Set<number>>(new Set())
   const [manualChapterCount, setManualChapterCount] = useState(0)
   const [viewingChapterText, setViewingChapterText] = useState<number | null>(null)
-  const [batchSteps, setBatchSteps] = useState({ qc: false, animate: false })
   const [showChapterPanel, setShowChapterPanel] = useState(false)
   const [bookTitle, setBookTitle] = useState('')
   const [creatingBatch, setCreatingBatch] = useState(false)
@@ -445,7 +444,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
           const parts = getChapterParts(ch, i)
           return { ...ch, estimated_duration: target, suggested_tone: tone, parts }
         })
-      const steps = ['script', 'voice', 'images', ...(batchSteps.qc ? ['qc'] : []), ...(batchSteps.animate ? ['animate'] : []), 'assemble']
+      const steps = ['script', 'voice', 'images', 'assemble']
 
       const createRes = await api.batchCreate({
         book_title: bookTitle,
@@ -511,7 +510,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
     }
     setRunningGroup(true)
     try {
-      const steps = ['script', 'voice', 'images', ...(batchSteps.qc ? ['qc'] : []), ...(batchSteps.animate ? ['animate'] : []), 'assemble']
+      const steps = ['script', 'voice', 'images', 'assemble']
       await api.batchRun(groupId, {
         steps,
         project_ids: [...selected],
@@ -1173,26 +1172,6 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                       <span className="text-[10px] text-[var(--text-muted)]">&rarr;</span>
                       <span className="text-[10px] text-[var(--text-secondary)]">Images</span>
                       <span className="text-[10px] text-[var(--text-muted)]">&rarr;</span>
-                      <label className="flex items-center gap-1 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={batchSteps.qc}
-                          onChange={e => setBatchSteps(s => ({ ...s, qc: e.target.checked }))}
-                          className="accent-[var(--accent)]"
-                        />
-                        <span className={`text-[10px] ${batchSteps.qc ? 'text-[var(--text-secondary)]' : 'text-[var(--text-muted)]'}`}>QC</span>
-                      </label>
-                      <span className="text-[10px] text-[var(--text-muted)]">&rarr;</span>
-                      <label className="flex items-center gap-1 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={batchSteps.animate}
-                          onChange={e => setBatchSteps(s => ({ ...s, animate: e.target.checked }))}
-                          className="accent-[var(--accent)]"
-                        />
-                        <span className={`text-[10px] ${batchSteps.animate ? 'text-[var(--text-secondary)]' : 'text-[var(--text-muted)]'}`}>Animate</span>
-                      </label>
-                      <span className="text-[10px] text-[var(--text-muted)]">&rarr;</span>
                       <span className="text-[10px] text-[var(--text-secondary)]">Assemble</span>
                     </div>
 
@@ -1220,8 +1199,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                         >
                           <option value="replicate">Replicate (FLUX)</option>
                           <option value="gpt_image">GPT Image 2 (OpenAI)</option>
-                          <option value="comfyui">ComfyUI (local)</option>
-                          <option value="ollama">Ollama (local)</option>
+                          <option value="ollama">Ollama (placeholder)</option>
                         </select>
                       </div>
                     </div>
@@ -1745,17 +1723,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                         })()}
                         <div className="flex items-center gap-4 p-2 rounded bg-[var(--bg-tertiary)]">
                           <span className="text-[10px] text-[var(--text-muted)] font-medium">Pipeline:</span>
-                          <span className="text-[10px] text-[var(--text-secondary)]">Script → Voice → Images →</span>
-                          <label className="flex items-center gap-1 cursor-pointer">
-                            <input type="checkbox" checked={batchSteps.qc} onChange={e => setBatchSteps(s => ({ ...s, qc: e.target.checked }))} className="accent-[var(--accent)]" />
-                            <span className={`text-[10px] ${batchSteps.qc ? 'text-[var(--text-secondary)]' : 'text-[var(--text-muted)]'}`}>QC</span>
-                          </label>
-                          <span className="text-[10px] text-[var(--text-muted)]">→</span>
-                          <label className="flex items-center gap-1 cursor-pointer">
-                            <input type="checkbox" checked={batchSteps.animate} onChange={e => setBatchSteps(s => ({ ...s, animate: e.target.checked }))} className="accent-[var(--accent)]" />
-                            <span className={`text-[10px] ${batchSteps.animate ? 'text-[var(--text-secondary)]' : 'text-[var(--text-muted)]'}`}>Animate</span>
-                          </label>
-                          <span className="text-[10px] text-[var(--text-muted)]">→ Assemble</span>
+                          <span className="text-[10px] text-[var(--text-secondary)]">Script → Voice → Images → Assemble</span>
                         </div>
                         <div className="grid grid-cols-2 gap-2">
                           <div>
@@ -1770,8 +1738,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                             <select value={batchImageBackend} onChange={e => setBatchImageBackend(e.target.value)} className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]">
                               <option value="replicate">Replicate (FLUX)</option>
                               <option value="gpt_image">GPT Image 2 (OpenAI)</option>
-                              <option value="comfyui">ComfyUI (local)</option>
-                              <option value="ollama">Ollama (local)</option>
+                              <option value="ollama">Ollama (placeholder)</option>
                             </select>
                           </div>
                         </div>

@@ -19,16 +19,7 @@ class Scene(BaseModel):
     audio_duration: Optional[float] = None
     image_path: Optional[str] = None  # First image (backward compat)
     image_paths: list[str] = Field(default_factory=list)  # All images for this scene
-    kb_effect: str = "zoom_in"  # Ken Burns effect type (legacy fallback)
-    # Animation fields (populated by /animate step)
-    # QC fields (populated by /qc step)
-    qc_results: list[dict] = Field(default_factory=list)  # per-image QC verdicts
-    qc_passed: bool = False  # overall scene QC status
-    # Animation fields (populated by /animate step)
-    animation_types: list[str] = Field(default_factory=list)  # per-image: "depthflow", "portrait", or "animatediff"
-    motion_presets: list[str] = Field(default_factory=list)  # per-image motion preset name
-    depth_map_paths: list[str] = Field(default_factory=list)  # per-image depth map file paths
-    animatediff_clip_paths: list[str] = Field(default_factory=list)  # per-image AnimateDiff output dirs
+    kb_effect: str = "zoom_in"  # Ken Burns effect type
     # Per-scene music (optional override of global music track)
     music_track: Optional[str] = None  # filename in data/music/ or absolute path
     music_volume: Optional[float] = None  # 0.0-1.0 override
@@ -49,14 +40,14 @@ class Script(BaseModel):
 
 class ProjectState(BaseModel):
     project_id: str = ""
-    step: str = "created"  # created | scripted | voiced | illustrated | animated | assembled
+    step: str = "created"  # created | scripted | voiced | illustrated | assembled
     error: Optional[str] = None
     title: str = ""
     source_tale: str = ""
     voice_profile_id: Optional[str] = None
     voice_language: str = "en"
     ollama_model: str = "kimi-k2.5:cloud"
-    image_backend: str = "comfyui"  # comfyui | ollama | replicate | gpt_image
+    image_backend: str = "replicate"  # replicate | gpt_image | ollama
     project_seed: Optional[int] = None
     target_minutes: float = 5.0
     suggested_length: Optional[str] = None  # e.g., "5 min", "short story", "flash fiction"
@@ -106,18 +97,17 @@ class RunVoiceRequest(BaseModel):
 
 
 class RunImagesRequest(BaseModel):
-    backend: str = "comfyui"  # comfyui | ollama | replicate | gpt_image
+    backend: str = "replicate"  # replicate | gpt_image | ollama
     style_id: Optional[str] = None
     custom_style_prompt: Optional[str] = None
     style_prompt: Optional[str] = None  # legacy clients can still send a full prompt
     lora_keys: Optional[list[str]] = None  # e.g. ["tim_burton", "dark_fantasy"] - None uses defaults for backend
     character_consistency: bool = False
-    # For Replicate: Uses FLUX LoRA URLs from config.FLUX_LORA_URLS
-    # For ComfyUI: Uses local .safetensors files from AVAILABLE_LORAS
+    # Replicate uses FLUX LoRA URLs from config.FLUX_LORA_URLS
 
 
 class RegenerateSceneImagesRequest(BaseModel):
-    backend: str = "comfyui"
+    backend: str = "replicate"
     style_id: Optional[str] = None
     custom_style_prompt: Optional[str] = None
     style_prompt: Optional[str] = None
@@ -171,30 +161,6 @@ class GutenbergTextRequest(BaseModel):
     max_chars: int = 2000  # 0 for full text
 
 
-class RunQCRequest(BaseModel):
-    vision_model: Optional[str] = None
-    pass_threshold: float = 3.0
-    style_id: Optional[str] = None
-    custom_style_prompt: Optional[str] = None
-    style_prompt: Optional[str] = None
-    targets: Optional[list["QCTarget"]] = None  # None = all images
-
-
-class QCTarget(BaseModel):
-    scene_index: int
-    image_index: int
-
-
-class RegenerateQCRequest(BaseModel):
-    targets: list[QCTarget] = Field(default_factory=list)
-    vision_model: Optional[str] = None
-    pass_threshold: float = 3.0
-    style_id: Optional[str] = None
-    custom_style_prompt: Optional[str] = None
-    style_prompt: Optional[str] = None
-    lora_keys: Optional[list[str]] = None
-
-
 class UpdateSceneMusicRequest(BaseModel):
     music_track: Optional[str] = None  # filename in data/music/ or absolute path, null to clear
     music_volume: Optional[float] = None  # 0.0-1.0, null to use global default
@@ -210,7 +176,6 @@ class RunAssembleRequest(BaseModel):
 class HealthStatus(BaseModel):
     ollama: bool = False
     voicebox: bool = False
-    comfyui: bool = False
     replicate: bool = False
     openai: bool = False
     ffmpeg: bool = False
@@ -300,7 +265,7 @@ class BatchCreateRequest(BaseModel):
     ollama_model: str = "kimi-k2.5:cloud"
     voice_profile_id: Optional[str] = None
     voice_language: str = "en"
-    image_backend: str = "comfyui"
+    image_backend: str = "replicate"
 
 
 class BatchCreateResponse(BaseModel):
@@ -314,7 +279,7 @@ class BatchRunRequest(BaseModel):
     voice_profile_id: str = ""
     voice_language: str = "en"
     voice_instruct: str = DEFAULT_VOICE_INSTRUCT
-    image_backend: str = "comfyui"
+    image_backend: str = "replicate"
     style_id: Optional[str] = None
     custom_style_prompt: Optional[str] = None
     style_prompt: Optional[str] = None

@@ -464,7 +464,7 @@ def create_batch_projects(
     ollama_model: str = "kimi-k2.5:cloud",
     voice_profile_id: str | None = None,
     voice_language: str = "en",
-    image_backend: str = "comfyui",
+    image_backend: str = "replicate",
 ) -> tuple[str, list[str]]:
     """Create one project per chapter (or per part), linked by a book_group_id.
 
@@ -525,7 +525,7 @@ def create_batch_projects(
 
 # ── Sequential batch pipeline runner ─────────────────────────
 
-STEP_ORDER = ["script", "voice", "images", "qc", "animate", "assemble"]
+STEP_ORDER = ["script", "voice", "images", "assemble"]
 
 
 async def run_batch_pipeline(
@@ -535,7 +535,7 @@ async def run_batch_pipeline(
     voice_profile_id: str = "",
     voice_language: str = "en",
     voice_instruct: str = DEFAULT_VOICE_INSTRUCT,
-    image_backend: str = "comfyui",
+    image_backend: str = "replicate",
     style_prompt: str = image_styles.DEFAULT_STYLE_PROMPT,
     lora_keys: list[str] | None = None,
     character_consistency: bool = False,
@@ -647,7 +647,7 @@ async def _run_chapter_pipeline(
     voice_profile_id: str = "",
     voice_language: str = "en",
     voice_instruct: str = DEFAULT_VOICE_INSTRUCT,
-    image_backend: str = "comfyui",
+    image_backend: str = "replicate",
     style_prompt: str = image_styles.DEFAULT_STYLE_PROMPT,
     lora_keys: list[str] | None = None,
     character_consistency: bool = False,
@@ -715,39 +715,7 @@ async def _run_chapter_pipeline(
         store.save_json(project_id, "script.json", script)
         store.update_state(project_id, step="illustrated")
 
-    # Step 4: QC (optional)
-    if "qc" in steps:
-        _update_step("qc")
-        from .image_qc import run_qc_for_project
-        store.update_state(project_id, step="qc_running", error=None)
-        scenes = await run_qc_for_project(
-            scenes=script["scenes"],
-            project_dir=pdir,
-            vision_model=config.OLLAMA_VISION_MODEL,
-            style_prompt=style_prompt,
-            pass_threshold=config.QC_PASS_THRESHOLD,
-            project_id=project_id,
-        )
-        script["scenes"] = scenes
-        store.save_json(project_id, "script.json", script)
-        store.update_state(project_id, step="qc_passed")
-
-    # Step 5: Animate (optional)
-    if "animate" in steps:
-        _update_step("animate")
-        from .animation import prepare_animations
-        store.update_state(project_id, step="animating", error=None)
-        scenes = await prepare_animations(
-            scenes=script["scenes"],
-            project_dir=pdir,
-            ollama_model=state.get("ollama_model"),
-            project_id=project_id,
-        )
-        script["scenes"] = scenes
-        store.save_json(project_id, "script.json", script)
-        store.update_state(project_id, step="animated")
-
-    # Step 6: Assemble video
+    # Step 4: Assemble video
     if "assemble" in steps:
         _update_step("assemble")
         store.update_state(project_id, step="assembling", error=None)
