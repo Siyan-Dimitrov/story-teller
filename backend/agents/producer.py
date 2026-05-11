@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import traceback
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -43,9 +44,52 @@ MAX_TRANSIENT_RETRIES = 3
 RETRY_BACKOFFS = (2.0, 5.0, 15.0)
 PRODUCER_AGENT = "producer"
 
+# state.step values, in pipeline order. Used by run_project to skip already-
+# completed steps when resuming a partially-finished project.
+STEP_ORDER = ("created", "scripted", "voiced", "illustrated", "assembled", "published")
+
+# Persisted-per-project cfg file. recovery.py reads this back so re-spawning
+# producer doesn't lose voice_instruct, lora_keys, script_backend, etc.
+PRODUCER_CFG_FILE = "producer_cfg.json"
+
 
 class ProducerError(RuntimeError):
     """Hard failure that should mark the project failed."""
+
+
+def _step_index(step: str) -> int:
+    """Position in the pipeline; unknown steps map to -1 (re-run from script)."""
+    try:
+        return STEP_ORDER.index(step)
+    except ValueError:
+        return -1
+
+
+def _persist_cfg(project_id: str, cfg: dict) -> None:
+    """Stash the run-time cfg next to the project so recovery can read it back."""
+    serializable = {
+        k: v for k, v in cfg.items()
+        if isinstance(v, (str, int, float, bool, list, dict, type(None)))
+    }
+    try:
+        store.save_json(project_id, PRODUCER_CFG_FILE, serializable)
+    except Exception as e:
+        log.warning(f"Could not persist producer cfg for {project_id}: {e}")
+
+
+def _merge_persisted_cfg(project_id: str, cfg: dict) -> dict:
+    """Fill in cfg gaps from disk. Caller's explicit values always win."""
+    try:
+        persisted = store.load_json(project_id, PRODUCER_CFG_FILE) or {}
+    except Exception:
+        persisted = {}
+    if not persisted:
+        return cfg
+    merged = dict(cfg)
+    for k, v in persisted.items():
+        if merged.get(k) in (None, "", []):
+            merged[k] = v
+    return merged
 
 
 # ── Progress writes ──────────────────────────────────────────────
@@ -59,7 +103,7 @@ def _ensure_group_progress(group_id: str, project_ids: list[str], cap_cents: int
             state = store.load_state(pid)
         except FileNotFoundError:
             state = {}
-        is_done = state.get("step") == "assembled"
+        is_done = state.get("step") in ("assembled", "published")
         chapters.append({
             "project_id": pid,
             "chapter_index": state.get("chapter_index", 0),
@@ -126,6 +170,13 @@ def _emit(
 
 
 def _refresh_cost(group_id: str) -> None:
+    """Refresh the per-group cost shown in _batch_progress (UI source of truth).
+
+    Reads run-scoped cents when called from inside run_project (contextvar has
+    run_id) and cumulative cents otherwise (e.g. _refresh_cost called from
+    run_producer_pipeline's finally block after the per-project context is
+    already reset).
+    """
     progress = _batch_progress.get(group_id)
     if not progress:
         return
@@ -201,6 +252,7 @@ async def _run_script_with_critic(project_id: str, group_id: str, cfg: dict) -> 
                 target_minutes=state.get("target_minutes", 5.0),
                 ollama_model=state.get("ollama_model"),
                 tone=skill_tone or state.get("tone", ""),
+                script_backend=cfg.get("script_backend"),
             ),
             what=f"script_gen({project_id} attempt {attempt + 1})",
         )
@@ -211,9 +263,14 @@ async def _run_script_with_critic(project_id: str, group_id: str, cfg: dict) -> 
             title=script.get("title", state.get("title", "")),
         )
 
+        # Prefer the script's effective_target_minutes (set by script_gen when a
+        # truncation retry shrunk the requested target) over the project's
+        # original target. Otherwise the critic would reject every shrunk script
+        # as "too short" and the regen loop would never converge.
+        critic_target = script.get("effective_target_minutes") or state.get("target_minutes", 5.0)
         verdict = await critique_script(
             script=script,
-            target_minutes=state.get("target_minutes", 5.0),
+            target_minutes=critic_target,
             tone=state.get("tone", ""),
             ollama_model=state.get("ollama_model"),
             skip_llm=cfg.get("critic_skip_llm", False),
@@ -253,10 +310,12 @@ async def _run_script_with_critic(project_id: str, group_id: str, cfg: dict) -> 
 
 
 async def _run_voice(project_id: str, group_id: str, cfg: dict) -> None:
-    profile_id = cfg.get("voice_profile_id") or ""
+    state = store.load_state(project_id)
+    # Prefer the explicit cfg value, but fall back to whatever the project last
+    # used so recovery (which spawns Producer with empty cfg) still works.
+    profile_id = cfg.get("voice_profile_id") or state.get("voice_profile_id") or ""
     if not profile_id:
         raise ProducerError("voice_profile_id required for producer voice step")
-    state = store.load_state(project_id)
     script = store.load_json(project_id, "script.json")
     pdir = store.project_dir(project_id)
 
@@ -347,49 +406,85 @@ async def _run_publish(project_id: str, group_id: str) -> None:
     _set_chapter(group_id, project_id, current_step="publish")
     state = store.load_state(project_id)
     await Publisher().publish(project_id, ollama_model=state.get("ollama_model"))
+    store.update_state(project_id, step="published")
     _emit(group_id, project_id, phase="step_complete", step="publish")
 
 
 # ── Per-project orchestrator ────────────────────────────────────
 
 async def run_project(project_id: str, group_id: str, cfg: dict) -> None:
-    """Walk one project script → critic → voice → budget → images → assemble → publish."""
+    """Walk one project script → critic → voice → budget → images → assemble → publish.
+
+    Skips steps already completed (state.step) so a recovered or re-launched
+    project doesn't redo paid work. Persists the resolved cfg to disk so a
+    later recovery call can read it back.
+    """
+    # Fill cfg gaps from previously-persisted cfg (recovery case), then save the
+    # merged result so future restarts have a complete snapshot.
+    cfg = _merge_persisted_cfg(project_id, cfg or {})
+    _persist_cfg(project_id, cfg)
+
+    # run_id scopes the budget gate to THIS run. Without it, cost rows from a
+    # previous run on the same group are still counted, and a second run starts
+    # already over cap. Each project gets its own run_id; the budget bar still
+    # aggregates per-group via the dashboard's cumulative view.
+    run_id = uuid.uuid4().hex[:12]
     token = set_run_context({
         "project_id": project_id,
         "group_id": group_id,
+        "run_id": run_id,
         "agent": PRODUCER_AGENT,
     })
     _emit(group_id, project_id, phase="start")
+    active_step = "init"
     try:
+        state = store.load_state(project_id)
+        start_idx = _step_index(state.get("step", "created"))
+        log.info(
+            f"Producer {project_id}: resuming from step={state.get('step')!r} "
+            f"(idx={start_idx}); skipping any already-completed steps"
+        )
+
         # script + critic
-        await _run_script_with_critic(project_id, group_id, cfg)
-        if _paused(group_id):
-            _emit(group_id, project_id, phase="paused")
-            return
+        if start_idx < _step_index("scripted"):
+            active_step = "script"
+            await _run_script_with_critic(project_id, group_id, cfg)
+            if _paused(group_id):
+                _emit(group_id, project_id, phase="paused")
+                return
 
         # voice
-        await _run_voice(project_id, group_id, cfg)
-        if _paused(group_id):
-            _emit(group_id, project_id, phase="paused")
-            return
+        if start_idx < _step_index("voiced"):
+            active_step = "voice"
+            await _run_voice(project_id, group_id, cfg)
+            if _paused(group_id):
+                _emit(group_id, project_id, phase="paused")
+                return
 
         # budget gate before paid image calls
-        ensure_budget_or_raise(group_id)
+        if start_idx < _step_index("illustrated"):
+            active_step = "budget_check"
+            ensure_budget_or_raise(group_id)
 
-        # images
-        await _run_images(project_id, group_id, cfg)
-        if _paused(group_id):
-            _emit(group_id, project_id, phase="paused")
-            return
+            # images
+            active_step = "images"
+            await _run_images(project_id, group_id, cfg)
+            if _paused(group_id):
+                _emit(group_id, project_id, phase="paused")
+                return
 
         # assemble
-        await _run_assemble(project_id, group_id)
-        if _paused(group_id):
-            _emit(group_id, project_id, phase="paused")
-            return
+        if start_idx < _step_index("assembled"):
+            active_step = "assemble"
+            await _run_assemble(project_id, group_id)
+            if _paused(group_id):
+                _emit(group_id, project_id, phase="paused")
+                return
 
         # publish (no upload — just metadata file)
-        await _run_publish(project_id, group_id)
+        if start_idx < _step_index("published"):
+            active_step = "publish"
+            await _run_publish(project_id, group_id)
 
         _set_chapter(group_id, project_id, status="completed", current_step=None)
         _emit(group_id, project_id, phase="done")
@@ -406,13 +501,14 @@ async def run_project(project_id: str, group_id: str, cfg: dict) -> None:
         raise
     except Exception as e:
         tb = traceback.format_exc()
-        log.error(f"Producer {project_id} failed: {tb}")
+        log.error(f"Producer {project_id} failed at step={active_step}: {tb}")
         store.update_state(project_id, error=f"{e}\n{tb}")
         _set_chapter(
             group_id, project_id,
-            status="failed", error=str(e), current_step=None,
+            status="failed", error=str(e),
+            failed_step=active_step, current_step=None,
         )
-        _emit(group_id, project_id, phase="failed", error=str(e))
+        _emit(group_id, project_id, phase="failed", step=active_step, error=str(e))
         raise
     finally:
         reset_run_context(token)

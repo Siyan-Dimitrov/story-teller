@@ -313,7 +313,11 @@ def assemble_video(
     music_volume: 0.0-1.0, defaults to config.MUSIC_DEFAULT_VOLUME.
     """
     output_path = project_dir / output_filename
-    clips = []
+    clips: list = []
+    # Track every clip that needs explicit close() so a mid-render exception
+    # doesn't leak ffmpeg subprocesses + file handles. On overnight 20-chapter
+    # batches this used to exhaust file descriptors.
+    closeables: list = []
 
     if project_id:
         _init_progress(project_id)
@@ -355,6 +359,7 @@ def assemble_video(
             # Determine total scene duration from audio or hint
             if abs_audio and abs_audio.exists():
                 audio_clip = AudioFileClip(str(abs_audio))
+                closeables.append(audio_clip)
                 scene_duration = audio_clip.duration
             else:
                 scene_duration = scene.get("audio_duration", scene.get("duration_hint", 10.0))
@@ -377,6 +382,7 @@ def assemble_video(
                     effect=effect,
                 )
                 scene_clips.append(clip)
+                closeables.append(clip)
 
             # Concatenate sub-clips for this scene
             if len(scene_clips) == 1:
@@ -420,9 +426,17 @@ def assemble_video(
         if project_id:
             _update_progress(project_id, phase="encoding", progress=0)
 
-        # Concatenate with crossfade
+        # Concatenate with crossfade. Clamp the crossfade so a very short scene
+        # can't produce a zero/negative-duration clip — moviepy will either
+        # raise or silently drop frames otherwise.
         if crossfade > 0 and len(clips) > 1:
-            final = concatenate_videoclips(clips, method="compose", padding=-crossfade)
+            safe_xf = min(crossfade, min(c.duration for c in clips) * 0.5)
+            if safe_xf < crossfade:
+                log.warning(
+                    f"Clamping crossfade {crossfade:.2f}s → {safe_xf:.2f}s "
+                    f"(shortest scene is {min(c.duration for c in clips):.2f}s)"
+                )
+            final = concatenate_videoclips(clips, method="compose", padding=-safe_xf)
         else:
             final = concatenate_videoclips(clips, method="compose")
 
@@ -459,11 +473,8 @@ def assemble_video(
 
         # Capture duration before cleanup
         total_duration = round(final.duration, 2)
-
-        # Clean up
-        final.close()
-        for c in clips:
-            c.close()
+        closeables.append(final)
+        closeables.extend(clips)
 
         log.info(f"Video assembled: {output_path} ({total_duration}s)")
 
@@ -476,3 +487,11 @@ def assemble_video(
         if project_id:
             _finish_progress(project_id, error=str(e))
         raise
+    finally:
+        # Always close every clip we created, even on the error path. moviepy
+        # holds ffmpeg subprocesses + file handles open until close().
+        for c in closeables:
+            try:
+                c.close()
+            except Exception:
+                pass

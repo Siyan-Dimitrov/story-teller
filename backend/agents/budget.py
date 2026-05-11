@@ -90,6 +90,10 @@ def cost_logged(provider: str, model_attr: Optional[str] = None, *, agent_defaul
     `model_attr` is the name of a config attribute holding the model id (e.g.
     "REPLICATE_MODEL"). Pass None for providers without a single model handle
     (voicebox); the row will use "n/a".
+
+    Each row carries the run_id from the calling producer context so the budget
+    gate can scope spending to the current run rather than the group's full
+    history (a second run on the same group would otherwise pre-burn its cap).
     """
 
     def deco(fn):
@@ -116,6 +120,7 @@ def cost_logged(provider: str, model_attr: Optional[str] = None, *, agent_defaul
                             "ts": agent_log.now_iso(),
                             "project_id": ctx.get("project_id"),
                             "group_id": ctx.get("group_id"),
+                            "run_id": ctx.get("run_id"),
                             "agent": ctx.get("agent", agent_default),
                             "provider": provider,
                             "model": model,
@@ -167,21 +172,38 @@ def set_policy(group_id: str, *, cap_cents: int, warn_pct: int = DEFAULT_WARN_PC
     return raw[group_id]
 
 
-def used_cents_for_group(group_id: str) -> int:
-    """Sum cents from costs.jsonl where group_id matches and ok=True."""
+def used_cents_for_group(group_id: str, *, run_id: Optional[str] = None) -> int:
+    """Sum ok=True cents from costs.jsonl for this group.
+
+    When run_id is provided, only rows tagged with that run_id are counted —
+    this is what the budget gate uses during a producer run so a previously-
+    completed run doesn't pre-burn the cap on the same group. When run_id is
+    None, the full group history is summed (used by the dashboard view).
+    """
     total = 0
     for row in agent_log.read_all(agent_log.COSTS_PATH):
         if row.get("group_id") != group_id:
             continue
         if not row.get("ok", True):
             continue
+        if run_id is not None and row.get("run_id") != run_id:
+            continue
         total += int(row.get("cents", 0))
     return total
 
 
-def check_budget(group_id: str) -> BudgetStatus:
+def check_budget(group_id: str, *, run_id: Optional[str] = None) -> BudgetStatus:
+    """Compute the current budget status.
+
+    Pass run_id from the active producer context to scope spending to the
+    current run. Omitting run_id reports cumulative group history (UI use).
+    """
     policy = get_policy(group_id)
-    used = used_cents_for_group(group_id)
+    # If caller didn't specify, try to read run_id off the active context so
+    # the producer's own ensure_budget_or_raise call is automatically scoped.
+    if run_id is None:
+        run_id = get_run_context().get("run_id")
+    used = used_cents_for_group(group_id, run_id=run_id)
     cap = int(policy["cap_cents"])
     pct = (used / cap * 100.0) if cap > 0 else 0.0
     return BudgetStatus(
@@ -195,10 +217,13 @@ def check_budget(group_id: str) -> BudgetStatus:
 
 
 def ensure_budget_or_raise(group_id: Optional[str]) -> None:
-    """Raise BudgetExceeded if the group is over cap. No-op if group_id is None."""
+    """Raise BudgetExceeded if the current run is over cap. No-op if group_id is None.
+
+    Scoped to the active producer run via the contextvar's run_id.
+    """
     if not group_id:
         return
-    status = check_budget(group_id)
+    status = check_budget(group_id)  # picks up run_id from context automatically
     if not status.ok:
         raise BudgetExceeded(
             f"Group {group_id} budget exceeded: {status.used_cents}¢ used of {status.cap_cents}¢ cap"

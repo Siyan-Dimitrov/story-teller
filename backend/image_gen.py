@@ -321,82 +321,24 @@ GPT_IMAGE_STYLE_BOILERPLATE = [
     "rich colors",
 ]
 
-GPT_IMAGE_SAFETY_REPLACEMENTS = [
-    (r"\bTim Burton(?: inspired| style)?\b", "whimsical gothic silhouettes"),
-    (r"\bStudio Ghibli(?: style)?\b", "warm hand-painted animation aesthetic"),
-    (r"\bYoung Talia\b", "adult Talia"),
-    (r"\bTalia's\b", "adult Talia's"),
-    (r"\bhis daughter\b", "his adult daughter"),
-    (r"\blittle girl\b", "young princess"),
-    (r"\bparanoid intensity\b", "grave concern"),
-    (r"\bcollapsing backward\b", "sinking backward in a dramatic faint"),
-    (r"\bvisible splinter of flax under her fingernail\b", "tiny golden flax fiber near her hand"),
-    (r"\bsplinter of flax under her fingernail\b", "tiny golden flax fiber near her hand"),
-    (r"\bfingernail\b", "hand"),
-    (r"\bblood on her hands\b", "dark red ribbon around her hands"),
-    (r"\bblood\b", "deep red color"),
-    (r"\bsevered\b", "broken"),
-    (r"\bcorpse\b", "motionless figure"),
-    (r"\bbody lying\b", "resting figure"),
-    (r"\bdead\b", "silent"),
-    (r"\bdeath\b", "sleep"),
-    (r"\bpregnant beneath her velvet gown\b", "wearing a full velvet gown"),
-    (r"\bpregnant\b", "wearing a full velvet gown"),
-    (r"\brounded belly under the rich velvet fabric\b", "rich velvet gown arranged in soft folds"),
-    (r"\bbelly\b", "gown"),
-    (r"\bhands resting passively on it\b", "hands resting calmly on the velvet fabric"),
-    (r"\bdisheveled\b", "rumpled"),
-    (r"\bnewborn baby nursing from Talia's breast while she sleeps\b", "newborn baby resting safely beside adult Talia while she sleeps"),
-    (r"\bnewborn baby nursing from adult Talia's breast while she sleeps\b", "newborn baby resting safely beside adult Talia while she sleeps"),
-    (r"\bnewborn baby nursing from adult Talia's blanket while she sleeps\b", "newborn baby resting safely beside adult Talia while she sleeps"),
-    (r"\bnursing from Talia's breast\b", "resting safely beside adult Talia"),
-    (r"\bnursing infants\b", "newborn twins"),
-    (r"\bbreast\b", "blanket"),
-    (r"\bsucking on Talia's finger\b", "gently holding adult Talia's hand"),
-    (r"\bBaby Moon sucking on adult Talia's finger\b", "Baby Moon gently holding adult Talia's hand"),
-    (r"\btiny flax splinter\b", "tiny golden flax fiber"),
-    (r"\binfant's tongue\b", "fold of golden cloth"),
-    (r"\binfant's small hand against her skin\b", "infant's small hand on a blanket"),
-    (r"\btongue\b", "golden cloth"),
-    (r"\bmouth\b", "expression"),
-    (r"\bscream of horror\b", "startled gasp"),
-    (r"\bhorror\b", "shock"),
-    (r"\bnewborn twins crying\b", "newborn twins resting safely"),
-    (r"\bdrag a screaming Talia away\b", "escort adult Talia away in a tense court scene"),
-    (r"\bCook holding the twins as soldiers escort adult Talia away\b", "Cook keeping the twins safely aside while guards escort adult Talia through the room"),
-    (r"\bshe reaches for them desperately\b", "she looks back with worry"),
-    (r"\bscreaming\b", "distressed"),
-    (r"\bguards holding her arms\b", "guards standing nearby"),
-    (r"\bbound with ropes\b", "surrounded by guards"),
-    (r"\biron chains\b", "shadowed court garments"),
-    (r"\bchains\b", "dark ribbons"),
-    (r"\bcarving knives\b", "copper utensils"),
-    (r"\bhunting knife\b", "small ceremonial blade"),
-    (r"\bsmall ceremonial blade\b", "small ceremonial tool"),
-    (r"\bcutting the ropes binding\b", "loosening the ceremonial ribbons around"),
-    (r"\baround Talia to a wooden stake\b", "near adult Talia beside a wooden post"),
-    (r"\baround adult Talia to a wooden stake\b", "near adult Talia beside a wooden post"),
-    (r"\bloosening the ceremonial ribbons around adult Talia to a wooden wooden post\b", "loosening ceremonial ribbons near adult Talia beside a wooden post"),
-    (r"\baround adult Talia to a wooden wooden post\b", "near adult Talia beside a wooden post"),
-    (r"\bwooden pyre\b", "ceremonial wooden platform"),
-    (r"\bpyre\b", "ceremonial platform"),
-    (r"\bflames nearby catching the edge of her velvet dress\b", "firelight glowing at a safe distance"),
-    (r"\bflames beginning around her feet\b", "firelight glowing on the stones nearby"),
-    (r"\bhair catching fire\b", "hair lit by orange firelight"),
-    (r"\bwatching the burning\b", "watching the firelit courtyard"),
-    (r"\badult Talia watching the firelit courtyard, holding both twins close to her chest\b", "adult Talia standing safely away from the firelit courtyard with both twins nearby"),
-    (r"\bholding both twins close to her chest\b", "with both twins nearby at a safe distance"),
-    (r"\bburning\b", "firelit courtyard scene"),
-    (r"\bthe flames firelit courtyard scene brightly\b", "warm firelight glowing"),
-    (r"\bmeat on his plate\b", "covered dish on his plate"),
-    (r"\btied to the wooden stake\b", "standing before a wooden post"),
-    (r"\btied to\b", "standing beside"),
-    (r"\bstake\b", "wooden post"),
-    (r"\bcannibalism\b", "cruel banquet intrigue"),
-    (r"\bcannibal\b", "cruel banquet"),
-    (r"\broasted meat\b", "covered banquet dish"),
-    (r"\bsmall children are concealed\b", "children are hidden safely"),
-]
+SAFETY_REWRITE_SYSTEM_PROMPT = """You rewrite image prompts that were rejected by an image generator's safety filter so the same scene can be rendered without graphic content.
+
+Rules — preserve:
+- Every named character (use their name).
+- Camera/framing language ("wide establishing shot", "medium shot", etc.).
+- Setting, time of day, lighting, mood.
+- Action/posture (replace explicit violence with symbolic equivalents).
+
+Rules — replace:
+- Visible blood/gore/wounds → symbolic substitutes (red ribbons, dark stains, cracked stone).
+- Death/corpses → "still figure resting", "motionless body covered by cloth".
+- Burning/fire on people → firelight nearby, distant flames, glowing embers.
+- Explicit injury, restraint, torture, sexual content, intimate contact → symbolic folk-tale equivalents.
+- Children in danger → adults in symbolic ceremonial scenes.
+- Pregnancy/breastfeeding → "wearing a flowing gown" / "infant resting safely beside her".
+- Weapons in active use → ceremonial or sheathed equivalents.
+
+Output: ONE rewritten prompt as plain prose, 35-70 words. No preamble, no explanation, no quotes, no markdown."""
 
 
 def _normalize_prompt_text(text: str) -> str:
@@ -413,20 +355,48 @@ def _strip_gpt_image_style_boilerplate(text: str) -> str:
     return _normalize_prompt_text(cleaned)
 
 
-def _make_gpt_image_safe_text(text: str) -> str:
-    safe_text = _strip_gpt_image_style_boilerplate(text)
-    for pattern, replacement in GPT_IMAGE_SAFETY_REPLACEMENTS:
-        safe_text = re.sub(pattern, replacement, safe_text, flags=re.IGNORECASE)
+async def _rewrite_prompt_for_safety_via_llm(prompt: str, ollama_model: str | None = None) -> str:
+    """Ask the local LLM to rewrite a rejected prompt as symbolic, non-graphic folklore imagery.
 
-    if re.search(r"\bTalia\b", safe_text, flags=re.IGNORECASE) and not re.search(
-        r"\badult Talia\b|\bLord Talia\b|\bnewborn\b|\binfant\b|\bbaby\b",
-        safe_text,
-        flags=re.IGNORECASE,
-    ):
-        safe_text = re.sub(r"\bTalia\b", "adult Talia", safe_text, count=1, flags=re.IGNORECASE)
-
-    safe_text = re.sub(r"\bLord adult Talia\b", "Lord Talia", safe_text, flags=re.IGNORECASE)
-    return _normalize_prompt_text(safe_text)
+    Returns the rewritten prompt, or the original on any failure (so the caller can
+    still attempt the retry — the worst case is the same rejection a second time,
+    which the existing safety-retry handler already raises cleanly).
+    """
+    model = ollama_model or config.OLLAMA_MODEL
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                f"{config.OLLAMA_URL}/api/chat",
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": SAFETY_REWRITE_SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "stream": False,
+                    "options": {"temperature": 0.3, "num_predict": 400},
+                },
+            )
+            if resp.status_code != 200:
+                log.warning(f"Safety rewrite LLM returned {resp.status_code}; using original prompt")
+                return prompt
+            data = resp.json()
+            msg = data.get("message", {})
+            rewritten = (msg.get("content") or msg.get("thinking") or "").strip()
+            if not rewritten:
+                log.warning("Safety rewrite LLM returned empty content; using original prompt")
+                return prompt
+            # Strip wrapping quotes if the model added any despite the instruction.
+            rewritten = rewritten.strip('"\'').strip()
+            log.info(
+                f"Safety rewrite OK: {len(prompt)} → {len(rewritten)} chars (model={model})"
+            )
+            log.info(f"  original head: {prompt[:120]!r}")
+            log.info(f"  rewritten    : {rewritten[:120]!r}")
+            return rewritten
+    except Exception as e:
+        log.warning(f"Safety rewrite LLM failed ({e}); using original prompt")
+        return prompt
 
 
 def _build_gpt_image_prompt(
@@ -435,6 +405,13 @@ def _build_gpt_image_prompt(
     lora_keys: list[str] | None = None,
     safety_mode: bool = False,
 ) -> str:
+    """Wrap a scene prompt + style + LoRA hints into the final GPT Image instruction.
+
+    safety_mode adds an explicit "no graphic content" preamble. The actual
+    rewriting of an unsafe scene is done upstream by
+    _rewrite_prompt_for_safety_via_llm; this function just frames whatever
+    text it receives.
+    """
     style_parts = []
     if style_prompt:
         style_parts.append(style_prompt)
@@ -450,12 +427,10 @@ def _build_gpt_image_prompt(
         if descriptions:
             style_parts.append("Visual style references: " + "; ".join(descriptions))
 
-    style_text = ", ".join(style_parts) or "cinematic storybook illustration"
+    style_text = _strip_gpt_image_style_boilerplate(", ".join(style_parts) or "cinematic storybook illustration")
     scene_text = _strip_gpt_image_style_boilerplate(prompt)
 
     if safety_mode:
-        scene_text = _make_gpt_image_safe_text(scene_text)
-        style_text = _make_gpt_image_safe_text(style_text)
         return (
             "Create a cinematic 16:9 storybook illustration for an adult folklore video.\n"
             f"Scene: {scene_text}\n"
@@ -466,8 +441,6 @@ def _build_gpt_image_prompt(
             "strong composition, rich detail, and no captions, watermarks, UI elements, "
             "logos, or unintended text."
         )
-
-    style_text = _strip_gpt_image_style_boilerplate(style_text)
 
     return (
         "Create a cinematic 16:9 illustration for an adult folklore story video.\n"
@@ -601,12 +574,13 @@ async def generate_image_gpt_image(
             image_bytes = await _request_gpt_image(client, payload)
         except OpenAIImageSafetyError as first_error:
             log.warning(
-                "OpenAI safety rejected image prompt; retrying with sanitized prompt%s",
+                "OpenAI safety rejected image prompt; rewriting via LLM and retrying%s",
                 f" (request_id={first_error.request_id})" if first_error.request_id else "",
             )
+            rewritten_scene = await _rewrite_prompt_for_safety_via_llm(prompt)
             safe_payload = dict(payload)
             safe_payload["prompt"] = _build_gpt_image_prompt(
-                prompt,
+                rewritten_scene,
                 style_prompt,
                 lora_keys,
                 safety_mode=True,
@@ -615,8 +589,8 @@ async def generate_image_gpt_image(
                 image_bytes = await _request_gpt_image(client, safe_payload)
             except OpenAIImageSafetyError as retry_error:
                 raise OpenAIImageSafetyError(
-                    "OpenAI rejected this image prompt after a safe retry."
-                    " Rewrite the scene as symbolic, non-graphic folklore imagery and retry.",
+                    "OpenAI rejected this image prompt after an LLM-rewritten safe retry."
+                    " The scene may need a manual symbolic rewrite.",
                     request_id=retry_error.request_id or first_error.request_id,
                 ) from retry_error
 
@@ -666,6 +640,9 @@ async def generate_scene_images(
     project_seed: int | None = None,
 ) -> dict:
     """Generate images for a single scene. Returns updated scene with image_paths."""
+    if backend in ("openai", "gpt-image", "gpt_image_2", "gpt-image-2"):
+        log.info(f"Mapping image_backend alias {backend!r} → 'gpt_image'")
+        backend = "gpt_image"
     images_dir = project_dir / "images"
     images_dir.mkdir(exist_ok=True)
 
@@ -757,6 +734,20 @@ async def generate_all_scenes(
     project_seed: int | None = None,
 ) -> list[dict]:
     """Generate images for all scenes. Returns updated scenes with image_paths."""
+    # Defensive: accept common aliases for the GPT Image backend so a skill or
+    # API caller using "openai"/"gpt-image" doesn't silently fall through to the
+    # ollama placeholder path. The canonical token is "gpt_image".
+    if backend in ("openai", "gpt-image", "gpt_image_2", "gpt-image-2"):
+        log.info(f"Mapping image_backend alias {backend!r} → 'gpt_image'")
+        backend = "gpt_image"
+    log.info(
+        f"generate_all_scenes: backend={backend!r}, scenes={len(scenes)}, "
+        f"lora_keys={lora_keys}, style_prompt={style_prompt[:60]!r}..."
+    )
+    if backend not in ("replicate", "gpt_image", "ollama"):
+        log.warning(
+            f"generate_all_scenes: unknown backend {backend!r} — will fall through to ollama placeholder"
+        )
     images_dir = project_dir / "images"
     images_dir.mkdir(exist_ok=True)
 

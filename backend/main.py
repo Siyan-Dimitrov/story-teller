@@ -69,6 +69,20 @@ if sys.platform == "win32":
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
+# Persistent file log so a crash in the cmd window (or `--reload` swallowing
+# pre-crash output) doesn't lose the trail. Truncated on each startup to keep
+# the file from growing unbounded across `--reload` restarts. If you want to
+# preserve history, change mode to "a" or rotate manually.
+try:
+    _log_path = Path(__file__).resolve().parent.parent / "storyteller.log"
+    _fh = logging.FileHandler(_log_path, mode="w", encoding="utf-8")
+    _fh.setLevel(logging.INFO)
+    _fh.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+    logging.getLogger().addHandler(_fh)
+    log.info(f"File logging enabled: {_log_path}")
+except Exception as _log_err:
+    log.warning(f"Could not attach file log handler: {_log_err}")
+
 app = FastAPI(title="Story Teller", version="0.1.0")
 app.mount("/music", StaticFiles(directory=str(config.MUSIC_DIR)), name="music")
 app.add_middleware(
@@ -1831,6 +1845,7 @@ class ProducerRunRequest(BaseModel):
     lora_keys: list[str] | None = None
     character_consistency: bool = False
     critic_skip_llm: bool = False
+    script_backend: str | None = None  # "ollama" (default) or "claude_code"
 
 
 class BudgetUpdateRequest(BaseModel):
@@ -1859,6 +1874,7 @@ async def producer_run(req: ProducerRunRequest):
         "lora_keys": req.lora_keys or lora_keys,
         "character_consistency": req.character_consistency,
         "critic_skip_llm": req.critic_skip_llm,
+        "script_backend": req.script_backend,
     }
 
     skill_id = req.skill_id

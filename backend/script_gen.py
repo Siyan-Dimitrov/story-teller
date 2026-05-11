@@ -1,8 +1,10 @@
-"""Script generation via Ollama LLM."""
+"""Script generation — Ollama (default) or Claude Code subprocess."""
 
+import asyncio
 import json
 import logging
 import re
+import shutil
 import httpx
 
 from . import config
@@ -10,6 +12,19 @@ from .grimm_tales import get_tale
 from .agents.budget import cost_logged
 
 log = logging.getLogger(__name__)
+
+
+# Backends
+SCRIPT_BACKEND_OLLAMA = "ollama"
+SCRIPT_BACKEND_CLAUDE_CODE = "claude_code"
+DEFAULT_SCRIPT_BACKEND = SCRIPT_BACKEND_OLLAMA
+
+# Source-text handling
+LONG_SOURCE_WARN_CHARS = 8000      # warn the user
+LONG_SOURCE_SUMMARIZE_CHARS = 12000  # above this, run a summarize pre-pass
+SUMMARIZE_TARGET_CHARS = 3500
+TRUNCATION_RETRY_FACTOR = 0.7      # shrink target_minutes by 30% on truncation
+MAX_TRUNCATION_RETRIES = 2
 
 
 def _repair_truncated_json(raw: str) -> str:
@@ -138,15 +153,17 @@ async def search_stories(
 
     data = resp.json()
     content = _extract_llm_content(data)
+    content = _strip_markdown_fences(content) if content else ""
 
-    # Strip markdown fences if present
-    if content.startswith("```"):
-        lines = content.split("\n")
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        content = "\n".join(lines)
-
-    parsed = json.loads(content)
-    return parsed.get("results", [])
+    if not content.strip():
+        log.warning(f"search_stories: model returned empty content (model={model}); returning []")
+        return []
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError as e:
+        log.warning(f"search_stories: model returned non-JSON ({e}); returning []. head={content[:200]!r}")
+        return []
+    return parsed.get("results", []) if isinstance(parsed, dict) else []
 
 SYSTEM_PROMPT = """You are a master storyteller who writes dark fairy tales for adults.
 Your stories are atmospheric, gothic, and gripping — like a campfire tale that keeps listeners riveted.
@@ -196,52 +213,102 @@ Guidelines:
 """
 
 
-@cost_logged("ollama", "OLLAMA_MODEL")
-async def generate_script(
-    source_tale: str = "",
-    custom_prompt: str = "",
-    target_minutes: float = 5.0,
-    ollama_model: str | None = None,
-    ollama_base_url: str | None = None,
-    tone: str = "",
-) -> dict:
-    model = ollama_model or config.OLLAMA_MODEL
-    base_url = ollama_base_url or config.OLLAMA_URL
+SUMMARIZE_SYSTEM_PROMPT = """You are a faithful summarizer of fairy-tale source texts. Compress the input into a dense plot synopsis preserving every named character, every key event in order, every setting change, every supernatural element, and the ending. No commentary. No interpretation. No omitted acts. Aim for about 3000-4000 characters."""
 
-    # Build the user prompt
+
+def _strip_markdown_fences(content: str) -> str:
+    if content.startswith("```"):
+        lines = content.split("\n")
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        content = "\n".join(lines)
+    return content
+
+
+def _normalize_script(script: dict, effective_target_minutes: float | None = None) -> dict:
+    for i, scene in enumerate(script.get("scenes", [])):
+        scene["index"] = i
+        scene.setdefault("mood", "neutral")
+        scene.setdefault("duration_hint", 15.0)
+        if "image_prompts" not in scene or not scene["image_prompts"]:
+            single = scene.get("image_prompt", "")
+            scene["image_prompts"] = [single] if single else []
+        if scene["image_prompts"]:
+            scene["image_prompt"] = scene["image_prompts"][0]
+    if effective_target_minutes is not None:
+        # The actual minutes the LLM was asked to deliver, after any truncation
+        # retries shrunk the target. The Critic should evaluate against this
+        # — not against the original `state.target_minutes` — otherwise it
+        # will reject every shrunk script as "too short" and loop forever.
+        script["effective_target_minutes"] = round(effective_target_minutes, 1)
+    return script
+
+
+async def _summarize_long_source(text: str, ollama_model: str | None, base_url: str | None) -> str:
+    """Compress a long chapter via a cheap Ollama call. Falls back to the original
+    text if the summary is empty/too-short — better to send a long prompt than
+    nothing."""
+    model = ollama_model or config.OLLAMA_MODEL
+    url = base_url or config.OLLAMA_URL
+    log.info(f"Summarizing long source ({len(text):,} chars) via {model}")
+    async with httpx.AsyncClient(timeout=config.LLM_TIMEOUT_SECONDS) as client:
+        resp = await client.post(
+            f"{url}/api/chat",
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": SUMMARIZE_SYSTEM_PROMPT},
+                    {"role": "user", "content": text},
+                ],
+                "stream": False,
+                "options": {"temperature": 0.2, "num_predict": 4096},
+            },
+        )
+        resp.raise_for_status()
+    data = resp.json()
+    summary = _extract_llm_content(data).strip()
+    if len(summary) < 200:
+        # Capture the response keys so we can tell whether the model returned an
+        # error envelope, a structured-output skip, or just an empty response.
+        msg = data.get("message", {})
+        log.warning(
+            f"Summarize returned only {len(summary)} chars (model={model}); "
+            f"falling back to original {len(text):,}-char source. "
+            f"done_reason={data.get('done_reason')!r}, msg_keys={list(msg.keys())}, "
+            f"content_len={len(msg.get('content') or '')}, thinking_len={len(msg.get('thinking') or '')}"
+        )
+        return text
+    log.info(f"Summary length: {len(summary):,} chars (from {len(text):,})")
+    return summary
+
+
+def _build_user_prompt(
+    source_tale: str,
+    custom_prompt: str,
+    target_minutes: float,
+    tone: str,
+) -> str:
     parts = []
     if source_tale:
         tale = get_tale(source_tale)
         if tale:
-            parts.append(f"Retell this dark fairy tale in your narrator voice:\n\n")
+            parts.append("Retell this dark fairy tale in your narrator voice:\n")
             parts.append(f"Title: {tale['title']}\n")
             parts.append(f"Origin: {tale['origin']}\n")
             parts.append(f"Synopsis:\n{tale['synopsis']}\n")
         else:
             parts.append(f"Write a dark fairy tale based on: {source_tale}\n")
-
     if tone:
         parts.append(f"\nAdaptation tone: {tone}. Infuse the story with this tone throughout.\n")
-
     if custom_prompt:
-        # Warn if text is very long (might exceed LLM context)
-        if len(custom_prompt) > 8000:
-            log.warning(f"Custom prompt is {len(custom_prompt):,} chars - may exceed LLM context. Consider shorter chapters.")
-        # Truncate extremely long text to prevent API errors
-        max_prompt_len = 12000
-        if len(custom_prompt) > max_prompt_len:
-            parts.append(f"\nSource material (truncated from {len(custom_prompt):,} chars):\n{custom_prompt[:max_prompt_len]}...\n")
-        else:
-            parts.append(f"\nAdditional direction: {custom_prompt}\n")
-
+        parts.append(f"\nAdditional direction: {custom_prompt}\n")
     scene_count = max(5, int(target_minutes * 1.5))
     parts.append(f"\nTarget length: approximately {target_minutes} minutes when narrated aloud.")
     parts.append(f"\nAim for roughly {scene_count} scenes.")
+    return "\n".join(parts)
 
-    user_prompt = "\n".join(parts)
 
-    log.info(f"Generating script with model={model}, target={target_minutes}min")
-
+async def _call_ollama_for_script(user_prompt: str, model: str, base_url: str) -> tuple[str, str]:
+    """One Ollama chat call. Returns (content, done_reason)."""
     async with httpx.AsyncClient(timeout=config.LLM_TIMEOUT_SECONDS) as client:
         resp = await client.post(
             f"{base_url}/api/chat",
@@ -262,42 +329,183 @@ async def generate_script(
             body = resp.text
             log.error(f"Ollama error {resp.status_code}: {body}")
             raise RuntimeError(f"Ollama returned {resp.status_code}: {body}")
-
     data = resp.json()
-    content = _extract_llm_content(data)
+    return _extract_llm_content(data), data.get("done_reason", "")
 
-    # Check if response was truncated by token limit
-    done_reason = data.get("done_reason", "")
-    if done_reason == "length":
-        log.warning("LLM response was truncated (hit token limit). Will attempt JSON repair.")
 
-    # Strip markdown fences if present
-    if content.startswith("```"):
-        lines = content.split("\n")
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        content = "\n".join(lines)
+CLAUDE_CODE_TIMEOUT_SECONDS = 600  # 10 min — script gen on big chapters can be slow but shouldn't hang
 
+
+async def _call_claude_code_for_script(user_prompt: str) -> str:
+    """One Claude Code subprocess call (uses the user's subscription, not API).
+
+    Uses --system-prompt to override the default Claude Code system prompt
+    (skipping the bloated tool descriptions) while keeping OAuth/keychain auth
+    so we don't need ANTHROPIC_API_KEY. Wrapped in a hard timeout so a hung
+    subprocess doesn't block the producer indefinitely.
+    """
+    import time
+    claude_path = shutil.which("claude")
+    if not claude_path:
+        raise RuntimeError("claude CLI not on PATH; install Claude Code or set script_backend=ollama")
+    log.info(
+        f"claude-code: starting subprocess (path={claude_path}, "
+        f"input={len(user_prompt):,} chars, timeout={CLAUDE_CODE_TIMEOUT_SECONDS}s)"
+    )
+    t0 = time.monotonic()
+    proc = await asyncio.create_subprocess_exec(
+        claude_path,
+        "--print",
+        "--output-format", "json",
+        "--model", "sonnet",
+        "--system-prompt", SYSTEM_PROMPT,
+        "--disable-slash-commands",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    log.info(f"claude-code: subprocess pid={proc.pid}; piping {len(user_prompt):,} chars to stdin")
     try:
-        script = json.loads(content)
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(input=user_prompt.encode("utf-8")),
+            timeout=CLAUDE_CODE_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        log.error(f"claude-code: pid={proc.pid} timed out after {CLAUDE_CODE_TIMEOUT_SECONDS}s; killing")
+        try:
+            proc.kill()
+            await proc.wait()
+        except Exception as kill_err:
+            log.warning(f"claude-code: failed to kill pid={proc.pid}: {kill_err}")
+        raise RuntimeError(f"claude --print hung past {CLAUDE_CODE_TIMEOUT_SECONDS}s; killed pid={proc.pid}")
+    dt = time.monotonic() - t0
+    log.info(
+        f"claude-code: pid={proc.pid} exited rc={proc.returncode} after {dt:.1f}s; "
+        f"stdout={len(stdout):,} bytes, stderr={len(stderr):,} bytes"
+    )
+    if stderr:
+        log.warning(f"claude-code: stderr head={stderr[:400].decode('utf-8', errors='replace')!r}")
+    if proc.returncode != 0:
+        raise RuntimeError(f"claude exited {proc.returncode}: {stderr.decode('utf-8', errors='replace')[:500]}")
+    try:
+        envelope = json.loads(stdout.decode("utf-8"))
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"claude --print returned non-JSON envelope: {e}; head={stdout[:200]!r}")
+    result = envelope.get("result", "")
+    log.info(
+        f"claude-code: envelope keys={list(envelope.keys())[:8]}, "
+        f"result={len(result):,} chars, "
+        f"models_used={list(envelope.get('modelUsage', {}).keys())}, "
+        f"cost_usd={envelope.get('total_cost_usd')}"
+    )
+    if not result:
+        raise RuntimeError(f"claude returned empty result; envelope keys={list(envelope.keys())}")
+    return result
+
+
+def _parse_script_content(content: str, allow_repair: bool) -> dict:
+    """Parse LLM content into script dict. allow_repair=False asks the caller to retry instead of patching."""
+    content = _strip_markdown_fences(content)
+    try:
+        return json.loads(content)
     except json.JSONDecodeError:
+        if not allow_repair:
+            raise
         log.warning("JSON parse failed — attempting to repair truncated response")
-        repaired = _repair_truncated_json(content)
-        script = json.loads(repaired)
+        return json.loads(_repair_truncated_json(content))
 
-    # Normalize scene indices and image prompts
-    for i, scene in enumerate(script.get("scenes", [])):
-        scene["index"] = i
-        scene.setdefault("mood", "neutral")
-        scene.setdefault("duration_hint", 15.0)
 
-        # Normalize image_prompts: support both old single and new multi format
-        if "image_prompts" not in scene or not scene["image_prompts"]:
-            # Backward compat: wrap single image_prompt into a list
-            single = scene.get("image_prompt", "")
-            scene["image_prompts"] = [single] if single else []
+@cost_logged("ollama", "OLLAMA_MODEL")
+async def generate_script(
+    source_tale: str = "",
+    custom_prompt: str = "",
+    target_minutes: float = 5.0,
+    ollama_model: str | None = None,
+    ollama_base_url: str | None = None,
+    tone: str = "",
+    script_backend: str | None = None,
+) -> dict:
+    backend = (script_backend or DEFAULT_SCRIPT_BACKEND).lower()
 
-        # Set image_prompt to first prompt for backward compat
-        if scene["image_prompts"]:
-            scene["image_prompt"] = scene["image_prompts"][0]
+    # Long-source handling (warn + summarize) — applies to both backends since
+    # even Claude's 200K context doesn't help if the prompt is mostly raw text
+    # the model has to re-encode every retry.
+    if custom_prompt:
+        if len(custom_prompt) >= LONG_SOURCE_WARN_CHARS:
+            log.warning(
+                f"Custom prompt is {len(custom_prompt):,} chars — long sources increase truncation risk"
+            )
+        if len(custom_prompt) >= LONG_SOURCE_SUMMARIZE_CHARS:
+            try:
+                custom_prompt = await _summarize_long_source(custom_prompt, ollama_model, ollama_base_url)
+            except Exception as e:
+                log.warning(f"Summarize pre-pass failed ({e}); proceeding with full text")
 
-    return script
+    return await _generate_script_with_retry(
+        source_tale=source_tale,
+        custom_prompt=custom_prompt,
+        target_minutes=target_minutes,
+        tone=tone,
+        backend=backend,
+        ollama_model=ollama_model,
+        ollama_base_url=ollama_base_url,
+        retry_depth=0,
+    )
+
+
+async def _generate_script_with_retry(
+    *,
+    source_tale: str,
+    custom_prompt: str,
+    target_minutes: float,
+    tone: str,
+    backend: str,
+    ollama_model: str | None,
+    ollama_base_url: str | None,
+    retry_depth: int,
+) -> dict:
+    user_prompt = _build_user_prompt(source_tale, custom_prompt, target_minutes, tone)
+
+    if backend == SCRIPT_BACKEND_CLAUDE_CODE:
+        log.info(f"Generating script via claude-code (sonnet), target={target_minutes:.1f}min")
+        content = await _call_claude_code_for_script(user_prompt)
+        # Claude doesn't have the same "done_reason=length" problem; trust the parse.
+        try:
+            return _normalize_script(_parse_script_content(content, allow_repair=False), target_minutes)
+        except json.JSONDecodeError as e:
+            # Treat as truncation-equivalent; retry smaller if we have headroom.
+            if retry_depth < MAX_TRUNCATION_RETRIES:
+                shrunk = round(target_minutes * TRUNCATION_RETRY_FACTOR, 1)
+                log.warning(f"Claude script JSON invalid ({e}); retrying with target={shrunk:.1f}min")
+                return await _generate_script_with_retry(
+                    source_tale=source_tale, custom_prompt=custom_prompt,
+                    target_minutes=shrunk, tone=tone, backend=backend,
+                    ollama_model=ollama_model, ollama_base_url=ollama_base_url,
+                    retry_depth=retry_depth + 1,
+                )
+            log.warning("Claude script JSON still invalid after retries; falling back to repair")
+            return _normalize_script(_parse_script_content(content, allow_repair=True), target_minutes)
+
+    # Default: Ollama
+    model = ollama_model or config.OLLAMA_MODEL
+    base_url = ollama_base_url or config.OLLAMA_URL
+    log.info(f"Generating script via ollama model={model}, target={target_minutes:.1f}min")
+    content, done_reason = await _call_ollama_for_script(user_prompt, model, base_url)
+
+    # Step 2A: detect length-truncation BEFORE attempting repair, retry smaller.
+    if done_reason == "length" and retry_depth < MAX_TRUNCATION_RETRIES:
+        shrunk = round(target_minutes * TRUNCATION_RETRY_FACTOR, 1)
+        log.warning(
+            f"Ollama hit token limit (done_reason=length) at target={target_minutes:.1f}min — "
+            f"retrying with target={shrunk:.1f}min (attempt {retry_depth + 2}/{MAX_TRUNCATION_RETRIES + 1})"
+        )
+        return await _generate_script_with_retry(
+            source_tale=source_tale, custom_prompt=custom_prompt,
+            target_minutes=shrunk, tone=tone, backend=backend,
+            ollama_model=ollama_model, ollama_base_url=ollama_base_url,
+            retry_depth=retry_depth + 1,
+        )
+    if done_reason == "length":
+        log.warning("Ollama still truncated after retries; falling back to JSON repair")
+
+    return _normalize_script(_parse_script_content(content, allow_repair=True), target_minutes)
