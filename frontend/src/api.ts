@@ -484,6 +484,12 @@ export const api = {
   downloadUrl: (projectId: string) =>
     `/api/projects/${projectId}/download`,
 
+  // Shorts
+  generateShort: (id: string, body?: { ollama_model?: string; voice_profile_id?: string; voice_language?: string; voice_instruct?: string }) =>
+    post<{ short_path: string; duration: number; headline: string; narration: string; selected_scene_index: number; rationale: string }>(`/api/projects/${id}/shorts`, body || {}),
+  listShorts: (id: string) =>
+    request<{ shorts_paths: string[] }>(`/api/projects/${id}/shorts`),
+
   // Source text and splitting
   getSourceText: (projectId: string) =>
     request<{ text: string; char_count: number; project_id: string; title: string; book_group_id?: string; chapter_index?: number }>(`/api/projects/${projectId}/source-text`),

@@ -1,10 +1,9 @@
-"""Script generation — Ollama (default) or Claude Code subprocess."""
+"""Script generation via Ollama (Kimi)."""
 
 import asyncio
 import json
 import logging
 import re
-import shutil
 import httpx
 
 from . import config
@@ -13,11 +12,6 @@ from .agents.budget import cost_logged
 
 log = logging.getLogger(__name__)
 
-
-# Backends
-SCRIPT_BACKEND_OLLAMA = "ollama"
-SCRIPT_BACKEND_CLAUDE_CODE = "claude_code"
-DEFAULT_SCRIPT_BACKEND = SCRIPT_BACKEND_OLLAMA
 
 # Source-text handling
 LONG_SOURCE_WARN_CHARS = 8000      # warn the user
@@ -333,76 +327,6 @@ async def _call_ollama_for_script(user_prompt: str, model: str, base_url: str) -
     return _extract_llm_content(data), data.get("done_reason", "")
 
 
-CLAUDE_CODE_TIMEOUT_SECONDS = 600  # 10 min — script gen on big chapters can be slow but shouldn't hang
-
-
-async def _call_claude_code_for_script(user_prompt: str) -> str:
-    """One Claude Code subprocess call (uses the user's subscription, not API).
-
-    Uses --system-prompt to override the default Claude Code system prompt
-    (skipping the bloated tool descriptions) while keeping OAuth/keychain auth
-    so we don't need ANTHROPIC_API_KEY. Wrapped in a hard timeout so a hung
-    subprocess doesn't block the producer indefinitely.
-    """
-    import time
-    claude_path = shutil.which("claude")
-    if not claude_path:
-        raise RuntimeError("claude CLI not on PATH; install Claude Code or set script_backend=ollama")
-    log.info(
-        f"claude-code: starting subprocess (path={claude_path}, "
-        f"input={len(user_prompt):,} chars, timeout={CLAUDE_CODE_TIMEOUT_SECONDS}s)"
-    )
-    t0 = time.monotonic()
-    proc = await asyncio.create_subprocess_exec(
-        claude_path,
-        "--print",
-        "--output-format", "json",
-        "--model", "sonnet",
-        "--system-prompt", SYSTEM_PROMPT,
-        "--disable-slash-commands",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    log.info(f"claude-code: subprocess pid={proc.pid}; piping {len(user_prompt):,} chars to stdin")
-    try:
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(input=user_prompt.encode("utf-8")),
-            timeout=CLAUDE_CODE_TIMEOUT_SECONDS,
-        )
-    except asyncio.TimeoutError:
-        log.error(f"claude-code: pid={proc.pid} timed out after {CLAUDE_CODE_TIMEOUT_SECONDS}s; killing")
-        try:
-            proc.kill()
-            await proc.wait()
-        except Exception as kill_err:
-            log.warning(f"claude-code: failed to kill pid={proc.pid}: {kill_err}")
-        raise RuntimeError(f"claude --print hung past {CLAUDE_CODE_TIMEOUT_SECONDS}s; killed pid={proc.pid}")
-    dt = time.monotonic() - t0
-    log.info(
-        f"claude-code: pid={proc.pid} exited rc={proc.returncode} after {dt:.1f}s; "
-        f"stdout={len(stdout):,} bytes, stderr={len(stderr):,} bytes"
-    )
-    if stderr:
-        log.warning(f"claude-code: stderr head={stderr[:400].decode('utf-8', errors='replace')!r}")
-    if proc.returncode != 0:
-        raise RuntimeError(f"claude exited {proc.returncode}: {stderr.decode('utf-8', errors='replace')[:500]}")
-    try:
-        envelope = json.loads(stdout.decode("utf-8"))
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"claude --print returned non-JSON envelope: {e}; head={stdout[:200]!r}")
-    result = envelope.get("result", "")
-    log.info(
-        f"claude-code: envelope keys={list(envelope.keys())[:8]}, "
-        f"result={len(result):,} chars, "
-        f"models_used={list(envelope.get('modelUsage', {}).keys())}, "
-        f"cost_usd={envelope.get('total_cost_usd')}"
-    )
-    if not result:
-        raise RuntimeError(f"claude returned empty result; envelope keys={list(envelope.keys())}")
-    return result
-
-
 def _parse_script_content(content: str, allow_repair: bool) -> dict:
     """Parse LLM content into script dict. allow_repair=False asks the caller to retry instead of patching."""
     content = _strip_markdown_fences(content)
@@ -423,13 +347,7 @@ async def generate_script(
     ollama_model: str | None = None,
     ollama_base_url: str | None = None,
     tone: str = "",
-    script_backend: str | None = None,
 ) -> dict:
-    backend = (script_backend or DEFAULT_SCRIPT_BACKEND).lower()
-
-    # Long-source handling (warn + summarize) — applies to both backends since
-    # even Claude's 200K context doesn't help if the prompt is mostly raw text
-    # the model has to re-encode every retry.
     if custom_prompt:
         if len(custom_prompt) >= LONG_SOURCE_WARN_CHARS:
             log.warning(
@@ -446,7 +364,6 @@ async def generate_script(
         custom_prompt=custom_prompt,
         target_minutes=target_minutes,
         tone=tone,
-        backend=backend,
         ollama_model=ollama_model,
         ollama_base_url=ollama_base_url,
         retry_depth=0,
@@ -459,34 +376,12 @@ async def _generate_script_with_retry(
     custom_prompt: str,
     target_minutes: float,
     tone: str,
-    backend: str,
     ollama_model: str | None,
     ollama_base_url: str | None,
     retry_depth: int,
 ) -> dict:
     user_prompt = _build_user_prompt(source_tale, custom_prompt, target_minutes, tone)
 
-    if backend == SCRIPT_BACKEND_CLAUDE_CODE:
-        log.info(f"Generating script via claude-code (sonnet), target={target_minutes:.1f}min")
-        content = await _call_claude_code_for_script(user_prompt)
-        # Claude doesn't have the same "done_reason=length" problem; trust the parse.
-        try:
-            return _normalize_script(_parse_script_content(content, allow_repair=False), target_minutes)
-        except json.JSONDecodeError as e:
-            # Treat as truncation-equivalent; retry smaller if we have headroom.
-            if retry_depth < MAX_TRUNCATION_RETRIES:
-                shrunk = round(target_minutes * TRUNCATION_RETRY_FACTOR, 1)
-                log.warning(f"Claude script JSON invalid ({e}); retrying with target={shrunk:.1f}min")
-                return await _generate_script_with_retry(
-                    source_tale=source_tale, custom_prompt=custom_prompt,
-                    target_minutes=shrunk, tone=tone, backend=backend,
-                    ollama_model=ollama_model, ollama_base_url=ollama_base_url,
-                    retry_depth=retry_depth + 1,
-                )
-            log.warning("Claude script JSON still invalid after retries; falling back to repair")
-            return _normalize_script(_parse_script_content(content, allow_repair=True), target_minutes)
-
-    # Default: Ollama
     model = ollama_model or config.OLLAMA_MODEL
     base_url = ollama_base_url or config.OLLAMA_URL
     log.info(f"Generating script via ollama model={model}, target={target_minutes:.1f}min")
@@ -501,7 +396,7 @@ async def _generate_script_with_retry(
         )
         return await _generate_script_with_retry(
             source_tale=source_tale, custom_prompt=custom_prompt,
-            target_minutes=shrunk, tone=tone, backend=backend,
+            target_minutes=shrunk, tone=tone,
             ollama_model=ollama_model, ollama_base_url=ollama_base_url,
             retry_depth=retry_depth + 1,
         )

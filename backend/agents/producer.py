@@ -33,7 +33,9 @@ from .budget import (
     reset_run_context,
 )
 from .critic import critique_script
+from .image_prompt_critic import critique_image_prompts
 from .publisher import Publisher
+from . import shorts_director
 from . import log as agent_log
 
 log = logging.getLogger(__name__)
@@ -46,10 +48,10 @@ PRODUCER_AGENT = "producer"
 
 # state.step values, in pipeline order. Used by run_project to skip already-
 # completed steps when resuming a partially-finished project.
-STEP_ORDER = ("created", "scripted", "voiced", "illustrated", "assembled", "published")
+STEP_ORDER = ("created", "scripted", "voiced", "illustrated", "assembled", "published", "shorts_done")
 
 # Persisted-per-project cfg file. recovery.py reads this back so re-spawning
-# producer doesn't lose voice_instruct, lora_keys, script_backend, etc.
+# producer doesn't lose voice_instruct, lora_keys, etc.
 PRODUCER_CFG_FILE = "producer_cfg.json"
 
 
@@ -252,7 +254,6 @@ async def _run_script_with_critic(project_id: str, group_id: str, cfg: dict) -> 
                 target_minutes=state.get("target_minutes", 5.0),
                 ollama_model=state.get("ollama_model"),
                 tone=skill_tone or state.get("tone", ""),
-                script_backend=cfg.get("script_backend"),
             ),
             what=f"script_gen({project_id} attempt {attempt + 1})",
         )
@@ -289,6 +290,7 @@ async def _run_script_with_critic(project_id: str, group_id: str, cfg: dict) -> 
 
         if verdict.accept:
             log.info(f"Producer {project_id}: script accepted on attempt {attempt + 1}")
+            await _run_image_prompt_critic(project_id, group_id, script, cfg)
             return script
 
         if attempt >= MAX_SCRIPT_RETRIES:
@@ -300,6 +302,7 @@ async def _run_script_with_critic(project_id: str, group_id: str, cfg: dict) -> 
                 f"Producer {project_id}: shipping script despite {verdict.severity} severity "
                 f"after {attempt + 1} attempts"
             )
+            await _run_image_prompt_critic(project_id, group_id, script, cfg)
             return script
 
         feedback_chunks.append(
@@ -307,6 +310,41 @@ async def _run_script_with_critic(project_id: str, group_id: str, cfg: dict) -> 
         )
 
     return script  # unreachable
+
+
+async def _run_image_prompt_critic(
+    project_id: str, group_id: str, script: dict, cfg: dict,
+) -> None:
+    """Review and rewrite weak image prompts before they hit the image backend.
+
+    Skipped if cfg.image_prompt_critic_skip is true. Failures are non-fatal —
+    the script as-written is still usable, just with un-polished prompts.
+    """
+    if cfg.get("image_prompt_critic_skip"):
+        log.info(f"Producer {project_id}: image_prompt_critic skipped via cfg")
+        return
+    state = store.load_state(project_id)
+    tone = cfg.get("tone") or state.get("tone", "")
+    try:
+        result = await critique_image_prompts(
+            script=script,
+            tone=tone,
+            ollama_model=state.get("ollama_model"),
+        )
+    except Exception as e:
+        log.warning(f"Producer {project_id}: image_prompt_critic errored (non-fatal): {e}")
+        return
+    if result.rewrite_count:
+        store.save_json(project_id, "script.json", script)
+        log.info(
+            f"Producer {project_id}: image_prompt_critic rewrote {result.rewrite_count} "
+            f"prompts across {result.scenes_reviewed} scenes"
+        )
+    store.update_state(project_id, image_prompts_critiqued=True)
+    _emit(
+        group_id, project_id,
+        phase="step_complete", step="image_prompt_critic",
+    )
 
 
 async def _run_voice(project_id: str, group_id: str, cfg: dict) -> None:
@@ -358,6 +396,14 @@ async def _run_images(project_id: str, group_id: str, cfg: dict) -> None:
         image_backend=backend,
     )
 
+    # Recovery / resume path: a project that was scripted in an earlier run won't
+    # have had the prompt critic applied. Run it just-in-time; it's idempotent
+    # (re-runs only rewrite prompts that still look weak).
+    if not state.get("image_prompts_critiqued"):
+        await _run_image_prompt_critic(project_id, group_id, script, cfg)
+        store.update_state(project_id, image_prompts_critiqued=True)
+        script = store.load_json(project_id, "script.json")
+
     style_prompt = cfg.get("style_prompt") or image_styles.DEFAULT_STYLE_PROMPT
     scenes = await _with_retry(
         lambda: image_gen.generate_all_scenes(
@@ -408,6 +454,26 @@ async def _run_publish(project_id: str, group_id: str) -> None:
     await Publisher().publish(project_id, ollama_model=state.get("ollama_model"))
     store.update_state(project_id, step="published")
     _emit(group_id, project_id, phase="step_complete", step="publish")
+
+
+async def _run_shorts(project_id: str, group_id: str, cfg: dict) -> None:
+    """Optional vertical hook short. Failure is non-fatal — chapter is already published."""
+    _set_chapter(group_id, project_id, current_step="shorts")
+    state = store.load_state(project_id)
+    profile_id = cfg.get("voice_profile_id") or state.get("voice_profile_id") or ""
+    await _with_retry(
+        lambda: shorts_director.generate_short(
+            project_id,
+            ollama_model=cfg.get("ollama_model") or state.get("ollama_model"),
+            voice_profile_id=profile_id,
+            voice_language=cfg.get("voice_language") or state.get("voice_language", "en"),
+            voice_instruct=cfg.get("voice_instruct", DEFAULT_VOICE_INSTRUCT),
+        ),
+        what=f"shorts_director({project_id})",
+    )
+    store.update_state(project_id, step="shorts_done")
+    _refresh_cost(group_id)
+    _emit(group_id, project_id, phase="step_complete", step="shorts")
 
 
 # ── Per-project orchestrator ────────────────────────────────────
@@ -485,6 +551,19 @@ async def run_project(project_id: str, group_id: str, cfg: dict) -> None:
         if start_idx < _step_index("published"):
             active_step = "publish"
             await _run_publish(project_id, group_id)
+
+        # shorts (optional — opt-in via cfg.generate_shorts). Non-fatal on failure:
+        # publish has already succeeded, so a hook-clip hiccup must not flip the
+        # chapter to "failed".
+        if cfg.get("generate_shorts") and start_idx < _step_index("shorts_done"):
+            active_step = "shorts"
+            try:
+                await _run_shorts(project_id, group_id, cfg)
+            except Exception as e:
+                log.warning(
+                    f"Producer {project_id}: shorts step failed (non-fatal): {e}"
+                )
+                _emit(group_id, project_id, phase="step_complete", step="shorts", error=str(e))
 
         _set_chapter(group_id, project_id, status="completed", current_step=None)
         _emit(group_id, project_id, phase="done")

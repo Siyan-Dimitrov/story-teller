@@ -4,7 +4,7 @@
   "description": "Slow-build dread; vast, indifferent forces; small humans glimpsing the wrong truth. Lovecraftian without naming Lovecraft.",
   "tone": "psychological horror",
   "image_backend": "replicate",
-  "lora_keys": ["dark_gothic", "mark_ryden"],
+  "lora_keys": ["mark_ryden"],
   "voice_instruct": "Narrate with quiet, measured horror. Long pauses before reveals. Drop in volume on the most disturbing lines so the listener leans in. Never speed up.",
   "music_query": "ambient drone unsettling low strings",
   "script_prompt_addendum": "Maintain dread through specificity, not gore. Show the wrong angle, the wrong color, the wrong number of limbs in a single concrete detail rather than a paragraph of description. The narrator must NOT fully understand what they're describing — leave a gap the listener fills. End the final scene on an unresolved chill, not a clean wrap."

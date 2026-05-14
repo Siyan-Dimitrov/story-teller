@@ -361,6 +361,9 @@ def assemble_video(
                 audio_clip = AudioFileClip(str(abs_audio))
                 closeables.append(audio_clip)
                 scene_duration = audio_clip.duration
+                if config.VOICE_VOLUME != 1.0:
+                    audio_clip = audio_clip.with_effects([MultiplyVolume(config.VOICE_VOLUME)])
+                    closeables.append(audio_clip)
             else:
                 scene_duration = scene.get("audio_duration", scene.get("duration_hint", 10.0))
                 audio_clip = None

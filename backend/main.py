@@ -1845,7 +1845,6 @@ class ProducerRunRequest(BaseModel):
     lora_keys: list[str] | None = None
     character_consistency: bool = False
     critic_skip_llm: bool = False
-    script_backend: str | None = None  # "ollama" (default) or "claude_code"
 
 
 class BudgetUpdateRequest(BaseModel):
@@ -1874,7 +1873,6 @@ async def producer_run(req: ProducerRunRequest):
         "lora_keys": req.lora_keys or lora_keys,
         "character_consistency": req.character_consistency,
         "critic_skip_llm": req.critic_skip_llm,
-        "script_backend": req.script_backend,
     }
 
     skill_id = req.skill_id
@@ -1947,6 +1945,53 @@ async def run_publisher(project_id: str):
         raise HTTPException(404, "Project not found")
     except RuntimeError as e:
         raise HTTPException(400, str(e))
+
+
+# ── Shorts ───────────────────────────────────────────────────
+
+class _ShortsRequest(BaseModel):
+    ollama_model: str | None = None
+    voice_profile_id: str | None = None
+    voice_language: str | None = None
+    voice_instruct: str | None = None
+    count: int = 1
+
+
+@app.post("/api/projects/{project_id}/shorts")
+async def generate_project_short(project_id: str, req: _ShortsRequest | None = None):
+    """Render one or more vertical 9:16 hook shorts from a finished project.
+
+    Doesn't require the project to be at any particular step — it just needs a
+    `script.json` with scenes that have image_path set and a voice_profile_id
+    on the project state (so we can voice the fresh hook narration).
+
+    `count` is clamped to [1, 3]; >1 uses a single LLM round-trip for all hooks.
+    """
+    from .agents import shorts_director
+    req = req or _ShortsRequest()
+    try:
+        return await shorts_director.generate_short(
+            project_id,
+            count=req.count,
+            ollama_model=req.ollama_model,
+            voice_profile_id=req.voice_profile_id,
+            voice_language=req.voice_language,
+            voice_instruct=req.voice_instruct,
+        )
+    except FileNotFoundError:
+        raise HTTPException(404, "Project not found")
+    except (RuntimeError, ValueError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/projects/{project_id}/shorts")
+async def list_project_shorts(project_id: str):
+    """Return the list of shorts rendered for this project (relative paths)."""
+    try:
+        state = store.load_state(project_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Project not found")
+    return {"shorts_paths": state.get("shorts_paths") or []}
 
 
 @app.on_event("startup")

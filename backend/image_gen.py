@@ -41,12 +41,6 @@ AVAILABLE_LORAS = {
         "flux_lora_key": "storybook",
         "description": "Hand-drawn storybook illustration with marker and pencil textures",
     },
-    "dark_gothic": {
-        "trigger": "",
-        "strength_model": 1.2,
-        "flux_lora_key": "dark_gothic",
-        "description": "Rich, painterly dark fantasy with deep shadows and atmospheric lighting",
-    },
     "mark_ryden": {
         "trigger": "evangsurreal",
         "strength_model": 0.8,
@@ -91,9 +85,9 @@ AVAILABLE_LORAS = {
     },
 }
 
-# Default LoRA combination — Tim Burton + dark gothic gives the closest
-# match to the abitfrank channel aesthetic
-DEFAULT_LORAS = ["tim_burton", "dark_gothic"]
+# Default LoRA — Tim Burton sepia-Victorian gives the closest match
+# to the abitfrank channel aesthetic on its own.
+DEFAULT_LORAS = ["tim_burton"]
 
 
 NEGATIVE_PROMPT = (

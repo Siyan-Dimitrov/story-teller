@@ -88,11 +88,6 @@ FLUX_LORA_URLS = {
         "FLUX_LORA_TIM_BURTON",
         "https://huggingface.co/Keltezaa/victorian-gothic-horror/resolve/main/victoriangothic_v50_rank64_bf16-step01500.safetensors"
     ),
-    # Dark Fantasy Illustration — dark fantasy retro illustrations (no trigger word, strength 1.2)
-    "dark_gothic": os.getenv(
-        "FLUX_LORA_DARK_GOTHIC",
-        "https://huggingface.co/nerijs/dark-fantasy-illustration-flux/resolve/main/darkfantasy_illustration_v2.safetensors"
-    ),
     # Shakker-Labs Dark Fantasy — fantasy creatures, metallic textures, magical light
     "dark_fantasy": os.getenv(
         "FLUX_LORA_DARK_FANTASY",
@@ -170,6 +165,11 @@ BATCH_NARRATION_RATE = 800  # characters per minute for duration estimation
 
 # ── Voice ────────────────────────────────────────────────────
 VOICE_TIMEOUT_SECONDS = 180.0
+# Gain applied to narration audio at assembly time. Qwen TTS ships chunks at
+# ~-20 to -25 dBFS peaks, so a >1.0 multiplier is usually needed to bring the
+# voice up to a comfortable listening level over the music bed. Values >2.5
+# risk clipping on louder consonants.
+VOICE_VOLUME = float(os.getenv("VOICE_VOLUME", "1.8"))
 
 # ── Images ───────────────────────────────────────────────────
 IMAGE_TIMEOUT_SECONDS = 120.0
@@ -178,7 +178,7 @@ IMAGE_HEIGHT = 1080
 
 # ── Background music ─────────────────────────────────────────
 # Default volume for background music relative to voice (0.0-1.0)
-MUSIC_DEFAULT_VOLUME = float(os.getenv("MUSIC_DEFAULT_VOLUME", "0.18"))
+MUSIC_DEFAULT_VOLUME = float(os.getenv("MUSIC_DEFAULT_VOLUME", "0.05"))
 # Fade in/out seconds applied to the music track
 MUSIC_FADE_SECONDS = float(os.getenv("MUSIC_FADE_SECONDS", "2.5"))
 MUSIC_EXTENSIONS = (".mp3", ".wav", ".ogg", ".flac", ".m4a")

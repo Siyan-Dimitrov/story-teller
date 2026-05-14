@@ -54,7 +54,7 @@ IMAGE_STYLES: tuple[ImageStyle, ...] = (
             "silhouettes, ornate storybook detail, expressive character shapes, "
             "symbolic drama, non-graphic, non-photorealistic, cinematic shadow play"
         ),
-        default_lora_keys=("tim_burton", "dark_gothic"),
+        default_lora_keys=("tim_burton",),
     ),
     ImageStyle(
         id="dark_fantasy_painting",
@@ -65,7 +65,7 @@ IMAGE_STYLES: tuple[ImageStyle, ...] = (
             "magical atmosphere, painterly brush texture, stylized characters, "
             "non-photorealistic, rich environmental storytelling"
         ),
-        default_lora_keys=("dark_gothic", "concept_art"),
+        default_lora_keys=("concept_art",),
     ),
     ImageStyle(
         id="ink_watercolor",

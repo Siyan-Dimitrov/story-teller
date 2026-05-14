@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { Film, Download, Loader2, Play, Pause, X, FolderOpen, Music, Volume2, Search, Wand2, Trash2 } from 'lucide-react'
+import { Film, Download, Loader2, Play, Pause, X, FolderOpen, Music, Volume2, Search, Wand2, Trash2, Scissors } from 'lucide-react'
 import type { ProjectState, MusicTrack } from '../api'
 import { api } from '../api'
 
@@ -32,7 +32,7 @@ export default function VideoPanel({ project, onRefresh }: Props) {
   // Music controls
   const [musicTracks, setMusicTracks] = useState<MusicTrack[]>([])
   const [selectedTrack, setSelectedTrack] = useState<string>('')
-  const [musicVolume, setMusicVolume] = useState(0.18)
+  const [musicVolume, setMusicVolume] = useState(0.05)
   const [musicLoading, setMusicLoading] = useState(false)
 
   // Jamendo search
@@ -50,6 +50,12 @@ export default function VideoPanel({ project, onRefresh }: Props) {
   // Per-scene music
   const [sceneSuggestions, setSceneSuggestions] = useState<Record<number, { query: string; reasoning: string; tracks: MusicTrack[]; assignedTrack?: string | null }>>({})
   const [suggestingAll, setSuggestingAll] = useState(false)
+
+  // Shorts
+  const [shortsPaths, setShortsPaths] = useState<string[]>([])
+  const [generatingShort, setGeneratingShort] = useState(false)
+  const [shortError, setShortError] = useState<string | null>(null)
+  const [lastShortInfo, setLastShortInfo] = useState<{ headline: string; rationale: string; selected_scene_index: number; duration: number } | null>(null)
 
   const isAssembled = project.step === 'assembled'
   const scenes = project.script?.scenes || []
@@ -103,6 +109,13 @@ export default function VideoPanel({ project, onRefresh }: Props) {
       })
       .catch(() => {})
       .finally(() => setMusicLoading(false))
+  }, [project.project_id])
+
+  // Load existing shorts on mount / project change
+  useEffect(() => {
+    api.listShorts(project.project_id)
+      .then(data => setShortsPaths(data.shorts_paths || []))
+      .catch(() => setShortsPaths([]))
   }, [project.project_id])
 
   // Auto-save music preferences when changed (debounced)
@@ -309,6 +322,26 @@ export default function VideoPanel({ project, onRefresh }: Props) {
     }
     setSceneSuggestions({})
     onRefresh()
+  }
+
+  const handleGenerateShort = async () => {
+    setGeneratingShort(true)
+    setShortError(null)
+    try {
+      const result = await api.generateShort(project.project_id, {})
+      setLastShortInfo({
+        headline: result.headline,
+        rationale: result.rationale,
+        selected_scene_index: result.selected_scene_index,
+        duration: result.duration,
+      })
+      const data = await api.listShorts(project.project_id)
+      setShortsPaths(data.shorts_paths || [])
+    } catch (e) {
+      setShortError((e as Error).message || 'Failed to generate short')
+    } finally {
+      setGeneratingShort(false)
+    }
   }
 
   if (!hasImages && !hasAudio) {
@@ -634,6 +667,95 @@ export default function VideoPanel({ project, onRefresh }: Props) {
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {/* Shorts */}
+      {isAssembled && (
+        <div className="p-4 rounded-xl border border-[var(--border)] bg-[var(--bg-secondary)] space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-sm font-medium flex items-center gap-2">
+                <Scissors size={14} className="text-[var(--accent)]" />
+                Shorts
+              </h3>
+              <p className="text-xs text-[var(--text-muted)] mt-0.5">
+                Generate a vertical short clip with AI-picked highlight scene and headline.
+              </p>
+            </div>
+            <button
+              onClick={handleGenerateShort}
+              disabled={generatingShort}
+              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-sm font-medium transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              {generatingShort ? <Loader2 size={14} className="animate-spin" /> : <Scissors size={14} />}
+              {generatingShort ? 'Generating…' : 'Generate Short'}
+            </button>
+          </div>
+
+          {shortError && (
+            <div className="p-2 rounded-lg border border-[var(--error)]/30 bg-[var(--error)]/5 text-xs text-[var(--error)]">
+              {shortError}
+            </div>
+          )}
+
+          {lastShortInfo && (
+            <div className="p-3 rounded-lg border border-[var(--accent)]/30 bg-[var(--accent)]/5 text-xs space-y-1">
+              <div className="text-[var(--text-primary)]">
+                <span className="font-medium">Headline:</span> {lastShortInfo.headline}
+              </div>
+              <div className="text-[var(--text-secondary)]">
+                <span className="font-medium">Scene #{lastShortInfo.selected_scene_index + 1}</span>
+                {' · '}
+                <span className="tabular-nums">{lastShortInfo.duration.toFixed(1)}s</span>
+              </div>
+              <div className="text-[var(--text-muted)]">
+                <span className="font-medium">Why:</span> {lastShortInfo.rationale}
+              </div>
+            </div>
+          )}
+
+          {shortsPaths.length === 0 && !generatingShort && (
+            <p className="text-xs text-[var(--text-muted)]">No shorts generated yet.</p>
+          )}
+
+          {shortsPaths.length > 0 && (
+            <div className="flex flex-wrap gap-3">
+              {shortsPaths.map(path => {
+                const url = api.artifactUrl(project.project_id, path)
+                const filename = path.split('/').pop() || path
+                return (
+                  <div
+                    key={path}
+                    className="rounded-lg border border-[var(--border)] bg-[var(--bg-tertiary)] overflow-hidden flex flex-col"
+                    style={{ width: 200 }}
+                  >
+                    <video
+                      src={url}
+                      controls
+                      className="w-full bg-black"
+                      style={{ maxHeight: 356 }}
+                    >
+                      Your browser does not support video playback.
+                    </video>
+                    <div className="p-2 space-y-1.5">
+                      <div className="text-[10px] text-[var(--text-muted)] font-mono truncate" title={path}>
+                        {path}
+                      </div>
+                      <a
+                        href={url}
+                        download={filename}
+                        className="flex items-center justify-center gap-1.5 px-2 py-1 rounded-md border border-[var(--accent)] text-[10px] text-[var(--accent)] hover:bg-[var(--accent)]/10 transition-colors"
+                      >
+                        <Download size={10} />
+                        Download
+                      </a>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
         </div>
       )}
 

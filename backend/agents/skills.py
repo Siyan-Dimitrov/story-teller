@@ -39,7 +39,6 @@ class Skill:
     voice_instruct: Optional[str] = None
     music_query: Optional[str] = None
     script_prompt_addendum: Optional[str] = None
-    script_backend: Optional[str] = None  # "ollama" (default) or "claude_code"
     target_minutes: Optional[float] = None
     extra: dict = field(default_factory=dict)
 
@@ -96,7 +95,6 @@ _CFG_FIELDS = (
     "style_id",
     "style_prompt",
     "lora_keys",
-    "script_backend",
 )
 
 

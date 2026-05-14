@@ -4,7 +4,7 @@
   "description": "Sepia-toned Victorian horror with slow, atmospheric narration. Default for fairy-tale source material.",
   "tone": "dark, gothic",
   "image_backend": "gpt_image",
-  "lora_keys": ["dark_gothic"],
+  "lora_keys": ["tim_burton"],
   "voice_instruct": "Speak slowly and deliberately like a storyteller narrating a dark fairy tale. Use a calm, measured pace with dramatic pauses between sentences. Deep, atmospheric tone — every word weighted.",
   "music_query": "dark gothic instrumental cinematic strings",
   "script_prompt_addendum": "Narrator voice: address the listener in second person at least once per scene (\"You can almost hear...\", \"Imagine...\", \"You would have known...\"). Use contractions for spoken cadence. Open at least three scenes with a question, an imperative, or a hard fact that opens a loop. End the final scene on a clear resolution — never trail off."
