@@ -57,7 +57,10 @@ class ProjectState(BaseModel):
     voice_language: str = "en"
     ollama_model: str = "kimi-k2.5:cloud"
     script_backend: str = "ollama"  # ollama | claude
-    claude_model: Optional[str] = None  # override config.CLAUDE_MODEL when script_backend="claude"
+    claude_model: Optional[str] = None  # base model when script_backend="claude" (used as default for all 3 roles)
+    pipeline_writer_model: Optional[str] = None   # override claude_model for the writer pass
+    pipeline_critic_model: Optional[str] = None   # override claude_model for the critic pass
+    pipeline_reviser_model: Optional[str] = None  # override claude_model for the reviser pass
     image_backend: str = "comfyui"  # comfyui | ollama | replicate | gpt_image
     project_seed: Optional[int] = None
     target_minutes: float = 5.0
@@ -81,6 +84,9 @@ class CreateProjectRequest(BaseModel):
     ollama_model: str = "kimi-k2.5:cloud"
     script_backend: Optional[str] = None  # None falls back to config.SCRIPT_BACKEND
     claude_model: Optional[str] = None  # only consulted when script_backend == "claude"
+    pipeline_writer_model: Optional[str] = None
+    pipeline_critic_model: Optional[str] = None
+    pipeline_reviser_model: Optional[str] = None
     tone: str = ""  # e.g. "dark", "humorous", "gothic noir"
 
 
@@ -88,6 +94,9 @@ class RunScriptRequest(BaseModel):
     ollama_model: Optional[str] = None
     script_backend: Optional[str] = None  # one-shot override (otherwise uses project state)
     claude_model: Optional[str] = None
+    pipeline_writer_model: Optional[str] = None
+    pipeline_critic_model: Optional[str] = None
+    pipeline_reviser_model: Optional[str] = None
     target_minutes: Optional[float] = None
     custom_prompt: str = ""
 

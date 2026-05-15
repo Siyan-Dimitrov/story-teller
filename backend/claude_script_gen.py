@@ -14,13 +14,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from . import config
 from .grimm_tales import get_tale
-from .script_gen import normalize_scenes, _repair_truncated_json
+from .script_gen import normalize_scenes, _repair_truncated_json, _extract_llm_content
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +33,43 @@ class ClaudeAuthError(RuntimeError):
 
 class ClaudeBackendError(RuntimeError):
     """Raised when the Claude backend fails for a non-auth reason."""
+
+
+@dataclass(frozen=True)
+class RoleSpec:
+    """Which provider+model runs a given pass of the pipeline."""
+    provider: str  # "claude" | "ollama"
+    model: str
+
+    def label(self) -> str:
+        return f"{self.provider}:{self.model}"
+
+
+def _parse_role(value: str | None, fallback_claude_model: str) -> RoleSpec:
+    """Parse a role spec.
+
+    Accepts:
+      - empty / None         → claude with ``fallback_claude_model``
+      - "claude:opus-4-7"    → explicit Claude
+      - "ollama:kimi-k2.5:cloud" → explicit Ollama (model may itself contain colons)
+      - "claude-sonnet-4-5"  → bare model name, provider inferred as claude
+      - "kimi-k2.5:cloud"    → bare model name with a colon — inferred as ollama
+    """
+    if not value:
+        return RoleSpec("claude", fallback_claude_model)
+    v = value.strip()
+    if v.startswith("claude:"):
+        return RoleSpec("claude", v[len("claude:"):].strip())
+    if v.startswith("ollama:"):
+        return RoleSpec("ollama", v[len("ollama:"):].strip())
+    if v.lower().startswith("claude-"):
+        return RoleSpec("claude", v)
+    # A bare model name with a colon almost always means an Ollama tag
+    # (e.g. "kimi-k2.5:cloud", "llama3.2:3b"). Fall through to Claude only
+    # for colon-free names that don't match the "claude-*" pattern.
+    if ":" in v:
+        return RoleSpec("ollama", v)
+    return RoleSpec("claude", v)
 
 
 _PROMPT_CACHE: dict[str, str] = {}
@@ -137,18 +176,10 @@ def _validate_script(script: dict[str, Any]) -> list[str]:
     return errors
 
 
-async def _run_query(
-    *,
-    system_prompt: str,
-    user_prompt: str,
-    model: str,
-    pass_name: str,
+async def _run_claude(
+    *, system_prompt: str, user_prompt: str, model: str, pass_name: str,
 ) -> tuple[str, float]:
-    """Run a single Claude pass. Returns (text, cost_usd).
-
-    Imports the SDK lazily so the rest of the backend keeps working if the
-    package isn't installed yet.
-    """
+    """Run one Claude pass via the Agent SDK. Returns (text, cost_usd)."""
     try:
         from claude_agent_sdk import (
             ClaudeAgentOptions,
@@ -208,6 +239,70 @@ async def _run_query(
     if not text:
         raise ClaudeBackendError(f"Claude {pass_name} pass returned no text content")
     return text, cost_usd
+
+
+async def _run_ollama(
+    *, system_prompt: str, user_prompt: str, model: str, pass_name: str,
+) -> tuple[str, float]:
+    """Run one Ollama pass via /api/chat. Returns (text, 0.0).
+
+    Cost is always 0 — Ollama runs locally (or against the user's own
+    Ollama-compatible cloud endpoint). Reuses the same response-extraction
+    logic as ``script_gen.py`` to handle thinking-model variants.
+    """
+    base_url = config.OLLAMA_URL
+    try:
+        async with httpx.AsyncClient(timeout=config.CLAUDE_TIMEOUT_SECONDS) as client:
+            resp = await client.post(
+                f"{base_url}/api/chat",
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "stream": False,
+                    "options": {
+                        "temperature": config.LLM_TEMPERATURE,
+                        "num_predict": config.LLM_MAX_TOKENS,
+                    },
+                },
+            )
+    except httpx.TimeoutException as e:
+        raise ClaudeBackendError(
+            f"Ollama {pass_name} pass timed out after {config.CLAUDE_TIMEOUT_SECONDS:.0f}s"
+        ) from e
+    except httpx.HTTPError as e:
+        raise ClaudeBackendError(
+            f"Ollama {pass_name} pass failed: {e} (check OLLAMA_URL={base_url})"
+        ) from e
+
+    if resp.status_code != 200:
+        raise ClaudeBackendError(
+            f"Ollama {pass_name} pass returned {resp.status_code}: {resp.text[:300]}"
+        )
+    text = _extract_llm_content(resp.json()).strip()
+    if not text:
+        raise ClaudeBackendError(f"Ollama {pass_name} pass returned no content")
+    return text, 0.0
+
+
+async def _run_pass(
+    *, role: RoleSpec, system_prompt: str, user_prompt: str, pass_name: str,
+) -> tuple[str, float]:
+    """Dispatch one pass to the configured provider."""
+    log.info("Pass %s: %s", pass_name, role.label())
+    if role.provider == "claude":
+        return await _run_claude(
+            system_prompt=system_prompt, user_prompt=user_prompt,
+            model=role.model, pass_name=pass_name,
+        )
+    if role.provider == "ollama":
+        return await _run_ollama(
+            system_prompt=system_prompt, user_prompt=user_prompt,
+            model=role.model, pass_name=pass_name,
+        )
+    raise ClaudeBackendError(f"Unknown provider for {pass_name}: {role.provider!r}")
 
 
 def _build_writer_user_prompt(
@@ -296,25 +391,57 @@ def _summarize_source(
     return "\n".join(parts)
 
 
+def _resolve_roles(
+    *,
+    claude_model: str | None,
+    writer_model: str | None,
+    critic_model: str | None,
+    reviser_model: str | None,
+) -> tuple[RoleSpec, RoleSpec, RoleSpec]:
+    """Resolve the three role specs in this priority order, per role:
+
+    1. explicit per-role argument (from API request / project state)
+    2. matching env-var override (PIPELINE_<ROLE>_MODEL)
+    3. the project's ``claude_model`` (or env CLAUDE_MODEL) used for all roles
+    """
+    fallback = (claude_model or config.CLAUDE_MODEL).strip()
+    writer = _parse_role(writer_model or config.PIPELINE_WRITER_MODEL or None, fallback)
+    critic = _parse_role(critic_model or config.PIPELINE_CRITIC_MODEL or None, fallback)
+    reviser = _parse_role(reviser_model or config.PIPELINE_REVISER_MODEL or None, fallback)
+    return writer, critic, reviser
+
+
 async def generate_script(
     source_tale: str = "",
     custom_prompt: str = "",
     target_minutes: float = 5.0,
     claude_model: str | None = None,
+    pipeline_writer_model: str | None = None,
+    pipeline_critic_model: str | None = None,
+    pipeline_reviser_model: str | None = None,
     tone: str = "",
     max_revisions: int | None = None,
     **_ignored,  # absorb ollama_* args so main.py can call either backend uniformly
 ) -> dict[str, Any]:
-    """Generate a screenplay using the Claude three-pass pipeline.
+    """Generate a screenplay using the three-pass writer/critic/reviser pipeline.
+
+    Each pass can run on a different provider+model. By default all three use
+    the project's ``claude_model``; pass ``pipeline_*_model`` to override.
 
     The return shape matches ``script_gen.generate_script`` so downstream
     pipeline stages (voice, images, assembly) need no changes.
     """
-    model = (claude_model or config.CLAUDE_MODEL).strip()
+    writer_role, critic_role, reviser_role = _resolve_roles(
+        claude_model=claude_model,
+        writer_model=pipeline_writer_model,
+        critic_model=pipeline_critic_model,
+        reviser_model=pipeline_reviser_model,
+    )
     revisions = config.CLAUDE_MAX_REVISIONS if max_revisions is None else max_revisions
     log.info(
-        "Claude screenplay: model=%s target=%smin revisions=%d",
-        model, target_minutes, revisions,
+        "Screenplay pipeline: writer=%s critic=%s reviser=%s target=%smin revisions=%d",
+        writer_role.label(), critic_role.label(), reviser_role.label(),
+        target_minutes, revisions,
     )
 
     writer_system = _read_prompt("screenwriter_system.md")
@@ -326,10 +453,10 @@ async def generate_script(
     )
 
     # ── Pass 1: writer ────────────────────────────────────────
-    draft_raw, draft_cost = await _run_query(
+    draft_raw, draft_cost = await _run_pass(
+        role=writer_role,
         system_prompt=writer_system,
         user_prompt=writer_user,
-        model=model,
         pass_name="writer",
     )
     draft = _parse_json(draft_raw)
@@ -342,10 +469,10 @@ async def generate_script(
             + "\n".join(f"- {e}" for e in draft_errors)
             + "\nReturn a corrected JSON object."
         )
-        draft_raw, repair_cost = await _run_query(
+        draft_raw, repair_cost = await _run_pass(
+            role=writer_role,
             system_prompt=writer_system,
             user_prompt=repair_prompt,
-            model=model,
             pass_name="writer-repair",
         )
         draft_cost += repair_cost
@@ -367,10 +494,10 @@ async def generate_script(
             tone=tone,
             target_minutes=target_minutes,
         )
-        critic_raw, critic_cost = await _run_query(
+        critic_raw, critic_cost = await _run_pass(
+            role=critic_role,
             system_prompt=_read_prompt("screenplay_critic_system.md"),
             user_prompt=_build_critic_user_prompt(source_summary=source_summary, draft=draft),
-            model=model,
             pass_name="critic",
         )
         total_cost += critic_cost
@@ -384,12 +511,12 @@ async def generate_script(
         issues = critique.get("issues") or []
         if verdict == "revise" and issues:
             log.info("Critic flagged %d issues — running reviser", len(issues))
-            revised_raw, revised_cost = await _run_query(
+            revised_raw, revised_cost = await _run_pass(
+                role=reviser_role,
                 system_prompt=_read_prompt("screenwriter_reviser_system.md"),
                 user_prompt=_build_reviser_user_prompt(
                     source_summary=source_summary, draft=draft, critique=critique,
                 ),
-                model=model,
                 pass_name="reviser",
             )
             total_cost += revised_cost
@@ -407,5 +534,10 @@ async def generate_script(
 
     final = normalize_scenes(final)
     final.setdefault("_claude_cost_usd", round(total_cost, 4))
-    log.info("Claude screenplay complete — total cost ≈ $%.4f", total_cost)
+    final.setdefault("_pipeline_models", {
+        "writer": writer_role.label(),
+        "critic": critic_role.label(),
+        "reviser": reviser_role.label(),
+    })
+    log.info("Screenplay pipeline complete — notional cost ≈ $%.4f", total_cost)
     return final

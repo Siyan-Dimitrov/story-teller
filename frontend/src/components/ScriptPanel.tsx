@@ -47,6 +47,9 @@ export default function ScriptPanel({ project, onRefresh, onNext }: Props) {
         ollama_model: project.ollama_model,
         script_backend: project.script_backend,
         claude_model: project.claude_model || undefined,
+        pipeline_writer_model: project.pipeline_writer_model || undefined,
+        pipeline_critic_model: project.pipeline_critic_model || undefined,
+        pipeline_reviser_model: project.pipeline_reviser_model || undefined,
         target_minutes: project.target_minutes,
         custom_prompt: customPrompt,
       })

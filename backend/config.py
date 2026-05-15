@@ -174,6 +174,12 @@ SCRIPT_BACKEND = os.getenv("SCRIPT_BACKEND", "ollama").strip().lower()
 # (created by `claude login`), so no API key is required when the user is
 # signed into Claude Code.
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5").strip()
+# Per-role model overrides. Empty = "fall back to CLAUDE_MODEL".
+# Syntax: bare model name (defaults to Claude) OR "provider:model"
+# ("claude:claude-opus-4-7", "ollama:kimi-k2.5:cloud").
+PIPELINE_WRITER_MODEL  = os.getenv("PIPELINE_WRITER_MODEL", "").strip()
+PIPELINE_CRITIC_MODEL  = os.getenv("PIPELINE_CRITIC_MODEL", "").strip()
+PIPELINE_REVISER_MODEL = os.getenv("PIPELINE_REVISER_MODEL", "").strip()
 # 0 = writer only (single pass); 1 = writer + critic + reviser (recommended).
 CLAUDE_MAX_REVISIONS = int(os.getenv("CLAUDE_MAX_REVISIONS", "1"))
 CLAUDE_TIMEOUT_SECONDS = float(os.getenv("CLAUDE_TIMEOUT_SECONDS", "600.0"))

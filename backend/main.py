@@ -458,6 +458,9 @@ async def create_project(req: CreateProjectRequest):
         ollama_model=req.ollama_model,
         script_backend=script_backend,
         claude_model=req.claude_model,
+        pipeline_writer_model=req.pipeline_writer_model,
+        pipeline_critic_model=req.pipeline_critic_model,
+        pipeline_reviser_model=req.pipeline_reviser_model,
         target_minutes=req.target_minutes,
         tone=req.tone,
         custom_prompt=req.custom_prompt,
@@ -539,6 +542,7 @@ async def duplicate_project(project_id: str):
     copy_fields = [
         "source_tale", "tone", "target_minutes", "ollama_model",
         "script_backend", "claude_model",
+        "pipeline_writer_model", "pipeline_critic_model", "pipeline_reviser_model",
         "voice_language", "image_backend", "suggested_length",
         "title", "music_track", "music_volume",
     ]
@@ -601,6 +605,9 @@ async def run_script(project_id: str, req: RunScriptRequest):
         if backend == "claude":
             script = await claude_script_gen.generate_script(
                 claude_model=req.claude_model or state.get("claude_model") or None,
+                pipeline_writer_model=req.pipeline_writer_model or state.get("pipeline_writer_model") or None,
+                pipeline_critic_model=req.pipeline_critic_model or state.get("pipeline_critic_model") or None,
+                pipeline_reviser_model=req.pipeline_reviser_model or state.get("pipeline_reviser_model") or None,
                 **common_kwargs,
             )
         elif backend == "ollama":

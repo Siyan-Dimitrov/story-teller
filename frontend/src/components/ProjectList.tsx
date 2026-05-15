@@ -73,6 +73,12 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
   const [ollamaModel, setOllamaModel] = useState('kimi-k2.5:cloud')
   const [scriptBackend, setScriptBackend] = useState<'ollama' | 'claude'>('ollama')
   const [claudeModel, setClaudeModel] = useState('claude-sonnet-4-5')
+  // Per-pass model overrides (only consulted when perPassEnabled is true).
+  // Values use "provider:model" syntax; the backend parser understands both.
+  const [perPassEnabled, setPerPassEnabled] = useState(false)
+  const [writerModel, setWriterModel] = useState('claude:claude-sonnet-4-5')
+  const [criticModel, setCriticModel] = useState('claude:claude-opus-4-7')
+  const [reviserModel, setReviserModel] = useState('claude:claude-sonnet-4-5')
   const [tone, setTone] = useState('dark')
   const [creating, setCreating] = useState(false)
 
@@ -577,6 +583,9 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
         ollama_model: ollamaModel,
         script_backend: scriptBackend,
         claude_model: scriptBackend === 'claude' ? claudeModel : undefined,
+        pipeline_writer_model: scriptBackend === 'claude' && perPassEnabled ? writerModel : undefined,
+        pipeline_critic_model: scriptBackend === 'claude' && perPassEnabled ? criticModel : undefined,
+        pipeline_reviser_model: scriptBackend === 'claude' && perPassEnabled ? reviserModel : undefined,
         tone,
       })
       onSelect(proj.project_id)
@@ -1359,6 +1368,44 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                 </div>
               )}
             </div>
+
+            {scriptBackend === 'claude' && (
+              <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] p-3 space-y-3">
+                <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)] cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={perPassEnabled}
+                    onChange={e => setPerPassEnabled(e.target.checked)}
+                  />
+                  Customize per pass (writer / critic / reviser)
+                  <span className="text-[var(--text-muted)]">— a different critic model is a real external signal; same-model self-critique is mostly cosmetic.</span>
+                </label>
+                {perPassEnabled && (
+                  <div className="grid grid-cols-3 gap-3">
+                    {([
+                      { label: 'Writer',  value: writerModel,  setter: setWriterModel },
+                      { label: 'Critic',  value: criticModel,  setter: setCriticModel },
+                      { label: 'Reviser', value: reviserModel, setter: setReviserModel },
+                    ] as const).map(({ label, value, setter }) => (
+                      <div key={label}>
+                        <label className="block text-[10px] uppercase tracking-wider text-[var(--text-muted)] mb-1">{label}</label>
+                        <select
+                          value={value}
+                          onChange={e => setter(e.target.value)}
+                          className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-2 py-1.5 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
+                        >
+                          <option value="claude:claude-opus-4-7">Opus 4.7 (best)</option>
+                          <option value="claude:claude-sonnet-4-6">Sonnet 4.6</option>
+                          <option value="claude:claude-sonnet-4-5">Sonnet 4.5</option>
+                          <option value="claude:claude-haiku-4-5-20251001">Haiku 4.5 (fast)</option>
+                          <option value="ollama:kimi-k2.5:cloud">Kimi K2.5 (Ollama)</option>
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             <button
               onClick={handleCreate}
