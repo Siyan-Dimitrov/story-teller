@@ -166,6 +166,20 @@ LLM_TIMEOUT_SECONDS = 300.0
 LLM_TEMPERATURE = 0.8
 LLM_MAX_TOKENS = 16000
 
+# ── Claude screenwriter backend ──────────────────────────────
+# Default script-generation backend. Per-project value (set at project
+# creation, stored in state.json) overrides this. Values: "ollama" | "claude".
+SCRIPT_BACKEND = os.getenv("SCRIPT_BACKEND", "ollama").strip().lower()
+# Claude Agent SDK reads OAuth credentials from ~/.claude/.credentials.json
+# (created by `claude login`), so no API key is required when the user is
+# signed into Claude Code.
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5").strip()
+# 0 = writer only (single pass); 1 = writer + critic + reviser (recommended).
+CLAUDE_MAX_REVISIONS = int(os.getenv("CLAUDE_MAX_REVISIONS", "1"))
+CLAUDE_TIMEOUT_SECONDS = float(os.getenv("CLAUDE_TIMEOUT_SECONDS", "600.0"))
+# Directory containing the writer/critic/reviser markdown system prompts.
+CLAUDE_PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
+
 # ── Batch chapter analysis ───────────────────────────────────
 BATCH_NARRATION_RATE = 800  # characters per minute for duration estimation
 

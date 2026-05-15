@@ -71,6 +71,8 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
   const [selectedTale, setSelectedTale] = useState('')
   const [targetMinutes, setTargetMinutes] = useState(5)
   const [ollamaModel, setOllamaModel] = useState('kimi-k2.5:cloud')
+  const [scriptBackend, setScriptBackend] = useState<'ollama' | 'claude'>('ollama')
+  const [claudeModel, setClaudeModel] = useState('claude-sonnet-4-5')
   const [tone, setTone] = useState('dark')
   const [creating, setCreating] = useState(false)
 
@@ -573,6 +575,8 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
         custom_prompt,
         target_minutes: targetMinutes,
         ollama_model: ollamaModel,
+        script_backend: scriptBackend,
+        claude_model: scriptBackend === 'claude' ? claudeModel : undefined,
         tone,
       })
       onSelect(proj.project_id)
@@ -1305,7 +1309,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
               </select>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-3 gap-4">
               <div>
                 <label className="block text-xs text-[var(--text-secondary)] mb-1.5">Target Length (minutes)</label>
                 <input
@@ -1318,14 +1322,42 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                 />
               </div>
               <div>
-                <label className="block text-xs text-[var(--text-secondary)] mb-1.5">LLM Model</label>
-                <input
-                  type="text"
-                  value={ollamaModel}
-                  onChange={e => setOllamaModel(e.target.value)}
+                <label className="block text-xs text-[var(--text-secondary)] mb-1.5">Script Backend</label>
+                <select
+                  value={scriptBackend}
+                  onChange={e => setScriptBackend(e.target.value as 'ollama' | 'claude')}
                   className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
-                />
+                  title="Which model writes the screenplay. Claude uses your Claude Code subscription and runs a writer + critic + reviser pipeline."
+                >
+                  <option value="ollama">Ollama (local / Kimi)</option>
+                  <option value="claude">Claude (subscription, 3-pass)</option>
+                </select>
               </div>
+              {scriptBackend === 'ollama' ? (
+                <div>
+                  <label className="block text-xs text-[var(--text-secondary)] mb-1.5">Ollama Model</label>
+                  <input
+                    type="text"
+                    value={ollamaModel}
+                    onChange={e => setOllamaModel(e.target.value)}
+                    className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
+                  />
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-xs text-[var(--text-secondary)] mb-1.5">Claude Model</label>
+                  <select
+                    value={claudeModel}
+                    onChange={e => setClaudeModel(e.target.value)}
+                    className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
+                  >
+                    <option value="claude-opus-4-7">claude-opus-4-7 (best quality)</option>
+                    <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+                    <option value="claude-sonnet-4-5">claude-sonnet-4-5 (default)</option>
+                    <option value="claude-haiku-4-5-20251001">claude-haiku-4-5 (fastest)</option>
+                  </select>
+                </div>
+              )}
             </div>
 
             <button

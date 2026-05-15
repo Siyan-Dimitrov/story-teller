@@ -45,6 +45,8 @@ export default function ScriptPanel({ project, onRefresh, onNext }: Props) {
     try {
       const result = await api.runScript(project.project_id, {
         ollama_model: project.ollama_model,
+        script_backend: project.script_backend,
+        claude_model: project.claude_model || undefined,
         target_minutes: project.target_minutes,
         custom_prompt: customPrompt,
       })

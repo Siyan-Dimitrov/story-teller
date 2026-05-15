@@ -56,6 +56,8 @@ class ProjectState(BaseModel):
     voice_profile_id: Optional[str] = None
     voice_language: str = "en"
     ollama_model: str = "kimi-k2.5:cloud"
+    script_backend: str = "ollama"  # ollama | claude
+    claude_model: Optional[str] = None  # override config.CLAUDE_MODEL when script_backend="claude"
     image_backend: str = "comfyui"  # comfyui | ollama | replicate | gpt_image
     project_seed: Optional[int] = None
     target_minutes: float = 5.0
@@ -77,11 +79,15 @@ class CreateProjectRequest(BaseModel):
     custom_prompt: str = ""
     target_minutes: float = 5.0
     ollama_model: str = "kimi-k2.5:cloud"
+    script_backend: Optional[str] = None  # None falls back to config.SCRIPT_BACKEND
+    claude_model: Optional[str] = None  # only consulted when script_backend == "claude"
     tone: str = ""  # e.g. "dark", "humorous", "gothic noir"
 
 
 class RunScriptRequest(BaseModel):
     ollama_model: Optional[str] = None
+    script_backend: Optional[str] = None  # one-shot override (otherwise uses project state)
+    claude_model: Optional[str] = None
     target_minutes: Optional[float] = None
     custom_prompt: str = ""
 

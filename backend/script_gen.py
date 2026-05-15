@@ -11,6 +11,25 @@ from .grimm_tales import get_tale
 log = logging.getLogger(__name__)
 
 
+def normalize_scenes(script: dict) -> dict:
+    """Backfill indices, default mood/duration, and reconcile image_prompt(s).
+
+    Shared by both the Ollama and Claude script backends so downstream code
+    (voice, images, assembly) sees a uniform shape regardless of the LLM
+    that generated the script.
+    """
+    for i, scene in enumerate(script.get("scenes", [])):
+        scene["index"] = i
+        scene.setdefault("mood", "neutral")
+        scene.setdefault("duration_hint", 15.0)
+        if "image_prompts" not in scene or not scene["image_prompts"]:
+            single = scene.get("image_prompt", "")
+            scene["image_prompts"] = [single] if single else []
+        if scene["image_prompts"]:
+            scene["image_prompt"] = scene["image_prompts"][0]
+    return script
+
+
 def _repair_truncated_json(raw: str) -> str:
     """Attempt to repair JSON truncated by token limits.
 
@@ -282,20 +301,4 @@ async def generate_script(
         repaired = _repair_truncated_json(content)
         script = json.loads(repaired)
 
-    # Normalize scene indices and image prompts
-    for i, scene in enumerate(script.get("scenes", [])):
-        scene["index"] = i
-        scene.setdefault("mood", "neutral")
-        scene.setdefault("duration_hint", 15.0)
-
-        # Normalize image_prompts: support both old single and new multi format
-        if "image_prompts" not in scene or not scene["image_prompts"]:
-            # Backward compat: wrap single image_prompt into a list
-            single = scene.get("image_prompt", "")
-            scene["image_prompts"] = [single] if single else []
-
-        # Set image_prompt to first prompt for backward compat
-        if scene["image_prompts"]:
-            scene["image_prompt"] = scene["image_prompts"][0]
-
-    return script
+    return normalize_scenes(script)

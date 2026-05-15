@@ -53,6 +53,8 @@ export interface ProjectState {
   voice_profile_id?: string | null
   voice_language: string
   ollama_model: string
+  script_backend?: 'ollama' | 'claude'
+  claude_model?: string | null
   image_backend: string
   target_minutes: number
   suggested_length?: string
@@ -320,7 +322,7 @@ export const api = {
   batchResume: (groupId: string) =>
     post<{ status: string }>(`/api/batch/${groupId}/resume`, {}),
 
-  createProject: (body: { source_tale: string; custom_prompt?: string; target_minutes: number; ollama_model: string; tone?: string }) =>
+  createProject: (body: { source_tale: string; custom_prompt?: string; target_minutes: number; ollama_model: string; script_backend?: 'ollama' | 'claude'; claude_model?: string; tone?: string }) =>
     post<ProjectState>('/api/projects', body),
   getProject: (id: string) => request<ProjectState>(`/api/projects/${id}`),
   duplicateProject: (id: string) => post<ProjectState>(`/api/projects/${id}/duplicate`),
@@ -332,7 +334,7 @@ export const api = {
   updateSettings: (id: string, body: { tone?: string; target_minutes?: number; suggested_length?: string; music_track?: string | null; music_volume?: number | null }) =>
     put<Record<string, unknown>>(`/api/projects/${id}/settings`, body),
 
-  runScript: (id: string, body: { ollama_model?: string; target_minutes?: number; custom_prompt?: string }) =>
+  runScript: (id: string, body: { ollama_model?: string; script_backend?: 'ollama' | 'claude'; claude_model?: string; target_minutes?: number; custom_prompt?: string }) =>
     post<Script>(`/api/projects/${id}/script`, body),
   updateScript: (id: string, body: { title: string; synopsis: string; scenes: Scene[] }) =>
     put<Script>(`/api/projects/${id}/script`, body),

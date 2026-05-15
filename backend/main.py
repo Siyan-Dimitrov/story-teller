@@ -18,7 +18,7 @@ import httpx
 
 from . import config
 from . import project_store as store
-from . import script_gen, voice_gen, image_gen, image_styles, gutenberg, batch, music_search
+from . import script_gen, claude_script_gen, voice_gen, image_gen, image_styles, gutenberg, batch, music_search
 from .video_assembly import assemble_video, get_assembly_progress, cancel_assembly
 from .animation import prepare_animations, get_animation_progress
 from .grimm_tales import list_tales, get_tale
@@ -449,10 +449,15 @@ def get_text_stats(project: dict) -> dict:
 @app.post("/api/projects")
 async def create_project(req: CreateProjectRequest):
     pid, pdir = store.create_project()
+    script_backend = (req.script_backend or config.SCRIPT_BACKEND).strip().lower()
+    if script_backend not in ("ollama", "claude"):
+        raise HTTPException(400, f"Unknown script_backend: {script_backend!r}")
     store.update_state(
         pid,
         source_tale=req.source_tale,
         ollama_model=req.ollama_model,
+        script_backend=script_backend,
+        claude_model=req.claude_model,
         target_minutes=req.target_minutes,
         tone=req.tone,
         custom_prompt=req.custom_prompt,
@@ -533,6 +538,7 @@ async def duplicate_project(project_id: str):
     # Copy settings from source
     copy_fields = [
         "source_tale", "tone", "target_minutes", "ollama_model",
+        "script_backend", "claude_model",
         "voice_language", "image_backend", "suggested_length",
         "title", "music_track", "music_volume",
     ]
@@ -579,14 +585,31 @@ async def run_script(project_id: str, req: RunScriptRequest):
     state = store.load_state(project_id)
     store.update_state(project_id, step="generating_script", error=None)
 
+    backend = (
+        req.script_backend
+        or state.get("script_backend")
+        or config.SCRIPT_BACKEND
+    ).strip().lower()
+
     try:
-        script = await script_gen.generate_script(
+        common_kwargs = dict(
             source_tale=state.get("source_tale", ""),
             custom_prompt=req.custom_prompt or state.get("custom_prompt", ""),
             target_minutes=req.target_minutes or state.get("target_minutes", 5.0),
-            ollama_model=req.ollama_model or state.get("ollama_model"),
             tone=state.get("tone", ""),
         )
+        if backend == "claude":
+            script = await claude_script_gen.generate_script(
+                claude_model=req.claude_model or state.get("claude_model") or None,
+                **common_kwargs,
+            )
+        elif backend == "ollama":
+            script = await script_gen.generate_script(
+                ollama_model=req.ollama_model or state.get("ollama_model"),
+                **common_kwargs,
+            )
+        else:
+            raise HTTPException(400, f"Unknown script_backend: {backend!r}")
         store.save_json(project_id, "script.json", script)
         store.update_state(
             project_id,
@@ -594,6 +617,10 @@ async def run_script(project_id: str, req: RunScriptRequest):
             title=script.get("title", state.get("title", "")),
         )
         return script
+    except claude_script_gen.ClaudeAuthError as e:
+        log.error(f"Claude auth error: {e}")
+        store.update_state(project_id, step="created", error=str(e))
+        raise HTTPException(401, str(e))
     except Exception as e:
         tb = traceback.format_exc()
         log.error(f"Script generation failed: {tb}")
