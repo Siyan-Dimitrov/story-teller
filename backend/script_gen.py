@@ -182,7 +182,8 @@ Respond ONLY with valid JSON (no markdown fences). Use this exact structure:
       "narration": "The narrator's text for this scene (2-4 paragraphs, spoken aloud)",
       "image_prompts": [
         "First image prompt — must depict a specific moment from the narration",
-        "Second image prompt — must depict a different specific moment from the narration"
+        "Second image prompt — must depict a different specific moment from the narration",
+        "Third image prompt — must depict a third specific moment from the narration"
       ],
       "mood": "one word mood: dark, tense, whimsical, melancholy, horrifying, peaceful, ominous, triumphant",
       "duration_hint": 15.0
@@ -193,16 +194,16 @@ Respond ONLY with valid JSON (no markdown fences). Use this exact structure:
 Guidelines:
 - Each scene's narration should be 60-120 words for short videos (3-5 min total), 100-200 words for longer ones
 - duration_hint is approximate seconds — will be overridden by actual voice audio length
-- Each scene needs exactly 2 image_prompts
+- Each scene needs exactly 3 image_prompts
 - CRITICAL — image prompts must be grounded in the narration text:
   1. Read the narration you wrote for the scene
-  2. Identify the two most visually striking moments or images described in it
+  2. Identify the three most visually striking moments or images described in it (beginning → middle → end of the scene's beat)
   3. Write each prompt as a literal depiction of that moment: name the specific characters, objects, setting, and action happening
   4. Do NOT write generic prompts like "a dark forest" — instead write "the woodcutter's adult daughter kneeling beside a broken juniper branch, a crimson ribbon in her hands, moonlight through bare trees"
 - Each prompt must include: WHO (specific character/creature), WHAT (specific action), WHERE (specific setting detail), and WHEN/LIGHTING if relevant
 - Include continuity anchors for recurring characters: apparent age, clothing, hair, posture, and one memorable identifying feature
 - Include explicit camera/framing language in every prompt, such as "wide establishing shot", "low-angle medium shot", "over-the-shoulder shot", "close-up", or "silhouette against the doorway"
-- Vary composition between the two prompts: usually one wider environmental shot and one tighter emotional/action shot
+- Vary composition across the three prompts — mix at least two distinct framings (e.g. wide establishing shot, medium action shot, close-up emotional/detail shot). Never repeat the same framing twice in one scene.
 - Do NOT append generic art-style boilerplate to image_prompts. The selected image backend adds style separately via style_prompt.
 - Do NOT request captions, title cards, typography, subtitles, logos, or text inside the image unless the story explicitly requires a visible sign or written object
 - For image_prompts, adapt disturbing story beats as symbolic, non-graphic folklore imagery. Avoid gore, visible injury, sexual content, intimate contact, restraint, torture, explicit burning, cannibalism, and children in danger.

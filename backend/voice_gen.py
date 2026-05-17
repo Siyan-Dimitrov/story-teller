@@ -24,6 +24,28 @@ log = logging.getLogger(__name__)
 SENTENCE_GAP_SECONDS = 0.20
 # Trailing silence appended to each scene's audio (seconds)
 SCENE_TRAILING_SILENCE = 0.70
+# Per-chunk cleanup before concatenation (avoids clicks/breath at boundaries).
+# We use asymmetric thresholds for head vs tail trimming:
+#  - HEAD: ~-35 dBFS. Qwen's vocoder consistently emits a quiet "uhm/hum"
+#    vocalization at the start of each chunk (warm-up artifact, ~-45 to -30
+#    dBFS). The earlier -55 dBFS threshold was below that hum amplitude, so
+#    trim landed on hum start instead of true speech onset. -35 dBFS skips
+#    the hum entirely while staying below real speech onset (~-15 dBFS).
+#  - TAIL: ~-55 dBFS. We want to keep the natural decay/breath at the end of
+#    a sentence, so we tolerate much quieter audio here before declaring
+#    silence.
+CHUNK_HEAD_THRESHOLD = 0.01778  # 10**(-35/20) — strict, skips vocoder hum
+CHUNK_SILENCE_THRESHOLD = 0.00178  # 10**(-55/20) — gentle, for tail trim
+CHUNK_TRIM_WINDOW_MS = 50
+# Asymmetric fades: speech onset carries a vocoder warm-up + abrupt punch-in
+# that extends well past 50ms in practice — a linear 50ms ramp still left an
+# audible click at the head of each chunk. We use a longer raised-cosine
+# (Hann) fade-in: it starts nearly flat at t=0, so any sub-threshold transient
+# in the first few ms is multiplied by ~0, and the ramp is C¹-continuous at
+# both ends. The trailing edge only has a 1-2ms breath/click, so a short
+# linear fade-out is plenty.
+CHUNK_FADE_IN_MS = 80
+CHUNK_FADE_OUT_MS = 10
 
 
 def _split_into_sentences(text: str) -> list[str]:
@@ -32,8 +54,21 @@ def _split_into_sentences(text: str) -> list[str]:
     Merges very short trailing fragments with the previous sentence.
     Ensures every sentence ends with punctuation for proper TTS pacing.
     """
-    # Normalize em-dashes to commas (Qwen TTS handles commas better)
-    text = text.replace("\u2014", ", ").replace("--", ", ")
+    # Normalize punctuation Qwen TTS handles poorly:
+    #  - em-dash, double-hyphen, en-dash \u2192 comma (mid-clause pause)
+    #  - single-char ellipsis (\u2026) and three-dot ellipsis (...) \u2192 comma; left
+    #    raw they trigger a half-second hang in the model.
+    #  - non-breaking space \u2192 regular space so the sentence splitter's \s+
+    #    treats it consistently and TTS doesn't inject odd pacing.
+    text = (
+        text
+        .replace("\u2014", ", ")
+        .replace("\u2013", ", ")
+        .replace("--", ", ")
+        .replace("\u2026", ", ")
+        .replace("...", ", ")
+        .replace("\u00a0", " ")
+    )
 
     # Split on sentence-ending punctuation (including inside closing quotes)
     parts = re.split(r'(?:(?<=[.!?])|(?<=[.!?]["\'\u201d\u2019]))\s+', text.strip())
@@ -107,11 +142,90 @@ def _append_trailing_silence(wav_path: Path, silence_seconds: float) -> float:
     return len(combined) / sr
 
 
+def _clean_chunk(arr: np.ndarray, sr: int) -> np.ndarray:
+    """Remove DC bias, trim Qwen-added head/tail silence, and apply short
+    fades to the speech edges.
+
+    Each TTS chunk is a fresh model invocation that leaves a small DC offset,
+    a leading silence (~50-300ms), and a trailing breath/mouth tail. Joining
+    raw chunks produces audible thumps and clipped breaths at every boundary.
+    """
+    # Work in float32 so DC subtraction and fades stay accurate.
+    src_dtype = arr.dtype
+    if arr.ndim == 1:
+        x = arr.astype(np.float32, copy=True)
+    else:
+        x = arr.astype(np.float32, copy=True)
+
+    # 1. DC removal (per channel for stereo)
+    if x.ndim == 1:
+        x -= float(np.mean(x))
+    else:
+        x -= np.mean(x, axis=0, keepdims=True)
+
+    # 2. Trim leading and trailing silence using a sliding RMS window.
+    #    Head: strict threshold (skips vocoder warm-up hum), fine step for
+    #    accurate onset, ~6ms pre-roll so we don't shave the first phoneme.
+    #    Tail: gentle threshold (preserves natural breath/decay), coarser step
+    #    is fine, ~25ms post-roll so the fade-out doesn't clip the last
+    #    consonant.
+    mono = x.mean(axis=1) if x.ndim > 1 else x
+    win = max(1, int(CHUNK_TRIM_WINDOW_MS * sr / 1000))
+    n = len(mono)
+    if n > win * 2:
+        head_preroll = win // 8  # ~6ms
+        tail_postroll = win // 2  # ~25ms
+        head_step = max(1, win // 4)  # ~12ms — finer for accurate onset
+        tail_step = max(1, win // 2)  # ~25ms
+        start = 0
+        for i in range(0, n - win, head_step):
+            rms = float(np.sqrt(np.mean(mono[i:i + win] ** 2)))
+            if rms >= CHUNK_HEAD_THRESHOLD:
+                start = max(0, i - head_preroll)
+                break
+        end = n
+        for i in range(n - win, 0, -tail_step):
+            rms = float(np.sqrt(np.mean(mono[i:i + win] ** 2)))
+            if rms >= CHUNK_SILENCE_THRESHOLD:
+                end = min(n, i + win + tail_postroll)
+                break
+        if end > start and (end - start) >= int(0.1 * sr):
+            x = x[start:end]
+
+    # 3. Apply asymmetric fades. The head uses a raised-cosine (Hann) ramp:
+    #    `0.5 - 0.5*cos(pi*t)` is flat near t=0 and t=1, so it suppresses
+    #    sub-threshold transients far better than a linear ramp of the same
+    #    length. The tail is a short linear fade — it only has to hide a
+    #    1-2ms breath/click and we don't want to swallow the final consonant.
+    fade_in = max(1, int(CHUNK_FADE_IN_MS * sr / 1000))
+    fade_out = max(1, int(CHUNK_FADE_OUT_MS * sr / 1000))
+    if len(x) > fade_in + fade_out:
+        in_ramp = (
+            0.5 - 0.5 * np.cos(np.linspace(0.0, np.pi, fade_in, dtype=np.float32))
+        ).astype(np.float32)
+        out_ramp = np.linspace(1.0, 0.0, fade_out, dtype=np.float32)
+        if x.ndim == 1:
+            x[:fade_in] *= in_ramp
+            x[-fade_out:] *= out_ramp
+        else:
+            x[:fade_in] *= in_ramp[:, None]
+            x[-fade_out:] *= out_ramp[:, None]
+
+    # Restore original dtype
+    if np.issubdtype(src_dtype, np.integer):
+        info = np.iinfo(src_dtype)
+        np.clip(x, info.min, info.max, out=x)
+        return x.astype(src_dtype)
+    return x.astype(src_dtype)
+
+
 def _concatenate_wav_chunks(
     chunks: list[bytes], gap_seconds: float = SENTENCE_GAP_SECONDS
 ) -> tuple[bytes, float]:
     """Concatenate WAV byte chunks with silence gaps between them.
 
+    Each chunk is DC-corrected, head/tail-trimmed and edge-faded before
+    concatenation to avoid audible thumps/breath at chunk boundaries.
     Returns (combined_wav_bytes, total_duration_seconds).
     """
     arrays: list[np.ndarray] = []
@@ -123,7 +237,7 @@ def _concatenate_wav_chunks(
             sample_rate = sr
         elif sr != sample_rate:
             log.warning(f"Sample rate mismatch: {sr} vs {sample_rate}")
-        arrays.append(data)
+        arrays.append(_clean_chunk(data, sr))
 
     if not arrays or sample_rate is None:
         return b"", 0.0

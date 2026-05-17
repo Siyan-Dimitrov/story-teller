@@ -197,21 +197,25 @@ IMAGE_TIMEOUT_SECONDS = 120.0
 IMAGE_WIDTH = 1920
 IMAGE_HEIGHT = 1080
 
-# ── AnimateDiff ─────────────────────────────────────────────
-ANIMATEDIFF_ENABLED = True
-ANIMATEDIFF_SD15_CHECKPOINT = "v1-5-pruned-emaonly.safetensors"
-ANIMATEDIFF_MOTION_MODULE = "v3_sd15_mm.ckpt"
-ANIMATEDIFF_WIDTH = 768   # must be divisible by 8
-ANIMATEDIFF_HEIGHT = 512   # must be divisible by 8
-ANIMATEDIFF_DEFAULT_FRAMES = 16
-ANIMATEDIFF_DEFAULT_FPS = 8
-ANIMATEDIFF_TIMEOUT_SECONDS = 300.0
-
-# ── Image QC ────────────────────────────────────────────────
-OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "llava:7b")
-QC_PASS_THRESHOLD = float(os.getenv("QC_PASS_THRESHOLD", "3.0"))
-QC_MAX_RETRIES = int(os.getenv("QC_MAX_RETRIES", "2"))
-QC_TIMEOUT_SECONDS = float(os.getenv("QC_TIMEOUT_SECONDS", "300.0"))
+# ── Image-to-Video (Replicate) ──────────────────────────────
+# Replaces the legacy local AnimateDiff/ComfyUI path. Scenes the LLM
+# classifier labels as "animatediff" get a real motion clip generated
+# by a cloud I2V model; everything else stays on the local depth-parallax
+# render.
+I2V_ENABLED = os.getenv("I2V_ENABLED", "1").strip() in ("1", "true", "True", "yes")
+# Wan 2.6 I2V Flash is the cheapest viable option on Replicate as of 2026-05:
+# ~$0.05/sec at 720p, 5s default. Swap for "minimax/hailuo-02" or
+# "kwaivgi/kling-v2.1" for higher quality at higher cost.
+REPLICATE_I2V_MODEL = os.getenv("REPLICATE_I2V_MODEL", "wan-video/wan2.6-i2v-flash")
+I2V_DURATION_SECONDS = int(os.getenv("I2V_DURATION_SECONDS", "5"))
+I2V_RESOLUTION = os.getenv("I2V_RESOLUTION", "720p")  # "720p" or "1080p"
+I2V_OUTPUT_FPS = int(os.getenv("I2V_OUTPUT_FPS", "16"))  # frames extracted from MP4
+# Budget guard — clip count cap per project to avoid runaway spend.
+I2V_MAX_CLIPS_PER_PROJECT = int(os.getenv("I2V_MAX_CLIPS_PER_PROJECT", "36"))
+I2V_TIMEOUT_SECONDS = float(os.getenv("I2V_TIMEOUT_SECONDS", "600.0"))
+# Frame loading still uses 8 fps for the assembly ping-pong cadence;
+# `_animatediff_clip` in video_assembly.py reads this.
+ANIMATEDIFF_DEFAULT_FPS = I2V_OUTPUT_FPS
 
 # ── Background music ─────────────────────────────────────────
 # Default volume for background music relative to voice (0.0-1.0)
