@@ -438,6 +438,12 @@ def _animatediff_clip(
     # Create ImageSequenceClip
     clip = ImageSequenceClip(repeated, fps=ad_fps)
 
+    # I2V models return frames at their own resolution (e.g. 720p = 1280x720).
+    # Without this, the clip composites at native size against 1920x1080
+    # scenes, producing black pillarboxing on the sides.
+    if tuple(clip.size) != tuple(target_size):
+        clip = clip.resized(new_size=target_size)
+
     # Adjust speed to match exact target duration
     if abs(clip.duration - duration) > 0.1:
         speed_factor = clip.duration / duration
