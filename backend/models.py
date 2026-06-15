@@ -21,14 +21,11 @@ class Scene(BaseModel):
     image_paths: list[str] = Field(default_factory=list)  # All images for this scene
     kb_effect: str = "zoom_in"  # Ken Burns effect type (legacy fallback)
     # Animation fields (populated by /animate step)
-    # QC fields (populated by /qc step)
-    qc_results: list[dict] = Field(default_factory=list)  # per-image QC verdicts
-    qc_passed: bool = False  # overall scene QC status
-    # Animation fields (populated by /animate step)
     animation_types: list[str] = Field(default_factory=list)  # per-image: "depthflow", "portrait", or "animatediff"
     motion_presets: list[str] = Field(default_factory=list)  # per-image motion preset name
     depth_map_paths: list[str] = Field(default_factory=list)  # per-image depth map file paths
-    animatediff_clip_paths: list[str] = Field(default_factory=list)  # per-image AnimateDiff output dirs
+    animatediff_clip_paths: list[str] = Field(default_factory=list)  # per-image animated clip output dirs
+    animatediff_errors: list[Optional[str]] = Field(default_factory=list)  # per-image I2V failure reason (None if ok)
     # Per-scene music (optional override of global music track)
     music_track: Optional[str] = None  # filename in data/music/ or absolute path
     music_volume: Optional[float] = None  # 0.0-1.0 override
@@ -39,6 +36,7 @@ class Scene(BaseModel):
 class Script(BaseModel):
     title: str = ""
     synopsis: str = ""
+    visual_style: str = ""  # per-story art direction, derived from the story itself
     scenes: list[Scene] = Field(default_factory=list)
     target_minutes: float = 5.0
     source_tale: str = ""
@@ -184,30 +182,6 @@ class GutenbergSearchRequest(BaseModel):
 class GutenbergTextRequest(BaseModel):
     text_url: str
     max_chars: int = 2000  # 0 for full text
-
-
-class RunQCRequest(BaseModel):
-    vision_model: Optional[str] = None
-    pass_threshold: float = 3.0
-    style_id: Optional[str] = None
-    custom_style_prompt: Optional[str] = None
-    style_prompt: Optional[str] = None
-    targets: Optional[list["QCTarget"]] = None  # None = all images
-
-
-class QCTarget(BaseModel):
-    scene_index: int
-    image_index: int
-
-
-class RegenerateQCRequest(BaseModel):
-    targets: list[QCTarget] = Field(default_factory=list)
-    vision_model: Optional[str] = None
-    pass_threshold: float = 3.0
-    style_id: Optional[str] = None
-    custom_style_prompt: Optional[str] = None
-    style_prompt: Optional[str] = None
-    lora_keys: Optional[list[str]] = None
 
 
 class UpdateSceneMusicRequest(BaseModel):

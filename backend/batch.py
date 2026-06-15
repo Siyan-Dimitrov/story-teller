@@ -525,7 +525,7 @@ def create_batch_projects(
 
 # ── Sequential batch pipeline runner ─────────────────────────
 
-STEP_ORDER = ["script", "voice", "images", "qc", "animate", "assemble"]
+STEP_ORDER = ["script", "voice", "images", "animate", "assemble"]
 
 
 async def run_batch_pipeline(
@@ -702,11 +702,15 @@ async def _run_chapter_pipeline(
     if "images" in steps:
         _update_step("images")
         store.update_state(project_id, step="generating_images", error=None, image_backend=image_backend)
+        # Prefer this story's own derived "feel" so each chapter gets its own
+        # look; fall back to the batch-wide style when the writer left it blank.
+        story_style = (script.get("visual_style") or "").strip()
+        effective_style = story_style or style_prompt
         scenes = await image_gen.generate_all_scenes(
             scenes=script["scenes"],
             project_dir=pdir,
             backend=image_backend,
-            style_prompt=style_prompt,
+            style_prompt=effective_style,
             lora_keys=lora_keys,
             character_consistency=character_consistency,
             project_seed=store.get_project_seed(project_id),
@@ -715,24 +719,7 @@ async def _run_chapter_pipeline(
         store.save_json(project_id, "script.json", script)
         store.update_state(project_id, step="illustrated")
 
-    # Step 4: QC (optional)
-    if "qc" in steps:
-        _update_step("qc")
-        from .image_qc import run_qc_for_project
-        store.update_state(project_id, step="qc_running", error=None)
-        scenes = await run_qc_for_project(
-            scenes=script["scenes"],
-            project_dir=pdir,
-            vision_model=config.OLLAMA_VISION_MODEL,
-            style_prompt=style_prompt,
-            pass_threshold=config.QC_PASS_THRESHOLD,
-            project_id=project_id,
-        )
-        script["scenes"] = scenes
-        store.save_json(project_id, "script.json", script)
-        store.update_state(project_id, step="qc_passed")
-
-    # Step 5: Animate (optional)
+    # Step 4: Animate (optional)
     if "animate" in steps:
         _update_step("animate")
         from .animation import prepare_animations

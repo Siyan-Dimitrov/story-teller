@@ -80,7 +80,7 @@ For each image prompt below, choose:
 1. Animation type: "depthflow", "portrait", or "animatediff"
 2. A motion preset name
 
-Use "animatediff" for images with a character performing an action, characters with flowing hair/clothing, magic/particle effects, fire, water, wind, or any scene where actual pixel motion would look impressive. This uses AI video generation for realistic character animation.
+Use "animatediff" for images with a character performing an action, characters with flowing hair/clothing, magic/particle effects, fire, water, wind, or any scene where actual pixel motion would look impressive. This uses a cloud image-to-video model (Replicate) to produce a short motion clip from the still image. It costs money per clip, so reserve it for moments where motion materially helps the story.
 
 Use "portrait" ONLY for images that are primarily a close-up of a single character's face/head (head-and-shoulders framing where the face is the dominant element).
 
@@ -615,6 +615,7 @@ async def prepare_animations(
     project_dir: Path,
     ollama_model: str | None = None,
     project_id: str | None = None,
+    style_prompt: str | None = None,
 ) -> list[dict]:
     """Classify images and generate depth maps + AnimateDiff clips.
 
@@ -630,11 +631,11 @@ async def prepare_animations(
         _init_anim_progress(project_id)
 
     try:
-        # Step 1: Check if AnimateDiff is available
+        # Step 1: Check if I2V (Replicate) is available
         ad_available = False
-        if config.ANIMATEDIFF_ENABLED:
+        if config.I2V_ENABLED:
             ad_available = await check_animatediff_available()
-            log.info(f"[Animation] AnimateDiff available: {ad_available}")
+            log.info(f"[Animation] I2V available: {ad_available}")
 
         # Step 2: LLM classification
         if project_id:
@@ -643,7 +644,7 @@ async def prepare_animations(
         scenes = await classify_scene_animations(scenes, ollama_model)
         log.info("Animation classification complete")
 
-        # If AnimateDiff is not available, downgrade animatediff → depthflow
+        # If I2V is not available, downgrade animatediff → depthflow
         if not ad_available:
             for scene in scenes:
                 anim_types = scene.get("animation_types") or []
@@ -655,7 +656,7 @@ async def prepare_animations(
                             motion_presets[i] = "dolly_forward"
                 scene["animation_types"] = anim_types
                 scene["motion_presets"] = motion_presets
-            log.info("[Animation] AnimateDiff unavailable — all animatediff images downgraded to depthflow")
+            log.info("[Animation] I2V unavailable — all animatediff images downgraded to depthflow")
 
         # Step 3: Generate depth maps (for depthflow and portrait images)
         depth_dir = project_dir / "depth_maps"
@@ -716,7 +717,7 @@ async def prepare_animations(
 
                 log.info(f"Depth map saved: {depth_filename} (method: {method})")
 
-        # Step 4: Generate AnimateDiff clips (if any images classified as animatediff)
+        # Step 4: Generate I2V motion clips (if any images classified as animatediff)
         if ad_available:
             ad_count = sum(
                 1 for s in scenes
@@ -724,22 +725,28 @@ async def prepare_animations(
                 if t == "animatediff"
             )
             if ad_count > 0:
-                log.info(f"[Animation] Generating {ad_count} AnimateDiff clips...")
+                log.info(f"[Animation] Generating {ad_count} I2V motion clips...")
 
                 def _ad_progress(phase: str, progress: float):
                     if project_id:
-                        # AnimateDiff takes 0.6-0.95 of total progress
+                        # I2V takes 0.6-0.95 of total progress
                         _update_anim_progress(
                             project_id,
                             phase=phase,
                             progress=0.6 + 0.35 * progress,
                         )
 
-                scenes = await generate_all_animatediff_clips(
-                    scenes=scenes,
-                    project_dir=project_dir,
-                    progress_cb=_ad_progress,
-                )
+                ad_kwargs = {
+                    "scenes": scenes,
+                    "project_dir": project_dir,
+                    "progress_cb": _ad_progress,
+                }
+                # Honor the per-story visual feel for motion clips too, so I2V
+                # matches the still images. Falls back to the function default
+                # when not supplied.
+                if style_prompt and style_prompt.strip():
+                    ad_kwargs["style_prompt"] = style_prompt.strip()
+                scenes = await generate_all_animatediff_clips(**ad_kwargs)
 
         if project_id:
             _finish_anim_progress(project_id)

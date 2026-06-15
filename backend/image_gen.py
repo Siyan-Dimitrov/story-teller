@@ -521,81 +521,93 @@ GPT_IMAGE_STYLE_BOILERPLATE = [
     "rich colors",
 ]
 
+# Story-agnostic safety rewrites. These soften the categories that image
+# moderation commonly rejects (gore, death, weapons, fire, restraint, sexual
+# content, cannibalism, children-in-danger) into symbolic, non-graphic folklore
+# imagery — without referencing any particular story or character. Ordered most
+# specific → most general so multi-word phrases are caught before single words.
 GPT_IMAGE_SAFETY_REPLACEMENTS = [
-    (r"\bTim Burton(?: inspired| style)?\b", "whimsical gothic silhouettes"),
+    # ── Real-artist name-drops the model may refuse ──
+    (r"\bTim Burton(?: ?-?inspired| style)?\b", "whimsical gothic silhouettes"),
     (r"\bStudio Ghibli(?: style)?\b", "warm hand-painted animation aesthetic"),
-    (r"\bYoung Talia\b", "adult Talia"),
-    (r"\bTalia's\b", "adult Talia's"),
-    (r"\bhis daughter\b", "his adult daughter"),
-    (r"\blittle girl\b", "young princess"),
-    (r"\bparanoid intensity\b", "grave concern"),
-    (r"\bcollapsing backward\b", "sinking backward in a dramatic faint"),
-    (r"\bvisible splinter of flax under her fingernail\b", "tiny golden flax fiber near her hand"),
-    (r"\bsplinter of flax under her fingernail\b", "tiny golden flax fiber near her hand"),
-    (r"\bfingernail\b", "hand"),
-    (r"\bblood on her hands\b", "dark red ribbon around her hands"),
-    (r"\bblood\b", "deep red color"),
+    (r"\bMark Ryden(?: style)?\b", "dreamlike surrealist storybook aesthetic"),
+
+    # ── Blood & gore ──
+    (r"\bpool of blood\b", "spreading dark red shadow"),
+    (r"\bcovered in blood\b", "marked with deep red"),
+    (r"\bblood(?:y|ied|stained|-stained|-soaked)?\b", "deep red color"),
+    (r"\bgore\b", "dark dramatic detail"),
+    (r"\bgory\b", "darkly dramatic"),
+    (r"\bgaping wound\b", "dark tear in the cloth"),
+    (r"\bwounds?\b", "dark mark"),
+    (r"\bguts?\b", "tangled red ribbons"),
+    (r"\bentrails\b", "tangled red ribbons"),
+
+    # ── Death & bodies ──
     (r"\bsevered\b", "broken"),
-    (r"\bcorpse\b", "motionless figure"),
+    (r"\bdecapitat(?:e|ed|ion)\b", "shadowed and faceless"),
+    (r"\bmutilat(?:e|ed|ion)\b", "broken"),
+    (r"\bcorpses?\b", "motionless figure"),
+    (r"\bdead bod(?:y|ies)\b", "motionless figure"),
     (r"\bbody lying\b", "resting figure"),
-    (r"\bdead\b", "silent"),
-    (r"\bdeath\b", "sleep"),
-    (r"\bpregnant beneath her velvet gown\b", "wearing a full velvet gown"),
-    (r"\bpregnant\b", "wearing a full velvet gown"),
-    (r"\brounded belly under the rich velvet fabric\b", "rich velvet gown arranged in soft folds"),
-    (r"\bbelly\b", "gown"),
-    (r"\bhands resting passively on it\b", "hands resting calmly on the velvet fabric"),
-    (r"\bdisheveled\b", "rumpled"),
-    (r"\bnewborn baby nursing from Talia's breast while she sleeps\b", "newborn baby resting safely beside adult Talia while she sleeps"),
-    (r"\bnewborn baby nursing from adult Talia's breast while she sleeps\b", "newborn baby resting safely beside adult Talia while she sleeps"),
-    (r"\bnewborn baby nursing from adult Talia's blanket while she sleeps\b", "newborn baby resting safely beside adult Talia while she sleeps"),
-    (r"\bnursing from Talia's breast\b", "resting safely beside adult Talia"),
-    (r"\bnursing infants\b", "newborn twins"),
-    (r"\bbreast\b", "blanket"),
-    (r"\bsucking on Talia's finger\b", "gently holding adult Talia's hand"),
-    (r"\bBaby Moon sucking on adult Talia's finger\b", "Baby Moon gently holding adult Talia's hand"),
-    (r"\btiny flax splinter\b", "tiny golden flax fiber"),
-    (r"\binfant's tongue\b", "fold of golden cloth"),
-    (r"\binfant's small hand against her skin\b", "infant's small hand on a blanket"),
-    (r"\btongue\b", "golden cloth"),
-    (r"\bmouth\b", "expression"),
-    (r"\bscream of horror\b", "startled gasp"),
-    (r"\bhorror\b", "shock"),
-    (r"\bnewborn twins crying\b", "newborn twins resting safely"),
-    (r"\bdrag a screaming Talia away\b", "escort adult Talia away in a tense court scene"),
-    (r"\bCook holding the twins as soldiers escort adult Talia away\b", "Cook keeping the twins safely aside while guards escort adult Talia through the room"),
-    (r"\bshe reaches for them desperately\b", "she looks back with worry"),
-    (r"\bscreaming\b", "distressed"),
-    (r"\bguards holding her arms\b", "guards standing nearby"),
-    (r"\bbound with ropes\b", "surrounded by guards"),
-    (r"\biron chains\b", "shadowed court garments"),
+    (r"\brotting\b", "withered"),
+    (r"\bdecaying\b", "withered"),
+    (r"\bdead\b", "still and silent"),
+    (r"\bdeath\b", "eternal stillness"),
+    (r"\bdying\b", "fading"),
+
+    # ── Weapons & violence ──
+    (r"\bstabb(?:ing|ed)\b", "reaching dramatically toward"),
+    (r"\bslitting\b", "drawing a line across"),
+    (r"\bbloody (?:knife|blade|dagger|sword|axe)\b", "gleaming ceremonial blade"),
+    (r"\b(?:hunting|carving|butcher'?s?) knife\b", "small ceremonial blade"),
+    (r"\bcleaver\b", "ceremonial blade"),
+
+    # ── Restraint / captivity ──
+    (r"\bbound (?:with|in) (?:ropes?|chains?)\b", "surrounded by guards"),
+    (r"\btied to (?:a |the )?(?:burning |flaming )?(?:stake|post|tree|chair|pyre)\b", "standing before a wooden post"),
+    (r"\btied (?:up|down)\b", "standing"),
+    (r"\btied to\b", "standing before"),
+    (r"\biron chains\b", "heavy dark garments"),
     (r"\bchains\b", "dark ribbons"),
-    (r"\bcarving knives\b", "copper utensils"),
-    (r"\bhunting knife\b", "small ceremonial blade"),
-    (r"\bsmall ceremonial blade\b", "small ceremonial tool"),
-    (r"\bcutting the ropes binding\b", "loosening the ceremonial ribbons around"),
-    (r"\baround Talia to a wooden stake\b", "near adult Talia beside a wooden post"),
-    (r"\baround adult Talia to a wooden stake\b", "near adult Talia beside a wooden post"),
-    (r"\bloosening the ceremonial ribbons around adult Talia to a wooden wooden post\b", "loosening ceremonial ribbons near adult Talia beside a wooden post"),
-    (r"\baround adult Talia to a wooden wooden post\b", "near adult Talia beside a wooden post"),
+    (r"\bshackl(?:e|es|ed)\b", "dark ribbons"),
+    (r"\bnoose\b", "looped rope ornament"),
+
+    # ── Fire / burning ──
+    (r"\bburned alive\b", "encircled by distant firelight"),
+    (r"\bburning at the stake\b", "standing before a firelit platform"),
     (r"\bwooden pyre\b", "ceremonial wooden platform"),
     (r"\bpyre\b", "ceremonial platform"),
-    (r"\bflames nearby catching the edge of her velvet dress\b", "firelight glowing at a safe distance"),
-    (r"\bflames beginning around her feet\b", "firelight glowing on the stones nearby"),
-    (r"\bhair catching fire\b", "hair lit by orange firelight"),
-    (r"\bwatching the burning\b", "watching the firelit courtyard"),
-    (r"\badult Talia watching the firelit courtyard, holding both twins close to her chest\b", "adult Talia standing safely away from the firelit courtyard with both twins nearby"),
-    (r"\bholding both twins close to her chest\b", "with both twins nearby at a safe distance"),
-    (r"\bburning\b", "firelit courtyard scene"),
-    (r"\bthe flames firelit courtyard scene brightly\b", "warm firelight glowing"),
-    (r"\bmeat on his plate\b", "covered dish on his plate"),
-    (r"\btied to the wooden stake\b", "standing before a wooden post"),
-    (r"\btied to\b", "standing beside"),
+    (r"\bengulfed in flames\b", "lit by warm orange firelight"),
+    (r"\bburning\b", "glowing with warm firelight"),
+    (r"\bset (?:on|a)?\s*fire\b", "lit by warm firelight"),
     (r"\bstake\b", "wooden post"),
-    (r"\bcannibalism\b", "cruel banquet intrigue"),
-    (r"\bcannibal\b", "cruel banquet"),
-    (r"\broasted meat\b", "covered banquet dish"),
-    (r"\bsmall children are concealed\b", "children are hidden safely"),
+
+    # ── Torture / cruelty ──
+    (r"\btortur(?:e|ed|ing)\b", "facing a grim ordeal"),
+    (r"\bscream(?:ing)? of horror\b", "a startled cry"),
+    (r"\bscreaming\b", "crying out"),
+    (r"\bhorror\b", "dread"),
+
+    # ── Sexual content / nudity ──
+    (r"\bnaked\b", "draped in flowing cloth"),
+    (r"\bnude\b", "draped in flowing cloth"),
+    (r"\bbare(?:-| )(?:breasts?|chest|skin)\b", "draped in flowing cloth"),
+    (r"\bbreasts?\b", "draped bodice"),
+    (r"\bcleavage\b", "draped bodice"),
+    (r"\bpregnant\b", "wearing a full flowing gown"),
+    (r"\bnursing\b", "cradling"),
+    (r"\bsuckling\b", "cradling"),
+
+    # ── Cannibalism / consumption ──
+    (r"\bcannibal(?:ism)?\b", "grim symbolic feast"),
+    (r"\broasted (?:human )?(?:flesh|meat|body)\b", "covered banquet dish"),
+    (r"\bhuman flesh\b", "covered banquet dish"),
+    (r"\beating (?:a |the )?(?:child|children|baby|infant|person|man|woman)\b", "a grim symbolic feast"),
+
+    # ── Children in danger ──
+    (r"\bchild(?:ren)? in danger\b", "children depicted safely"),
+    (r"\b(?:dead|murdered|harmed) child(?:ren)?\b", "a sleeping child"),
 ]
 
 
@@ -617,15 +629,6 @@ def _make_gpt_image_safe_text(text: str) -> str:
     safe_text = _strip_gpt_image_style_boilerplate(text)
     for pattern, replacement in GPT_IMAGE_SAFETY_REPLACEMENTS:
         safe_text = re.sub(pattern, replacement, safe_text, flags=re.IGNORECASE)
-
-    if re.search(r"\bTalia\b", safe_text, flags=re.IGNORECASE) and not re.search(
-        r"\badult Talia\b|\bLord Talia\b|\bnewborn\b|\binfant\b|\bbaby\b",
-        safe_text,
-        flags=re.IGNORECASE,
-    ):
-        safe_text = re.sub(r"\bTalia\b", "adult Talia", safe_text, count=1, flags=re.IGNORECASE)
-
-    safe_text = re.sub(r"\bLord adult Talia\b", "Lord Talia", safe_text, flags=re.IGNORECASE)
     return _normalize_prompt_text(safe_text)
 
 
@@ -650,31 +653,37 @@ def _build_gpt_image_prompt(
         if descriptions:
             style_parts.append("Visual style references: " + "; ".join(descriptions))
 
-    style_text = ", ".join(style_parts) or "cinematic storybook illustration"
+    # The style text carries the per-story visual "feel" (see
+    # `_resolve_image_style_request` in main.py, which prefers the script's
+    # story-derived `visual_style`). It is intentionally NOT run through the
+    # boilerplate stripper — that would erase the very mood words that give each
+    # story its own look. Only the scene description is stripped, since scene
+    # prompts are meant to be pure description with no style boilerplate.
+    style_text = ", ".join(style_parts) or "atmospheric storybook illustration"
     scene_text = _strip_gpt_image_style_boilerplate(prompt)
 
     if safety_mode:
         scene_text = _make_gpt_image_safe_text(scene_text)
         style_text = _make_gpt_image_safe_text(style_text)
         return (
-            "Create a cinematic 16:9 storybook illustration for an adult folklore video.\n"
+            "Illustrate this scene as a 16:9 frame for an adult folklore story video, "
+            "in the visual style described below.\n"
             f"Scene: {scene_text}\n"
             f"Style: {style_text}\n"
             "Keep the visual symbolic and non-graphic: no gore, no visible injury, "
             "no sexual content, no intimate contact, no restraint, no torture, "
-            "no explicit burning, and no minors in danger. Use atmospheric lighting, "
-            "strong composition, rich detail, and no captions, watermarks, UI elements, "
-            "logos, or unintended text."
+            "no explicit burning, and no minors in danger. Honor the style's mood, "
+            "with strong composition, rich detail, and no captions, watermarks, "
+            "UI elements, logos, or unintended text."
         )
 
-    style_text = _strip_gpt_image_style_boilerplate(style_text)
-
     return (
-        "Create a cinematic 16:9 illustration for an adult folklore story video.\n"
+        "Illustrate this scene as a 16:9 frame for an adult folklore story video, "
+        "in the visual style described below.\n"
         f"Scene: {scene_text}\n"
         f"Style: {style_text}\n"
-        "Use atmospheric lighting, strong composition, rich detail, and no captions, "
-        "watermarks, UI elements, logos, or unintended text."
+        "Honor the style's mood and palette, with strong composition and rich "
+        "detail, and no captions, watermarks, UI elements, logos, or unintended text."
     )
 
 

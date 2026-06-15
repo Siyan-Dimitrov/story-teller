@@ -1,227 +1,264 @@
-"""AnimateDiff video clip generation via ComfyUI API.
+"""Image-to-video clip generation via Replicate.
 
-Takes an existing still image and generates a short animated clip using
-SD1.5 + AnimateDiff v3 motion module through ComfyUI's API. The source image
-is used as img2img input with low denoise to preserve the SDXL art style
-while adding character motion.
+Replaces the legacy ComfyUI/AnimateDiff path. Takes an existing still image
+and asks a cloud I2V model (Wan 2.6 I2V Flash by default) to add subtle
+motion — hair sway, cloth ripple, fire flicker, character breathing — while
+preserving the input image's style and composition.
+
+The output is rendered to MP4 by the model, then extracted to a directory of
+PNG frames so `video_assembly._animatediff_clip` can consume it unchanged.
 """
 
 import asyncio
+import base64
 import logging
+import subprocess
 import time
 import uuid
 from io import BytesIO
 from pathlib import Path
 
 import httpx
-from PIL import Image as PILImage
 
 from . import config
 
 log = logging.getLogger(__name__)
 
-# ── Preset parameters ───────────────────────────────────────
-
-ANIMATEDIFF_PRESETS = {
+# ── Preset → motion-prompt mapping ──────────────────────────
+# The LLM classifier in animation.py picks one of these preset names per
+# image. Each preset translates to a short motion description appended to
+# the scene's visual prompt before being sent to the I2V model.
+I2V_PRESETS = {
     "animatediff_subtle": {
-        "denoise": 0.40,
-        "num_frames": 16,
-        "description": "Gentle motion — hair, cloth, subtle breathing",
+        "motion": "very gentle motion, subtle breathing, faint hair sway, soft cloth ripple, atmospheric haze drifting",
+        "description": "Subtle ambient motion — for calm, intimate moments",
     },
     "animatediff_moderate": {
-        "denoise": 0.50,
-        "num_frames": 16,
-        "description": "Moderate motion — gestures, walking, flowing elements",
+        "motion": "moderate motion, gestures, walking, flowing hair and clothing, candle flame flicker",
+        "description": "Moderate motion — for active character scenes",
     },
     "animatediff_dramatic": {
-        "denoise": 0.60,
-        "num_frames": 24,
-        "description": "Strong motion — action, magic effects, dramatic movement",
+        "motion": "strong motion, dramatic action, magic effects, swirling smoke and embers, fast flowing elements",
+        "description": "Dramatic motion — for climactic or magical scenes",
     },
 }
 
-VALID_ANIMATEDIFF_MOTIONS = set(ANIMATEDIFF_PRESETS.keys())
+VALID_ANIMATEDIFF_MOTIONS = set(I2V_PRESETS.keys())
+
+NEGATIVE_PROMPT = (
+    "blurry, low quality, jpeg artifacts, deformed, ugly, "
+    "static, no motion, frozen still image, watermark, text"
+)
+
 
 # ── Availability check ──────────────────────────────────────
 
-_animatediff_available: bool | None = None  # None = not yet tested
+_i2v_available: bool | None = None  # None = not yet tested
 
 
 async def check_animatediff_available() -> bool:
-    """Check if AnimateDiff nodes and required models are available in ComfyUI."""
-    global _animatediff_available
+    """Check whether I2V is configured. Kept as `check_animatediff_available`
+    so existing callers in `animation.py` don't change.
+    """
+    global _i2v_available
 
-    if _animatediff_available is not None:
-        return _animatediff_available
+    if _i2v_available is not None:
+        return _i2v_available
 
-    # Check ComfyUI is running
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(f"{config.COMFYUI_URL}/object_info/ADE_AnimateDiffLoaderGen1")
-            if resp.status_code != 200:
-                log.warning("[AnimateDiff] ADE_AnimateDiffLoaderGen1 node not found in ComfyUI")
-                _animatediff_available = False
-                return False
-    except Exception as e:
-        log.warning(f"[AnimateDiff] Cannot reach ComfyUI: {e}")
-        _animatediff_available = False
+    if not config.I2V_ENABLED:
+        log.info("[I2V] Disabled via config.I2V_ENABLED")
+        _i2v_available = False
         return False
 
-    # Check SD1.5 checkpoint exists
-    sd15_path = Path(config.ANIMATEDIFF_SD15_CHECKPOINT)
-    if not sd15_path.is_absolute():
-        # Check ComfyUI models directory
-        comfyui_dir = Path(config.COMFYUI_URL.replace("http://", "").replace("https://", ""))
-        # We can't check files on the ComfyUI host easily, so we'll trust the config
-        pass
+    if not config.REPLICATE_API_TOKEN:
+        log.warning("[I2V] REPLICATE_API_TOKEN not set — I2V unavailable")
+        _i2v_available = False
+        return False
 
-    log.info("[AnimateDiff] Nodes available in ComfyUI")
-    _animatediff_available = True
+    log.info(f"[I2V] Available via Replicate model: {config.REPLICATE_I2V_MODEL}")
+    _i2v_available = True
     return True
 
 
 def reset_availability():
-    """Reset the availability cache (e.g., after installing nodes)."""
-    global _animatediff_available
-    _animatediff_available = None
+    global _i2v_available
+    _i2v_available = None
 
 
-# ── ComfyUI workflow builder ────────────────────────────────
+# ── Frame extraction ────────────────────────────────────────
 
-def _build_animatediff_workflow(
-    uploaded_image_name: str,
-    prompt_text: str,
-    negative_text: str,
-    num_frames: int = 16,
-    denoise: float = 0.45,
-    seed: int = 0,
-    fps: float = 8.0,
-) -> dict:
-    """Build a ComfyUI workflow for AnimateDiff img2img.
+def _extract_frames_from_mp4(mp4_path: Path, clip_dir: Path, fps: int) -> int:
+    """Use ffmpeg to extract PNG frames at `fps` from an MP4 into clip_dir.
 
-    Workflow graph:
-      1  -> LoadImage (the existing scene image)
-      2  -> ImageScale (downscale to AnimateDiff resolution)
-      3  -> CheckpointLoaderSimple (SD1.5) -> MODEL, CLIP, VAE
-      4  -> ADE_AnimateDiffLoaderGen1 (takes MODEL, applies motion module) -> MODEL
-      5  -> VAEEncode (encode init image to latent)
-      6  -> RepeatLatentBatch (repeat for num_frames)
-      7  -> CLIPTextEncode (positive)
-      8  -> CLIPTextEncode (negative)
-      9  -> KSampler (img2img with AnimateDiff model)
-      10 -> VAEDecode (decode video latents to frames)
-      11 -> SaveImage (save individual frames)
+    Returns the number of frames written. Returns 0 on failure.
     """
-    ad_width = config.ANIMATEDIFF_WIDTH
-    ad_height = config.ANIMATEDIFF_HEIGHT
+    clip_dir.mkdir(parents=True, exist_ok=True)
+    pattern = str(clip_dir / "frame_%04d.png")
 
-    workflow = {
-        # Load the source image
-        "1": {
-            "class_type": "LoadImage",
-            "inputs": {"image": uploaded_image_name},
-        },
-        # Downscale to AnimateDiff resolution
-        "2": {
-            "class_type": "ImageScale",
-            "inputs": {
-                "image": ["1", 0],
-                "upscale_method": "lanczos",
-                "width": ad_width,
-                "height": ad_height,
-                "crop": "center",
-            },
-        },
-        # SD1.5 checkpoint
-        "3": {
-            "class_type": "CheckpointLoaderSimple",
-            "inputs": {"ckpt_name": config.ANIMATEDIFF_SD15_CHECKPOINT},
-        },
-        # AnimateDiff: takes MODEL from checkpoint, applies motion module
-        "4": {
-            "class_type": "ADE_AnimateDiffLoaderGen1",
-            "inputs": {
-                "model": ["3", 0],
-                "model_name": config.ANIMATEDIFF_MOTION_MODULE,
-                "beta_schedule": "autoselect",
-            },
-        },
-        # VAE Encode init image (single frame)
-        "5": {
-            "class_type": "VAEEncode",
-            "inputs": {
-                "pixels": ["2", 0],
-                "vae": ["3", 2],
-            },
-        },
-        # Repeat latent for num_frames
-        "6": {
-            "class_type": "RepeatLatentBatch",
-            "inputs": {
-                "samples": ["5", 0],
-                "amount": num_frames,
-            },
-        },
-        # CLIP text encode - positive
-        "7": {
-            "class_type": "CLIPTextEncode",
-            "inputs": {
-                "text": prompt_text,
-                "clip": ["3", 1],
-            },
-        },
-        # CLIP text encode - negative
-        "8": {
-            "class_type": "CLIPTextEncode",
-            "inputs": {
-                "text": negative_text,
-                "clip": ["3", 1],
-            },
-        },
-        # KSampler - img2img with AnimateDiff model
-        "9": {
-            "class_type": "KSampler",
-            "inputs": {
-                "seed": seed,
-                "steps": 20,
-                "cfg": 7.0,
-                "sampler_name": "euler_ancestral",
-                "scheduler": "normal",
-                "denoise": denoise,
-                "model": ["4", 0],
-                "positive": ["7", 0],
-                "negative": ["8", 0],
-                "latent_image": ["6", 0],
-            },
-        },
-        # VAE Decode
-        "10": {
-            "class_type": "VAEDecode",
-            "inputs": {
-                "samples": ["9", 0],
-                "vae": ["3", 2],
-            },
-        },
-        # Save frames as images
-        "11": {
-            "class_type": "SaveImage",
-            "inputs": {
-                "images": ["10", 0],
-                "filename_prefix": f"st_animdiff_{seed}",
-            },
-        },
-    }
+    try:
+        result = subprocess.run(
+            [
+                config.FFMPEG_PATH, "-y",
+                "-i", str(mp4_path),
+                "-vf", f"fps={fps}",
+                "-q:v", "2",
+                pattern,
+            ],
+            capture_output=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            log.error(
+                f"[I2V] ffmpeg frame extraction failed (rc={result.returncode}): "
+                f"{result.stderr.decode('utf-8', errors='replace')[-400:]}"
+            )
+            return 0
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        log.error(f"[I2V] ffmpeg unavailable/timed out: {e}")
+        return 0
 
-    return workflow
+    frames = sorted(clip_dir.glob("frame_*.png"))
+    return len(frames)
 
 
-NEGATIVE_PROMPT = (
-    "blurry, low quality, text, watermark, signature, jpeg artifacts, "
-    "deformed, ugly, static, no motion, frozen, still image"
-)
+def _image_to_data_url(image_path: Path, max_side: int = 1280, max_bytes: int = 900_000) -> str:
+    """Encode an image as a compact JPEG ``data:`` URL for the I2V `image` input.
+
+    Replicate only accepts inline data URIs up to ~1 MB; a larger one makes the
+    model container fail to fetch the image (the "HTTP Error. Checking again"
+    loop) and return E006 "input was invalid". A raw 16:9 PNG is ~2.5 MB as a
+    data URL, so we downscale the long edge to ``max_side`` and re-encode to
+    JPEG, dropping quality until the payload fits under ``max_bytes``. JPEG also
+    sidesteps Wan's rejection of PNGs with an alpha channel.
+    """
+    from io import BytesIO
+    from PIL import Image as _PILImage
+
+    img = _PILImage.open(image_path).convert("RGB")
+    w, h = img.size
+    if max(w, h) > max_side:
+        scale = max_side / max(w, h)
+        img = img.resize((max(1, round(w * scale)), max(1, round(h * scale))), _PILImage.LANCZOS)
+
+    for quality in (90, 85, 80, 72, 65, 55):
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=quality, optimize=True)
+        data = buf.getvalue()
+        if len(data) <= max_bytes:
+            break
+
+    b64 = base64.b64encode(data).decode("ascii")
+    log.info(
+        "[I2V] encoded %s -> JPEG data URL (%d px long edge, q=%d, %.0f KB)",
+        image_path.name, max(img.size), quality, len(data) / 1024,
+    )
+    return f"data:image/jpeg;base64,{b64}"
+
+
+def _extract_video_url(output) -> str | None:
+    """Pull a usable video URL out of whatever shape ``replicate.run`` returns.
+
+    replicate>=1.0 returns ``FileOutput`` objects (``str(x) == x.url``), but a
+    model may return a scalar, a list, a dict (``{"video": ...}``), or an
+    iterator. This normalises all of them to a single URL string.
+    """
+    # FileOutput and most scalars expose an explicit .url attribute.
+    url = getattr(output, "url", None)
+    if isinstance(url, str) and url:
+        return url
+    if isinstance(output, str):
+        return output or None
+    if isinstance(output, dict):
+        for key in ("video", "output", "mp4", "url", "file"):
+            if output.get(key):
+                return _extract_video_url(output[key])
+        return None
+    if isinstance(output, (list, tuple)):
+        return _extract_video_url(output[0]) if output else None
+    # Last resort: an iterator/generator → take the first item.
+    try:
+        first = next(iter(output))
+        if first is not output:
+            return _extract_video_url(first)
+    except (TypeError, StopIteration):
+        pass
+    s = str(output)
+    return s if s.startswith(("http://", "https://", "data:")) else None
+
+
+def _describe_exception(e: Exception) -> str:
+    """Build a detailed, single-string description of a failed I2V call.
+
+    Surfaces the server-side Replicate prediction error/logs (the real reason a
+    generation failed) and any HTTP response status, which the bare exception
+    message hides.
+    """
+    detail = f"{type(e).__name__}: {e}"
+
+    # replicate.exceptions.ModelError carries the failed prediction, whose
+    # `.error` and `.logs` hold the real server-side reason.
+    prediction = getattr(e, "prediction", None)
+    if prediction is not None:
+        pstatus = getattr(prediction, "status", None)
+        perr = getattr(prediction, "error", None)
+        plogs = getattr(prediction, "logs", None)
+        detail += f" | prediction.status={pstatus} error={perr!r}"
+        if plogs:
+            detail += f"\n--- replicate logs (tail) ---\n{str(plogs)[-1500:]}"
+
+    resp = getattr(e, "response", None)
+    if resp is not None:
+        detail += f" | http_status={getattr(resp, 'status_code', '?')}"
+
+    return detail
 
 
 # ── Core generation function ────────────────────────────────
+
+def _build_i2v_input(model: str, image_data_url: str, prompt: str, seed: int) -> dict:
+    """Build the model-specific Replicate input dict for the configured I2V model.
+
+    Different I2V models use different parameter names and enums, so the shape
+    is selected by model family. ``image_data_url`` is a compact JPEG ``data:``
+    URL (see ``_image_to_data_url``).
+    """
+    m = model.lower()
+    duration = config.I2V_DURATION_SECONDS
+
+    if "kling" in m:
+        # kwaivgi/kling-v2.1: requires `start_image` + `prompt`. There is NO
+        # seed / cfg_scale / aspect_ratio / resolution param — quality is set
+        # via `mode` (standard=720p, pro=1080p) and duration must be 5 or 10.
+        return {
+            "start_image": image_data_url,
+            "prompt": prompt,
+            "negative_prompt": NEGATIVE_PROMPT,
+            "duration": 10 if duration >= 10 else 5,
+            "mode": "pro" if config.I2V_RESOLUTION == "1080p" else "standard",
+        }
+
+    # Default: wan-video/wan2.x family.
+    return {
+        "image": image_data_url,
+        "prompt": prompt,
+        "negative_prompt": NEGATIVE_PROMPT,
+        "duration": duration,
+        "resolution": config.I2V_RESOLUTION,
+        "seed": seed,
+        # The model defaults audio_enabled=true, whose post-generation audio
+        # step has been observed to fail (E006). We add our own audio later.
+        "audio_enabled": config.I2V_AUDIO_ENABLED,
+        "enable_prompt_expansion": config.I2V_PROMPT_EXPANSION,
+    }
+
+
+def _build_motion_prompt(scene_prompt: str, motion_preset: str, style_prompt: str) -> str:
+    """Build the I2V text prompt: style + scene + motion description."""
+    preset = I2V_PRESETS.get(motion_preset, I2V_PRESETS["animatediff_subtle"])
+    motion_desc = preset["motion"]
+    parts = [p.strip() for p in (style_prompt, scene_prompt, motion_desc) if p and p.strip()]
+    return ", ".join(parts)
+
 
 async def generate_animatediff_clip(
     image_path: Path,
@@ -232,140 +269,95 @@ async def generate_animatediff_clip(
     motion_preset: str = "animatediff_subtle",
     style_prompt: str = "dark fairy tale, gothic storybook art, atmospheric, moody",
 ) -> Path | None:
-    """Generate an AnimateDiff video clip from an existing still image.
+    """Generate a motion clip from a still image via Replicate I2V.
 
-    Returns path to a directory of output frames, or None on failure.
+    Kept under its old name so `animation.py` and `video_assembly.py` don't
+    need to be rewired. Returns the path to a directory of PNG frames, or
+    None on failure (which the caller treats as a depthflow fallback).
     """
-    preset = ANIMATEDIFF_PRESETS.get(motion_preset, ANIMATEDIFF_PRESETS["animatediff_subtle"])
-    denoise = preset["denoise"]
-    num_frames = preset["num_frames"]
+    import replicate as _replicate
 
-    seed = int(time.time() * 1000) % (2**32) + scene_index * 100 + img_index
-    full_prompt = f"{style_prompt}, {prompt}, animated, motion" if style_prompt else prompt
+    if not config.REPLICATE_API_TOKEN:
+        log.error("[I2V] REPLICATE_API_TOKEN missing — cannot run I2V")
+        return None
 
-    # Create output directory for this clip's frames
+    motion_prompt = _build_motion_prompt(prompt, motion_preset, style_prompt)
+
     clip_dir = output_dir / f"animatediff_s{scene_index:04d}_i{img_index}"
     clip_dir.mkdir(parents=True, exist_ok=True)
 
-    filename = Path(image_path).name
-    client_id = uuid.uuid4().hex[:8]
-
     log.info(
-        f"[AnimateDiff] Generating clip for scene {scene_index} img {img_index}: "
-        f"preset={motion_preset}, denoise={denoise}, frames={num_frames}"
+        f"[I2V] Scene {scene_index} img {img_index}: model={config.REPLICATE_I2V_MODEL}, "
+        f"preset={motion_preset}, duration={config.I2V_DURATION_SECONDS}s, "
+        f"resolution={config.I2V_RESOLUTION}"
     )
 
     try:
-        async with httpx.AsyncClient(timeout=config.ANIMATEDIFF_TIMEOUT_SECONDS) as client:
-            # Step 1: Upload image to ComfyUI
-            with open(image_path, "rb") as f:
-                upload_resp = await client.post(
-                    f"{config.COMFYUI_URL}/upload/image",
-                    files={"image": (filename, f, "image/png")},
-                    data={"overwrite": "true"},
-                )
-            if upload_resp.status_code != 200:
-                log.error(f"[AnimateDiff] Upload failed: HTTP {upload_resp.status_code}")
-                return None
+        seed = int(time.time() * 1000) % (2**32) + scene_index * 100 + img_index
 
-            uploaded = upload_resp.json()
-            uploaded_name = uploaded.get("name", filename)
+        # Build a compact JPEG data URL: it carries an explicit MIME type (Wan
+        # rejects uploaded files whose URL has no extension) AND stays under
+        # Replicate's ~1 MB inline-data-URI limit (an oversized one causes the
+        # container's image fetch to fail with E006 "input was invalid").
+        data_url = _image_to_data_url(image_path)
 
-            # Step 2: Build and queue workflow
-            workflow = _build_animatediff_workflow(
-                uploaded_image_name=uploaded_name,
-                prompt_text=full_prompt,
-                negative_text=NEGATIVE_PROMPT,
-                num_frames=num_frames,
-                denoise=denoise,
-                seed=seed,
+        inp = _build_i2v_input(config.REPLICATE_I2V_MODEL, data_url, motion_prompt, seed)
+
+        loop = asyncio.get_event_loop()
+        output = await loop.run_in_executor(
+            None,
+            lambda: _replicate.run(config.REPLICATE_I2V_MODEL, input=inp),
+        )
+
+        video_url = _extract_video_url(output)
+        if not video_url:
+            raise RuntimeError(
+                "could not extract a video URL from replicate output "
+                f"(type={type(output).__name__}, repr={output!r}"[:300] + ")"
             )
+        log.info(f"[I2V] Scene {scene_index} img {img_index}: downloading {video_url}")
 
-            resp = await client.post(
-                f"{config.COMFYUI_URL}/prompt",
-                json={"prompt": workflow, "client_id": client_id},
+        async with httpx.AsyncClient(timeout=config.I2V_TIMEOUT_SECONDS) as client:
+            resp = await client.get(video_url)
+            resp.raise_for_status()
+            mp4_path = clip_dir / "source.mp4"
+            mp4_path.write_bytes(resp.content)
+
+        frame_count = _extract_frames_from_mp4(mp4_path, clip_dir, config.I2V_OUTPUT_FPS)
+        if frame_count == 0:
+            size = mp4_path.stat().st_size if mp4_path.exists() else 0
+            log.error(
+                "[I2V] Scene %s img %s: ffmpeg extracted 0 frames from %d-byte mp4 "
+                "(kept %s for inspection)",
+                scene_index, img_index, size, mp4_path.name,
             )
-            if resp.status_code != 200:
-                body = resp.text[:1000]
-                log.error(f"[AnimateDiff] Prompt rejected: HTTP {resp.status_code} — {body}")
-                return None
-            resp_data = resp.json()
-
-            # Check for workflow errors (node_errors={} is normal/success)
-            node_errors = resp_data.get("node_errors", {})
-            if "error" in resp_data or node_errors:
-                err_msg = resp_data.get("error", {}).get("message", "unknown")
-                log.error(f"[AnimateDiff] Workflow error: {err_msg}, nodes: {node_errors}")
-                return None
-
-            prompt_id = resp_data["prompt_id"]
-            log.info(f"[AnimateDiff] Queued prompt {prompt_id}, polling...")
-
-            # Step 3: Poll for completion (AnimateDiff is slow — up to 5 minutes)
-            for poll_i in range(int(config.ANIMATEDIFF_TIMEOUT_SECONDS)):
-                hist_resp = await client.get(f"{config.COMFYUI_URL}/history/{prompt_id}")
-                if hist_resp.status_code != 200:
-                    await asyncio.sleep(2.0)
-                    continue
-
-                history = hist_resp.json()
-                if prompt_id not in history:
-                    await asyncio.sleep(2.0)
-                    continue
-
-                # Check for execution error
-                status_info = history[prompt_id].get("status", {})
-                if status_info.get("status_str") == "error":
-                    msgs = status_info.get("messages", [])
-                    log.error(f"[AnimateDiff] Execution error: {msgs}")
-                    return None
-
-                outputs = history[prompt_id].get("outputs", {})
-                for node_id, node_out in outputs.items():
-                    if "images" in node_out:
-                        # Download all frames
-                        images_info = node_out["images"]
-                        log.info(f"[AnimateDiff] Got {len(images_info)} frames, downloading...")
-
-                        for frame_i, img_info in enumerate(images_info):
-                            params = {
-                                "filename": img_info["filename"],
-                                "subfolder": img_info.get("subfolder", ""),
-                                "type": img_info.get("type", "output"),
-                            }
-                            img_resp = await client.get(
-                                f"{config.COMFYUI_URL}/view", params=params
-                            )
-                            if img_resp.status_code != 200:
-                                log.warning(f"[AnimateDiff] Failed to download frame {frame_i}")
-                                continue
-
-                            # Save frame and upscale to target resolution
-                            frame_pil = PILImage.open(BytesIO(img_resp.content)).convert("RGB")
-                            if frame_pil.size != (config.VIDEO_WIDTH, config.VIDEO_HEIGHT):
-                                frame_pil = frame_pil.resize(
-                                    (config.VIDEO_WIDTH, config.VIDEO_HEIGHT),
-                                    PILImage.LANCZOS,
-                                )
-                            frame_path = clip_dir / f"frame_{frame_i:04d}.png"
-                            frame_pil.save(str(frame_path), "PNG")
-
-                        log.info(
-                            f"[AnimateDiff] Saved {len(images_info)} frames to {clip_dir}"
-                        )
-                        return clip_dir
-
-                log.warning(f"[AnimateDiff] No image output in history for {prompt_id}")
-                return None
-
-            log.error(f"[AnimateDiff] Timed out waiting for {prompt_id}")
+            generate_animatediff_clip.last_error = (
+                f"ffmpeg extracted 0 frames from {size}-byte mp4"
+            )
             return None
 
-    except httpx.ConnectError:
-        log.error(f"[AnimateDiff] Cannot connect to ComfyUI at {config.COMFYUI_URL}")
-        return None
+        # Delete the source mp4 to save disk only when configured to; otherwise
+        # keep it so successful clips can still be inspected/debugged.
+        if config.I2V_DELETE_SOURCE_MP4:
+            try:
+                mp4_path.unlink()
+            except OSError:
+                pass
+
+        log.info(
+            f"[I2V] Scene {scene_index} img {img_index}: {frame_count} frames saved to {clip_dir.name}"
+        )
+        generate_animatediff_clip.last_error = None
+        return clip_dir
+
     except Exception as e:
-        log.error(f"[AnimateDiff] Error: {type(e).__name__}: {e}")
+        detail = _describe_exception(e)
+        log.error(
+            "[I2V] Scene %s img %s FAILED: %s",
+            scene_index, img_index, detail, exc_info=True,
+        )
+        # Breadcrumb so the caller can surface why the clip fell back to parallax.
+        generate_animatediff_clip.last_error = detail
         return None
 
 
@@ -375,79 +367,114 @@ async def generate_all_animatediff_clips(
     style_prompt: str = "dark fairy tale, gothic storybook art, atmospheric, moody",
     progress_cb=None,
 ) -> list[dict]:
-    """Generate AnimateDiff clips for all images classified as 'animatediff'.
+    """Generate I2V clips for all images classified as 'animatediff'.
 
-    Updates scenes in-place with animatediff_clip_paths.
+    Updates scenes in place with `animatediff_clip_paths`. Falls back to
+    depthflow for any image whose generation fails or that exceeds the
+    per-project cap.
     """
     animatediff_dir = project_dir / "animatediff_clips"
     animatediff_dir.mkdir(exist_ok=True)
 
-    # Count total animatediff images for progress
-    total_ad = 0
-    for scene in scenes:
-        anim_types = scene.get("animation_types") or []
-        for t in anim_types:
-            if t == "animatediff":
-                total_ad += 1
-
-    if total_ad == 0:
-        log.info("[AnimateDiff] No images classified as animatediff, skipping")
-        return scenes
-
-    log.info(f"[AnimateDiff] Generating {total_ad} clips...")
-    done_ad = 0
-
-    for scene in scenes:
-        idx = scene.get("index", 0)
-        image_paths = scene.get("image_paths") or []
+    targets: list[tuple[int, int, str, str]] = []  # (scene_idx, img_idx, rel_path, motion_preset)
+    for si, scene in enumerate(scenes):
         anim_types = scene.get("animation_types") or []
         motion_presets = scene.get("motion_presets") or []
+        image_paths = scene.get("image_paths") or []
         scene.setdefault("animatediff_clip_paths", [None] * len(image_paths))
 
         for img_idx, rel_path in enumerate(image_paths):
             anim_type = anim_types[img_idx] if img_idx < len(anim_types) else "depthflow"
             if anim_type != "animatediff":
                 continue
+            preset = (
+                motion_presets[img_idx] if img_idx < len(motion_presets) else "animatediff_subtle"
+            )
+            targets.append((si, img_idx, rel_path, preset))
 
-            preset = motion_presets[img_idx] if img_idx < len(motion_presets) else "animatediff_subtle"
-            abs_path = project_dir / rel_path
+    if not targets:
+        log.info("[I2V] No images classified as animatediff, skipping")
+        return scenes
 
-            if not abs_path.exists():
-                log.warning(f"[AnimateDiff] Image not found: {abs_path}")
-                continue
+    # Apply budget cap: keep first N targets, downgrade the rest to depthflow.
+    cap = config.I2V_MAX_CLIPS_PER_PROJECT
+    if len(targets) > cap:
+        log.warning(
+            f"[I2V] {len(targets)} clips would exceed cap of {cap} per project — "
+            f"downgrading the extras to depthflow"
+        )
+        for si, img_idx, _rel, _preset in targets[cap:]:
+            anim_types = scenes[si].get("animation_types") or []
+            motion_presets = scenes[si].get("motion_presets") or []
+            if img_idx < len(anim_types):
+                anim_types[img_idx] = "depthflow"
+            if img_idx < len(motion_presets):
+                motion_presets[img_idx] = "dolly_forward"
+        targets = targets[:cap]
 
-            if progress_cb:
-                progress_cb(
-                    phase=f"AnimateDiff clip {done_ad + 1}/{total_ad}",
-                    progress=done_ad / max(total_ad, 1),
-                )
+    total = len(targets)
+    log.info(f"[I2V] Generating {total} clips (model={config.REPLICATE_I2V_MODEL})")
+    done = 0
 
-            clip_dir = await generate_animatediff_clip(
-                image_path=abs_path,
-                prompt=scene.get("image_prompts", [scene.get("image_prompt", "")])[img_idx]
-                    if img_idx < len(scene.get("image_prompts", [])) else scene.get("image_prompt", ""),
-                output_dir=animatediff_dir,
-                scene_index=idx,
-                img_index=img_idx,
-                motion_preset=preset,
-                style_prompt=style_prompt,
+    for si, img_idx, rel_path, preset in targets:
+        scene = scenes[si]
+        idx = scene.get("index", si)
+        abs_path = project_dir / rel_path
+
+        if not abs_path.exists():
+            log.warning(f"[I2V] Image not found: {abs_path}")
+            done += 1
+            continue
+
+        if progress_cb:
+            progress_cb(
+                phase=f"I2V clip {done + 1}/{total}",
+                progress=done / max(total, 1),
             )
 
-            if clip_dir:
-                rel_clip = str(clip_dir.relative_to(project_dir))
-                while len(scene["animatediff_clip_paths"]) <= img_idx:
-                    scene["animatediff_clip_paths"].append(None)
-                scene["animatediff_clip_paths"][img_idx] = rel_clip
-                log.info(f"[AnimateDiff] Scene {idx} img {img_idx}: clip saved to {rel_clip}")
-            else:
-                log.warning(
-                    f"[AnimateDiff] Scene {idx} img {img_idx}: generation failed, "
-                    f"will fall back to depth parallax"
-                )
-                # Revert to depthflow so assembly uses parallax instead
-                if img_idx < len(scene["animation_types"]):
-                    scene["animation_types"][img_idx] = "depthflow"
+        scene_prompt = (
+            scene.get("image_prompts", [scene.get("image_prompt", "")])[img_idx]
+            if img_idx < len(scene.get("image_prompts", []))
+            else scene.get("image_prompt", "")
+        )
 
-            done_ad += 1
+        clip_dir = await generate_animatediff_clip(
+            image_path=abs_path,
+            prompt=scene_prompt,
+            output_dir=animatediff_dir,
+            scene_index=idx,
+            img_index=img_idx,
+            motion_preset=preset,
+            style_prompt=style_prompt,
+        )
+
+        if clip_dir:
+            rel_clip = str(clip_dir.relative_to(project_dir))
+            while len(scene["animatediff_clip_paths"]) <= img_idx:
+                scene["animatediff_clip_paths"].append(None)
+            scene["animatediff_clip_paths"][img_idx] = rel_clip
+        else:
+            err = getattr(generate_animatediff_clip, "last_error", None) or "unknown error"
+            log.warning(
+                "[I2V] Scene %s img %s: generation failed (%s) — "
+                "falling back to depth parallax", idx, img_idx, err,
+            )
+            # Surface to state JSON so the UI can show why I2V didn't run.
+            errs = scene.setdefault("animatediff_errors", [None] * len(image_paths))
+            while len(errs) <= img_idx:
+                errs.append(None)
+            errs[img_idx] = err
+            anim_types = scene.get("animation_types") or []
+            motion_presets = scene.get("motion_presets") or []
+            if img_idx < len(anim_types):
+                anim_types[img_idx] = "depthflow"
+            if img_idx < len(motion_presets):
+                motion_presets[img_idx] = "dolly_forward"
+
+        done += 1
+
+        # Throttle between Replicate calls to respect rate limits.
+        if done < total:
+            await asyncio.sleep(config.REPLICATE_DELAY_SECONDS)
 
     return scenes

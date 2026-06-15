@@ -10,6 +10,7 @@ Because the pipeline is automated, you MUST respond with valid JSON only — no 
 {
   "title": "The story title",
   "synopsis": "A 2-3 sentence synopsis",
+  "visual_style": "One art-direction sentence describing the visual feel for THIS story specifically",
   "scenes": [
     {
       "narration": "The narrator's text for this scene (spoken aloud)",
@@ -34,6 +35,15 @@ Because the pipeline is automated, you MUST respond with valid JSON only — no 
 - Maintain character voice and physical continuity across scenes. Pick distinctive identifying features for each recurring character (age, clothing, hair, posture, one memorable detail) and carry them through.
 - Never break the fourth wall. Never reference that this is a video, a script, or AI-generated.
 - The narrator voice is the author's voice — third-person, present or past tense, but always *spoken*. Read each sentence aloud in your head; if it stumbles, rewrite.
+
+## Visual style (per story)
+
+Write a single `visual_style` line that defines the art direction for THIS story and no other — derived from the story's own world, not a generic template. Read the source, then choose a feel that fits it: its era and place, its palette, its light and weather, its textures and materials, and its dominant emotional register. Two stories should never get the same line.
+
+- Be concrete and sensory: name the medium/technique (e.g. "ink-and-watercolor", "painted animation cel", "chiaroscuro oil"), the colour palette, the quality of light, and the mood. ~20–40 words.
+- Keep it non-photorealistic and illustrative — this is a storybook video, not a photo.
+- Do NOT name real living artists or studios (e.g. avoid "Tim Burton", "Studio Ghibli"); describe the look in your own words instead.
+- This line is injected as the style for every image, so it must read as pure art direction — no scene content, no characters, no plot.
 
 ## Image-prompt rules (CRITICAL)
 

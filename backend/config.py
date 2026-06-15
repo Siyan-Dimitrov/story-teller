@@ -203,16 +203,31 @@ IMAGE_HEIGHT = 1080
 # by a cloud I2V model; everything else stays on the local depth-parallax
 # render.
 I2V_ENABLED = os.getenv("I2V_ENABLED", "1").strip() in ("1", "true", "True", "yes")
-# Wan 2.6 I2V Flash is the cheapest viable option on Replicate as of 2026-05:
-# ~$0.05/sec at 720p, 5s default. Swap for "minimax/hailuo-02" or
-# "kwaivgi/kling-v2.1" for higher quality at higher cost.
-REPLICATE_I2V_MODEL = os.getenv("REPLICATE_I2V_MODEL", "wan-video/wan2.6-i2v-flash")
-I2V_DURATION_SECONDS = int(os.getenv("I2V_DURATION_SECONDS", "5"))
-I2V_RESOLUTION = os.getenv("I2V_RESOLUTION", "720p")  # "720p" or "1080p"
+# kwaivgi/kling-v2.1 runs natively on Replicate (~$0.25/5s standard 720p,
+# ~$0.49/5s pro 1080p) and is reliable. The previous default
+# "wan-video/wan2.6-i2v-flash" proxies to Alibaba's backend and was failing
+# deterministically with E006 in a post-generation upstream poll (2026-06).
+# The input builder in animatediff_gen.py adapts per model family.
+REPLICATE_I2V_MODEL = os.getenv("REPLICATE_I2V_MODEL", "kwaivgi/kling-v2.1")
+I2V_DURATION_SECONDS = int(os.getenv("I2V_DURATION_SECONDS", "5"))  # kling: 5 or 10
+# "720p"/"1080p" — for kling this maps to mode standard/pro; for wan it is the
+# resolution param directly.
+I2V_RESOLUTION = os.getenv("I2V_RESOLUTION", "720p")
 I2V_OUTPUT_FPS = int(os.getenv("I2V_OUTPUT_FPS", "16"))  # frames extracted from MP4
 # Budget guard — clip count cap per project to avoid runaway spend.
 I2V_MAX_CLIPS_PER_PROJECT = int(os.getenv("I2V_MAX_CLIPS_PER_PROJECT", "36"))
 I2V_TIMEOUT_SECONDS = float(os.getenv("I2V_TIMEOUT_SECONDS", "600.0"))
+# Wan 2.6 I2V generates an audio track by default (audio_enabled=true), which
+# runs as a post-generation step over HTTP and has been observed to fail with
+# E006 ("input was invalid"). We overlay our own narration/music downstream and
+# only extract video frames, so audio is off by default. Prompt expansion (an
+# LLM rewrite of the motion prompt) stays on — our prompts benefit from it and
+# it runs before generation.
+I2V_AUDIO_ENABLED = os.getenv("I2V_AUDIO_ENABLED", "0").strip() in ("1", "true", "True", "yes")
+I2V_PROMPT_EXPANSION = os.getenv("I2V_PROMPT_EXPANSION", "1").strip() in ("1", "true", "True", "yes")
+# Keep the downloaded source.mp4 on disk when frame extraction yields 0 frames,
+# so failures can be inspected instead of vanishing. Set to "1" to always delete.
+I2V_DELETE_SOURCE_MP4 = os.getenv("I2V_DELETE_SOURCE_MP4", "0").strip() in ("1", "true", "True", "yes")
 # Frame loading still uses 8 fps for the assembly ping-pong cadence;
 # `_animatediff_clip` in video_assembly.py reads this.
 ANIMATEDIFF_DEFAULT_FPS = I2V_OUTPUT_FPS

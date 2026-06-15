@@ -18,6 +18,16 @@ def normalize_scenes(script: dict) -> dict:
     (voice, images, assembly) sees a uniform shape regardless of the LLM
     that generated the script.
     """
+    # Per-story art direction (the "feel" derived from the story itself). Kept
+    # at the top level so image generation can use it as the style for every
+    # scene. Trim, and drop it entirely if the model left it blank so callers
+    # cleanly fall back to the user's selected style.
+    vs = script.get("visual_style")
+    if isinstance(vs, str) and vs.strip():
+        script["visual_style"] = vs.strip()
+    else:
+        script.pop("visual_style", None)
+
     for i, scene in enumerate(script.get("scenes", [])):
         scene["index"] = i
         scene.setdefault("mood", "neutral")

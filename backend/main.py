@@ -30,8 +30,6 @@ from .models import (
     RunVoiceRequest,
     RunImagesRequest,
     RegenerateSceneImagesRequest,
-    RunQCRequest,
-    RegenerateQCRequest,
     RunAssembleRequest,
     SearchStoriesRequest,
     GutenbergSearchRequest,
@@ -49,13 +47,21 @@ from .models import (
     TextPart,
     UpdateSceneMusicRequest,
 )
-from .image_qc import run_qc_for_project, regenerate_and_evaluate, get_qc_progress, evaluate_single_image
-
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+_LOG_FORMAT = "%(asctime)s %(name)s %(levelname)s %(message)s"
+_LOG_FILE = config.BASE_DIR / "storyteller.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format=_LOG_FORMAT,
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(_LOG_FILE, encoding="utf-8"),
+    ],
+)
 log = logging.getLogger(__name__)
+log.info("File logging enabled: %s", _LOG_FILE)
 
 app = FastAPI(title="Story Teller", version="0.1.0")
 app.mount("/music", StaticFiles(directory=str(config.MUSIC_DIR)), name="music")
@@ -69,20 +75,31 @@ app.add_middleware(
 
 # ── Health ───────────────────────────────────────────────────
 
-def _resolve_image_style_request(req) -> tuple[str, list[str] | None]:
+def _resolve_image_style_request(req, script: dict | None = None) -> tuple[str, list[str] | None]:
     style_id = getattr(req, "style_id", None)
     if style_id and not image_styles.get_style(style_id):
         raise HTTPException(400, f"Unknown image style: {style_id}")
 
+    custom = (getattr(req, "custom_style_prompt", None) or "").strip()
     style_prompt = image_styles.resolve_style_prompt(
         style_id=style_id,
-        custom_style_prompt=getattr(req, "custom_style_prompt", None),
+        custom_style_prompt=custom or None,
         legacy_style_prompt=getattr(req, "style_prompt", None),
     )
     lora_keys = image_styles.resolve_style_loras(
         style_id=style_id,
         request_lora_keys=getattr(req, "lora_keys", None),
     )
+
+    # Prefer the per-story "feel" the screenwriter derived from the story itself,
+    # so each story gets its own look. A custom style the user typed always
+    # wins; the selected style's LoRAs are kept so the model-level style is
+    # preserved either way.
+    if not custom and script:
+        story_style = (script.get("visual_style") or "").strip()
+        if story_style:
+            style_prompt = story_style
+
     return style_prompt, lora_keys
 
 
@@ -712,7 +729,7 @@ async def run_images(project_id: str, req: RunImagesRequest):
     )
 
     try:
-        style_prompt, lora_keys = _resolve_image_style_request(req)
+        style_prompt, lora_keys = _resolve_image_style_request(req, script)
         pdir = store.project_dir(project_id)
         scenes = await image_gen.generate_all_scenes(
             scenes=script["scenes"],
@@ -761,7 +778,7 @@ async def regenerate_scene_images(project_id: str, scene_index: int, req: Regene
                 reference_image = ref_path
 
     try:
-        style_prompt, lora_keys = _resolve_image_style_request(req)
+        style_prompt, lora_keys = _resolve_image_style_request(req, script)
         updated_scene = await image_gen.generate_scene_images(
             scene=scene,
             project_dir=pdir,
@@ -783,160 +800,6 @@ async def regenerate_scene_images(project_id: str, scene_index: int, req: Regene
         raise HTTPException(500, str(e))
 
 
-# ── Stage 3.5: Image QC ──────────────────────────────────
-
-@app.post("/api/projects/{project_id}/qc")
-async def run_qc(project_id: str, req: RunQCRequest):
-    state = store.load_state(project_id)
-    script = store.load_json(project_id, "script.json")
-    if not script:
-        raise HTTPException(400, "No script found")
-
-    # Check if already running
-    progress = get_qc_progress(project_id)
-    if progress["active"]:
-        return {"status": "already_running"}
-
-    store.update_state(project_id, step="qc_running", error=None)
-    pdir = store.project_dir(project_id)
-    vision_model = req.vision_model or config.OLLAMA_VISION_MODEL
-    style_prompt, _ = _resolve_image_style_request(req)
-
-    def _run():
-        import asyncio as _asyncio
-        loop = _asyncio.new_event_loop()
-        try:
-            targets = [t.model_dump() for t in req.targets] if req.targets else None
-            scenes = loop.run_until_complete(
-                run_qc_for_project(
-                    scenes=script["scenes"],
-                    project_dir=pdir,
-                    vision_model=vision_model,
-                    style_prompt=style_prompt,
-                    pass_threshold=req.pass_threshold,
-                    project_id=project_id,
-                    targets=targets,
-                )
-            )
-            script["scenes"] = scenes
-            store.save_json(project_id, "script.json", script)
-            store.update_state(project_id, step="qc_passed")
-        except Exception as e:
-            tb = traceback.format_exc()
-            log.error(f"QC failed: {tb}")
-            store.update_state(project_id, step="illustrated", error=f"{e}\n{tb}")
-        finally:
-            loop.close()
-
-    thread = threading.Thread(target=_run, daemon=True)
-    thread.start()
-
-    return {"status": "qc_running"}
-
-
-@app.get("/api/projects/{project_id}/qc-progress")
-async def qc_progress(project_id: str):
-    return get_qc_progress(project_id)
-
-
-@app.post("/api/projects/{project_id}/qc-retry/{scene_index}/{image_index}")
-async def qc_retry_image(project_id: str, scene_index: int, image_index: int):
-    state = store.load_state(project_id)
-    script = store.load_json(project_id, "script.json")
-    if not script:
-        raise HTTPException(400, "No script found")
-
-    scenes = script["scenes"]
-    if scene_index >= len(scenes):
-        raise HTTPException(404, "Scene not found")
-
-    pdir = store.project_dir(project_id)
-    vision_model = config.OLLAMA_VISION_MODEL
-
-    result = await evaluate_single_image(
-        scene=scenes[scene_index],
-        image_index=image_index,
-        project_dir=pdir,
-        vision_model=vision_model,
-        style_prompt=image_styles.resolve_style_prompt(),
-    )
-
-    # Update scene QC results
-    scene = scenes[scene_index]
-    qc_results = scene.get("qc_results", [])
-    while len(qc_results) <= image_index:
-        qc_results.append({})
-    qc_results[image_index] = {
-        "image_index": image_index,
-        "passed": result.get("average_score", 0) >= config.QC_PASS_THRESHOLD,
-        "scores": result.get("scores", {}),
-        "average_score": result.get("average_score", 0),
-        "reasoning": result.get("reasoning", ""),
-        "attempts": 1,
-    }
-    scene["qc_results"] = qc_results
-    scene["qc_passed"] = all(r.get("passed", False) for r in qc_results)
-    store.save_json(project_id, "script.json", script)
-
-    return result
-
-
-@app.post("/api/projects/{project_id}/qc-regenerate")
-async def qc_regenerate(project_id: str, req: RegenerateQCRequest):
-    """Regenerate selected images and re-evaluate them."""
-    state = store.load_state(project_id)
-    script = store.load_json(project_id, "script.json")
-    if not script:
-        raise HTTPException(400, "No script found")
-
-    if not req.targets:
-        raise HTTPException(400, "No targets specified")
-
-    progress = get_qc_progress(project_id)
-    if progress["active"]:
-        return {"status": "already_running"}
-
-    store.update_state(project_id, step="qc_running", error=None)
-    pdir = store.project_dir(project_id)
-    vision_model = req.vision_model or config.OLLAMA_VISION_MODEL
-    image_backend = state.get("image_backend", "comfyui")
-    targets = [t.model_dump() for t in req.targets]
-    style_prompt, lora_keys = _resolve_image_style_request(req)
-
-    def _run():
-        import asyncio as _asyncio
-        loop = _asyncio.new_event_loop()
-        try:
-            scenes = loop.run_until_complete(
-                regenerate_and_evaluate(
-                    scenes=script["scenes"],
-                    project_dir=pdir,
-                    targets=targets,
-                    vision_model=vision_model,
-                    style_prompt=style_prompt,
-                    image_backend=image_backend,
-                    lora_keys=lora_keys,
-                    pass_threshold=req.pass_threshold,
-                    project_id=project_id,
-                    project_seed=store.get_project_seed(project_id),
-                )
-            )
-            script["scenes"] = scenes
-            store.save_json(project_id, "script.json", script)
-            store.update_state(project_id, step="qc_passed")
-        except Exception as e:
-            tb = traceback.format_exc()
-            log.error(f"QC regeneration failed: {tb}")
-            store.update_state(project_id, step="illustrated", error=f"{e}\n{tb}")
-        finally:
-            loop.close()
-
-    thread = threading.Thread(target=_run, daemon=True)
-    thread.start()
-
-    return {"status": "qc_running"}
-
-
 # ── Stage 4: Animation preparation ───────────────────────
 
 @app.post("/api/projects/{project_id}/animate")
@@ -954,6 +817,7 @@ async def run_animate(project_id: str):
     store.update_state(project_id, step="animating", error=None)
     pdir = store.project_dir(project_id)
     ollama_model = state.get("ollama_model")
+    story_style = (script.get("visual_style") or "").strip() or None
 
     def _run():
         import asyncio as _asyncio
@@ -965,6 +829,7 @@ async def run_animate(project_id: str):
                     project_dir=pdir,
                     ollama_model=ollama_model,
                     project_id=project_id,
+                    style_prompt=story_style,
                 )
             )
             script["scenes"] = scenes
@@ -973,8 +838,7 @@ async def run_animate(project_id: str):
         except Exception as e:
             tb = traceback.format_exc()
             log.error(f"Animation prep failed: {tb}")
-            fallback = "qc_passed" if state.get("step") in ("animating", "qc_passed") else "illustrated"
-            store.update_state(project_id, step=fallback, error=f"{e}\n{tb}")
+            store.update_state(project_id, step="illustrated", error=f"{e}\n{tb}")
         finally:
             loop.close()
 
