@@ -19,6 +19,7 @@ import httpx
 from . import config
 from . import project_store as store
 from . import script_gen, claude_script_gen, cast_gen, voice_gen, image_gen, image_styles, gutenberg, batch, music_search
+from . import url_guard
 from . import shorts as shorts_mod
 from . import shorts_director
 from .video_assembly import assemble_video, get_assembly_progress, cancel_assembly
@@ -188,6 +189,12 @@ async def gutenberg_search(req: GutenbergSearchRequest):
 @app.post("/api/gutenberg/text")
 async def gutenberg_text(req: GutenbergTextRequest):
     """Fetch plain text of a Gutenberg book."""
+    # SSRF guard: Gutenberg text only ever lives on gutenberg.org. Restrict to
+    # that host set and refuse hosts that resolve to internal/metadata IPs.
+    try:
+        url_guard.assert_allowlisted_url(req.text_url, url_guard.ALLOWED_GUTENBERG_HOSTS)
+    except url_guard.UnsafeURLError as e:
+        raise HTTPException(400, f"Refused to fetch URL: {e}")
     try:
         result = await gutenberg.fetch_gutenberg_text(
             text_url=req.text_url,
@@ -414,6 +421,12 @@ async def search_music(query: str = "cinematic", limit: int = 8):
 @app.post("/api/music/download")
 async def download_music(url: str):
     """Download a remote music URL into data/music/ cache and return the local filename."""
+    # SSRF guard: block URLs that resolve to private/loopback/link-local/metadata
+    # addresses before we issue the server-side fetch.
+    try:
+        url_guard.assert_public_url(url)
+    except url_guard.UnsafeURLError as e:
+        raise HTTPException(400, f"Refused to download URL: {e}")
     path = music_search.download_music_to_cache(url)
     if path is None:
         raise HTTPException(status_code=400, detail="Could not download music from that URL.")

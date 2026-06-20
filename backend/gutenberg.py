@@ -8,6 +8,7 @@ import xml.etree.ElementTree as ET
 import httpx
 
 from . import config
+from . import url_guard
 
 log = logging.getLogger(__name__)
 
@@ -269,10 +270,25 @@ async def fetch_gutenberg_text(text_url: str, max_chars: int = 0) -> dict:
     If max_chars > 0, returns only that many characters (preview mode).
     If max_chars == 0, returns the full text.
     """
-    resp = await _get_with_retries(
-        text_url, {}, config.GUTENBERG_TEXT_TIMEOUT_SECONDS,
-        follow_redirects=True,
-    )
+    # Gutenberg text URLs can redirect to mirror hosts. Follow redirects
+    # manually with follow_redirects=False so each hop is re-validated as a
+    # public address (the entry host is allowlisted by the API layer); this
+    # blocks a redirect from smuggling us onto an internal/metadata address.
+    current = text_url
+    resp = None
+    for _ in range(url_guard.MAX_REDIRECTS + 1):
+        url_guard.assert_public_url(current)
+        resp = await _get_with_retries(
+            current, {}, config.GUTENBERG_TEXT_TIMEOUT_SECONDS,
+            follow_redirects=False,
+        )
+        if resp.is_redirect and resp.headers.get("location"):
+            nxt = resp.next_request
+            current = str(nxt.url) if nxt else resp.headers["location"]
+            continue
+        break
+    else:
+        raise httpx.HTTPError(f"Too many redirects fetching {text_url}")
 
     full_text = _strip_gutenberg_boilerplate(resp.text)
 

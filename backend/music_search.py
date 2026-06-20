@@ -15,6 +15,7 @@ from typing import Optional
 import httpx
 
 from . import config
+from . import url_guard
 
 log = logging.getLogger(__name__)
 
@@ -130,11 +131,27 @@ def download_music_to_cache(url: str) -> Optional[Path]:
     if cache_path.exists() and cache_path.stat().st_size > 0:
         return cache_path
 
+    # SSRF-safe fetch: follow redirects manually, re-validating every hop so a
+    # crafted redirect can't bounce us to an internal/metadata address.
     try:
-        with httpx.Client(follow_redirects=True, timeout=120.0) as client:
-            resp = client.get(url)
-            resp.raise_for_status()
-            cache_path.write_bytes(resp.content)
+        with httpx.Client(follow_redirects=False, timeout=120.0) as client:
+            current = url
+            for _ in range(url_guard.MAX_REDIRECTS + 1):
+                url_guard.assert_public_url(current)
+                resp = client.get(current)
+                if resp.is_redirect and resp.headers.get("location"):
+                    nxt = resp.next_request
+                    current = str(nxt.url) if nxt else resp.headers["location"]
+                    continue
+                resp.raise_for_status()
+                cache_path.write_bytes(resp.content)
+                break
+            else:
+                log.error(f"Too many redirects downloading music {url}")
+                return None
+    except url_guard.UnsafeURLError as e:
+        log.error(f"Refused unsafe music URL {url}: {e}")
+        return None
     except httpx.HTTPError as e:
         log.error(f"Failed to download music {url}: {e}")
         return None
