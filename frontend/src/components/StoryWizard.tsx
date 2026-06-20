@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import {
-  Scroll, Mic, ImageIcon, ShieldCheck, Sparkles, Film,
+  Scroll, Mic, ImageIcon, Sparkles, Film, Scissors,
   Check, Loader2, AlertCircle,
 } from 'lucide-react'
 import type { ProjectState } from '../api'
@@ -19,9 +19,9 @@ const ADAPTATION_TONES = [
 import ScriptPanel from './ScriptPanel'
 import VoicePanel from './VoicePanel'
 import ImagePanel from './ImagePanel'
-import QCPanel from './QCPanel'
 import AnimationPanel from './AnimationPanel'
 import VideoPanel from './VideoPanel'
+import ShortsPanel from './ShortsPanel'
 
 interface Props {
   project: ProjectState
@@ -32,9 +32,9 @@ const STEPS = [
   { key: 'script', label: 'Script', icon: Scroll },
   { key: 'voice', label: 'Voice', icon: Mic },
   { key: 'images', label: 'Images', icon: ImageIcon },
-  { key: 'qc', label: 'QC', icon: ShieldCheck },
   { key: 'animate', label: 'Animate', icon: Sparkles },
   { key: 'video', label: 'Video', icon: Film },
+  { key: 'shorts', label: 'Shorts', icon: Scissors },
 ] as const
 
 type StepKey = typeof STEPS[number]['key']
@@ -47,12 +47,10 @@ const STEP_ORDER: Record<string, number> = {
   generating_voice: 1,
   illustrated: 3,
   generating_images: 2,
-  qc_running: 3,
-  qc_passed: 4,
-  animating: 4,
-  animated: 5,
-  assembled: 6,
-  assembling: 5,
+  animating: 3,
+  animated: 4,
+  assembled: 5,
+  assembling: 4,
 }
 
 function stepDone(projectStep: string, tabIndex: number): boolean {
@@ -63,7 +61,7 @@ function stepDone(projectStep: string, tabIndex: number): boolean {
 function stepActive(projectStep: string, tabIndex: number): boolean {
   const order = STEP_ORDER[projectStep] ?? 0
   return order === tabIndex && (
-    projectStep.startsWith('generating') || projectStep === 'assembling' || projectStep === 'animating' || projectStep === 'qc_running'
+    projectStep.startsWith('generating') || projectStep === 'assembling' || projectStep === 'animating'
   )
 }
 
@@ -185,16 +183,16 @@ export default function StoryWizard({ project, onRefresh }: Props) {
         <VoicePanel project={project} onRefresh={onRefresh} onNext={() => setActiveTab('images')} />
       )}
       {activeTab === 'images' && (
-        <ImagePanel project={project} onRefresh={onRefresh} onNext={() => setActiveTab('qc')} />
-      )}
-      {activeTab === 'qc' && (
-        <QCPanel project={project} onRefresh={onRefresh} onNext={() => setActiveTab('animate')} />
+        <ImagePanel project={project} onRefresh={onRefresh} onNext={() => setActiveTab('animate')} />
       )}
       {activeTab === 'animate' && (
         <AnimationPanel project={project} onRefresh={onRefresh} onNext={() => setActiveTab('video')} />
       )}
       {activeTab === 'video' && (
         <VideoPanel project={project} onRefresh={onRefresh} />
+      )}
+      {activeTab === 'shorts' && (
+        <ShortsPanel project={project} />
       )}
     </div>
   )

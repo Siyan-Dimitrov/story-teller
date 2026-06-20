@@ -112,7 +112,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
   const [selectedChapters, setSelectedChapters] = useState<Set<number>>(new Set())
   const [manualChapterCount, setManualChapterCount] = useState(0)
   const [viewingChapterText, setViewingChapterText] = useState<number | null>(null)
-  const [batchSteps, setBatchSteps] = useState({ qc: false, animate: false })
+  const [batchSteps, setBatchSteps] = useState({ animate: false })
   const [showChapterPanel, setShowChapterPanel] = useState(false)
   const [bookTitle, setBookTitle] = useState('')
   const [creatingBatch, setCreatingBatch] = useState(false)
@@ -124,7 +124,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
   const [chapterPartsOverrides, setChapterPartsOverrides] = useState<Map<number, number>>(new Map())
   const [voiceProfiles, setVoiceProfiles] = useState<VoiceProfile[]>([])
   const [batchVoiceProfile, setBatchVoiceProfile] = useState('')
-  const [batchImageBackend, setBatchImageBackend] = useState('replicate')
+  const [batchImageBackend, setBatchImageBackend] = useState('nano_banana')
   const [imageStyles, setImageStyles] = useState<ImageStyle[]>([])
   const [batchStyleId, setBatchStyleId] = useState('')
   const [batchCustomStylePrompt, setBatchCustomStylePrompt] = useState('')
@@ -453,7 +453,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
           const parts = getChapterParts(ch, i)
           return { ...ch, estimated_duration: target, suggested_tone: tone, parts }
         })
-      const steps = ['script', 'voice', 'images', ...(batchSteps.qc ? ['qc'] : []), ...(batchSteps.animate ? ['animate'] : []), 'assemble']
+      const steps = ['script', 'voice', 'images', ...(batchSteps.animate ? ['animate'] : []), 'assemble']
 
       const createRes = await api.batchCreate({
         book_title: bookTitle,
@@ -470,7 +470,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
         voice_language: 'en',
         image_backend: batchImageBackend,
         ...batchStyleRequest,
-        ...(batchCharacterConsistency && batchImageBackend === 'replicate' && { character_consistency: true }),
+        ...(batchCharacterConsistency && batchImageBackend === 'nano_banana' && { character_consistency: true }),
       })
 
       if (onBatchStart) {
@@ -519,7 +519,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
     }
     setRunningGroup(true)
     try {
-      const steps = ['script', 'voice', 'images', ...(batchSteps.qc ? ['qc'] : []), ...(batchSteps.animate ? ['animate'] : []), 'assemble']
+      const steps = ['script', 'voice', 'images', ...(batchSteps.animate ? ['animate'] : []), 'assemble']
       await api.batchRun(groupId, {
         steps,
         project_ids: [...selected],
@@ -527,7 +527,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
         voice_language: 'en',
         image_backend: batchImageBackend,
         ...batchStyleRequest,
-        ...(batchCharacterConsistency && batchImageBackend === 'replicate' && { character_consistency: true }),
+        ...(batchCharacterConsistency && batchImageBackend === 'nano_banana' && { character_consistency: true }),
       })
       setRunConfigGroup(null)
       if (onBatchStart) {
@@ -640,10 +640,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
         rows={2}
         className={`mt-2 w-full ${fieldBgClass} border border-[var(--border)] rounded px-2 py-1.5 text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--border-focus)] resize-none`}
       />
-      {(selectedBatchStyle?.default_lora_keys?.length || 0) > 0 && (
-        <p className="text-[10px] text-[var(--text-muted)] mt-1">LoRA defaults: {selectedBatchStyle?.default_lora_keys?.join(', ')}</p>
-      )}
-      {batchImageBackend === 'replicate' && (
+      {batchImageBackend === 'nano_banana' && (
         <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)] mt-2 cursor-pointer">
           <input
             type="checkbox"
@@ -652,7 +649,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
             className="rounded border-[var(--border)]"
           />
           <span>Character Consistency</span>
-          <span className="text-[10px] text-[var(--text-muted)]">Use first image as reference</span>
+          <span className="text-[10px] text-[var(--text-muted)]">Builds a cast bible + reference portraits per chapter</span>
         </label>
       )}
     </div>
@@ -1189,16 +1186,6 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                       <label className="flex items-center gap-1 cursor-pointer">
                         <input
                           type="checkbox"
-                          checked={batchSteps.qc}
-                          onChange={e => setBatchSteps(s => ({ ...s, qc: e.target.checked }))}
-                          className="accent-[var(--accent)]"
-                        />
-                        <span className={`text-[10px] ${batchSteps.qc ? 'text-[var(--text-secondary)]' : 'text-[var(--text-muted)]'}`}>QC</span>
-                      </label>
-                      <span className="text-[10px] text-[var(--text-muted)]">&rarr;</span>
-                      <label className="flex items-center gap-1 cursor-pointer">
-                        <input
-                          type="checkbox"
                           checked={batchSteps.animate}
                           onChange={e => setBatchSteps(s => ({ ...s, animate: e.target.checked }))}
                           className="accent-[var(--accent)]"
@@ -1231,10 +1218,8 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                           onChange={e => setBatchImageBackend(e.target.value)}
                           className="w-full bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
                         >
-                          <option value="replicate">Replicate (FLUX)</option>
+                          <option value="nano_banana">Nano Banana (Consistent)</option>
                           <option value="gpt_image">GPT Image 2 (OpenAI)</option>
-                          <option value="comfyui">ComfyUI (local)</option>
-                          <option value="ollama">Ollama (local)</option>
                         </select>
                       </div>
                     </div>
@@ -1826,11 +1811,6 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                           <span className="text-[10px] text-[var(--text-muted)] font-medium">Pipeline:</span>
                           <span className="text-[10px] text-[var(--text-secondary)]">Script → Voice → Images →</span>
                           <label className="flex items-center gap-1 cursor-pointer">
-                            <input type="checkbox" checked={batchSteps.qc} onChange={e => setBatchSteps(s => ({ ...s, qc: e.target.checked }))} className="accent-[var(--accent)]" />
-                            <span className={`text-[10px] ${batchSteps.qc ? 'text-[var(--text-secondary)]' : 'text-[var(--text-muted)]'}`}>QC</span>
-                          </label>
-                          <span className="text-[10px] text-[var(--text-muted)]">→</span>
-                          <label className="flex items-center gap-1 cursor-pointer">
                             <input type="checkbox" checked={batchSteps.animate} onChange={e => setBatchSteps(s => ({ ...s, animate: e.target.checked }))} className="accent-[var(--accent)]" />
                             <span className={`text-[10px] ${batchSteps.animate ? 'text-[var(--text-secondary)]' : 'text-[var(--text-muted)]'}`}>Animate</span>
                           </label>
@@ -1847,10 +1827,8 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                           <div>
                             <label className="block text-[10px] text-[var(--text-muted)] mb-1">Image Backend</label>
                             <select value={batchImageBackend} onChange={e => setBatchImageBackend(e.target.value)} className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]">
-                              <option value="replicate">Replicate (FLUX)</option>
+                              <option value="nano_banana">Nano Banana (Consistent)</option>
                               <option value="gpt_image">GPT Image 2 (OpenAI)</option>
-                              <option value="comfyui">ComfyUI (local)</option>
-                              <option value="ollama">Ollama (local)</option>
                             </select>
                           </div>
                         </div>

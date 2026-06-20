@@ -28,6 +28,12 @@ def normalize_scenes(script: dict) -> dict:
     else:
         script.pop("visual_style", None)
 
+    # Normalize the cast bible (character consistency). Tolerate models that
+    # omit it entirely — downstream code only uses it when the user enables
+    # character consistency, and cast_gen can backfill it on demand.
+    script["cast"] = _normalize_cast(script.get("cast"))
+    valid_ids = {c["id"] for c in script["cast"]}
+
     for i, scene in enumerate(script.get("scenes", [])):
         scene["index"] = i
         scene.setdefault("mood", "neutral")
@@ -37,7 +43,54 @@ def normalize_scenes(script: dict) -> dict:
             scene["image_prompts"] = [single] if single else []
         if scene["image_prompts"]:
             scene["image_prompt"] = scene["image_prompts"][0]
+        # Keep only character ids that exist in the cast; drop hallucinated tags.
+        chars = scene.get("characters") or []
+        if isinstance(chars, list) and valid_ids:
+            scene["characters"] = [c for c in chars if isinstance(c, str) and c in valid_ids]
+        else:
+            scene["characters"] = []
     return script
+
+
+def _slugify(value: str) -> str:
+    """Lowercase, hyphenated, alnum-only slug for a cast id."""
+    slug = re.sub(r"[^a-z0-9]+", "-", (value or "").lower()).strip("-")
+    return slug or "character"
+
+
+def _normalize_cast(cast) -> list[dict]:
+    """Coerce a model-supplied ``cast`` into a clean list of unique members.
+
+    Drops entries without a usable name/description, fills a stable ``id``
+    slug, and de-duplicates ids so scene tags resolve unambiguously.
+    """
+    if not isinstance(cast, list):
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for entry in cast:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name", "")).strip()
+        desc = str(entry.get("description", "")).strip()
+        if not name and not desc:
+            continue
+        base_id = _slugify(str(entry.get("id", "")).strip() or name or desc[:20])
+        cid = base_id
+        n = 2
+        while cid in seen:
+            cid = f"{base_id}-{n}"
+            n += 1
+        seen.add(cid)
+        out.append({
+            "id": cid,
+            "name": name or cid.replace("-", " ").title(),
+            "role": str(entry.get("role", "")).strip(),
+            "description": desc,
+            "reference_prompt": str(entry.get("reference_prompt", "")).strip(),
+            "reference_image_path": entry.get("reference_image_path"),
+        })
+    return out
 
 
 def _repair_truncated_json(raw: str) -> str:

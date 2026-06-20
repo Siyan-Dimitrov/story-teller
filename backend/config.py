@@ -80,6 +80,28 @@ REPLICATE_TIMEOUT_SECONDS = float(os.getenv("REPLICATE_TIMEOUT_SECONDS", "120.0"
 REPLICATE_DELAY_SECONDS = float(os.getenv("REPLICATE_DELAY_SECONDS", "11.0"))  # delay between API calls (6/min rate limit with <$5 credit)
 REPLICATE_MAX_RETRIES = int(os.getenv("REPLICATE_MAX_RETRIES", "3"))  # retries on rate-limit / transient errors
 
+# ── Nano Banana (Google Gemini image, hosted on Replicate) ──
+# Reference-image-driven generation for character consistency. Accepts a text
+# prompt plus up to ~14 reference images (`image_input` array) and keeps the
+# referenced subjects/style consistent across scenes — no LoRA training needed.
+# Default to the cheaper "google/nano-banana" (Gemini Flash Image, ~$0.04/img)
+# — it still takes reference images for character consistency, which is all we
+# need for stylized frames that get animated afterwards. Set this to
+# "google/nano-banana-pro" (~$0.13/img) only when you want maximum face fidelity.
+REPLICATE_NANO_BANANA_MODEL = os.getenv("REPLICATE_NANO_BANANA_MODEL", "google/nano-banana")
+# Output format Nano Banana returns (png keeps things lossless for downstream
+# compositing/animation).
+NANO_BANANA_OUTPUT_FORMAT = os.getenv("NANO_BANANA_OUTPUT_FORMAT", "png").strip()
+# Aspect ratio for the one-off character reference "model sheet" portraits.
+NANO_BANANA_CHAR_ASPECT_RATIO = os.getenv("NANO_BANANA_CHAR_ASPECT_RATIO", "3:4").strip()
+# Max reference images attached to a single scene generation (model hard cap ~14;
+# leave headroom for a style anchor on top of character portraits).
+NANO_BANANA_MAX_REFS = int(os.getenv("NANO_BANANA_MAX_REFS", "6"))
+# Input property name Replicate's Nano Banana model uses for the reference-image
+# array. "image_input" is the documented key for google/nano-banana[-pro]; kept
+# configurable in case a model revision renames it.
+NANO_BANANA_IMAGE_PARAM = os.getenv("NANO_BANANA_IMAGE_PARAM", "image_input").strip()
+
 # FLUX LoRA URLs (public HuggingFace safetensors URLs)
 # These are loaded dynamically via Replicate's lora_weights parameter
 # All URLs verified working (HTTP 200, no auth required) as of 2026-04-23
@@ -160,6 +182,28 @@ VIDEO_WIDTH = 1920
 VIDEO_HEIGHT = 1080
 VIDEO_FPS = 25
 CROSSFADE_DURATION = 0.5  # seconds between scenes
+
+# ── Shorts (vertical 9:16 clips) ─────────────────────────────
+# A short is a self-contained mini-scene reframed to portrait, with burned-in
+# captions and an end card driving viewers to the full story.
+SHORT_WIDTH = int(os.getenv("SHORT_WIDTH", "1080"))
+SHORT_HEIGHT = int(os.getenv("SHORT_HEIGHT", "1920"))
+SHORT_FPS = int(os.getenv("SHORT_FPS", "30"))
+SHORT_MIN_DURATION = float(os.getenv("SHORT_MIN_DURATION", "8.0"))
+SHORT_MAX_DURATION = float(os.getenv("SHORT_MAX_DURATION", "58.0"))   # YT cap 60s
+SHORT_TAIL_DURATION = float(os.getenv("SHORT_TAIL_DURATION", "2.5"))  # end card
+# How many shorts the director picks per project by default.
+SHORTS_PER_PROJECT = int(os.getenv("SHORTS_PER_PROJECT", "3"))
+# Video/audio codecs for short encodes (match the long-form pipeline).
+SHORT_VIDEO_CODEC = os.getenv("SHORT_VIDEO_CODEC", "libx264")
+SHORT_AUDIO_CODEC = os.getenv("SHORT_AUDIO_CODEC", "aac")
+# How a 16:9 segment is reframed to 9:16 when cutting from the finished video:
+#   "fit"  — whole frame visible, centered over a blurred fill (no content lost)
+#   "crop" — cover-crop to full-bleed vertical (loses the sides)
+SHORT_REFRAME = os.getenv("SHORT_REFRAME", "fit").strip()
+# Source for shorts: "final" cuts the segment straight out of final.mp4 (keeps
+# music + motion, cheap — just ffmpeg); "stills" re-renders from scene images.
+SHORT_SOURCE = os.getenv("SHORT_SOURCE", "final").strip()
 
 # ── LLM ──────────────────────────────────────────────────────
 LLM_TIMEOUT_SECONDS = 300.0

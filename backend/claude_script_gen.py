@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -179,7 +180,14 @@ def _validate_script(script: dict[str, Any]) -> list[str]:
 async def _run_claude(
     *, system_prompt: str, user_prompt: str, model: str, pass_name: str,
 ) -> tuple[str, float]:
-    """Run one Claude pass via the Agent SDK. Returns (text, cost_usd)."""
+    """Run one Claude pass via the Agent SDK. Returns (text, cost_usd).
+
+    On Windows the FastAPI process runs under ``WindowsSelectorEventLoopPolicy``
+    (see ``backend/main.py``), and that loop cannot spawn subprocesses — but
+    the SDK shells out to ``claude.exe``. We bounce the SDK call into a
+    worker thread with its own ``ProactorEventLoop`` so the subprocess
+    transport works without changing the parent loop policy.
+    """
     try:
         from claude_agent_sdk import (
             ClaudeAgentOptions,
@@ -207,11 +215,9 @@ async def _run_claude(
         setting_sources=[],
     )
 
-    chunks: list[str] = []
-    cost_usd = 0.0
-
-    async def _consume() -> None:
-        nonlocal cost_usd
+    async def _do_call() -> tuple[str, float]:
+        chunks: list[str] = []
+        cost_usd = 0.0
         async for message in query(prompt=user_prompt, options=options):
             if isinstance(message, AssistantMessage):
                 for block in message.content:
@@ -219,9 +225,23 @@ async def _run_claude(
                         chunks.append(block.text)
             elif isinstance(message, ResultMessage):
                 cost_usd = float(getattr(message, "total_cost_usd", 0.0) or 0.0)
+        return "".join(chunks).strip(), cost_usd
+
+    def _thread_run() -> tuple[str, float]:
+        if sys.platform == "win32":
+            loop = asyncio.ProactorEventLoop()
+        else:
+            loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(
+                asyncio.wait_for(_do_call(), timeout=config.CLAUDE_TIMEOUT_SECONDS)
+            )
+        finally:
+            loop.close()
 
     try:
-        await asyncio.wait_for(_consume(), timeout=config.CLAUDE_TIMEOUT_SECONDS)
+        text, cost_usd = await asyncio.to_thread(_thread_run)
     except asyncio.TimeoutError as e:
         raise ClaudeBackendError(
             f"Claude {pass_name} pass timed out after {config.CLAUDE_TIMEOUT_SECONDS:.0f}s"
@@ -235,7 +255,6 @@ async def _run_claude(
             ) from e
         raise ClaudeBackendError(f"Claude {pass_name} pass failed: {e}") from e
 
-    text = "".join(chunks).strip()
     if not text:
         raise ClaudeBackendError(f"Claude {pass_name} pass returned no text content")
     return text, cost_usd

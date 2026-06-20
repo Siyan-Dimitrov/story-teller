@@ -18,7 +18,9 @@ import httpx
 
 from . import config
 from . import project_store as store
-from . import script_gen, claude_script_gen, voice_gen, image_gen, image_styles, gutenberg, batch, music_search
+from . import script_gen, claude_script_gen, cast_gen, voice_gen, image_gen, image_styles, gutenberg, batch, music_search
+from . import shorts as shorts_mod
+from . import shorts_director
 from .video_assembly import assemble_video, get_assembly_progress, cancel_assembly
 from .animation import prepare_animations, get_animation_progress
 from .grimm_tales import list_tales, get_tale
@@ -46,6 +48,11 @@ from .models import (
     IntelligentSplitResponse,
     TextPart,
     UpdateSceneMusicRequest,
+    GenerateCastRequest,
+    GenerateCharacterRefsRequest,
+    UpdateCastMemberRequest,
+    SuggestShortsRequest,
+    RenderShortsRequest,
 )
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -731,6 +738,25 @@ async def run_images(project_id: str, req: RunImagesRequest):
     try:
         style_prompt, lora_keys = _resolve_image_style_request(req, script)
         pdir = store.project_dir(project_id)
+        seed = store.get_project_seed(project_id)
+
+        # Character consistency on Nano Banana: ensure a cast bible exists and
+        # render the canonical portraits that get fed back as references.
+        cast = script.get("cast") or []
+        if req.backend == "nano_banana" and req.character_consistency:
+            script = await cast_gen.ensure_cast(script, ollama_model=state.get("ollama_model"))
+            cast = script.get("cast") or []
+            if cast:
+                cast = await image_gen.generate_character_references(
+                    cast=cast,
+                    project_dir=pdir,
+                    backend="nano_banana",
+                    style_prompt=style_prompt,
+                    project_seed=seed,
+                )
+                script["cast"] = cast
+                store.save_json(project_id, "script.json", script)
+
         scenes = await image_gen.generate_all_scenes(
             scenes=script["scenes"],
             project_dir=pdir,
@@ -738,7 +764,8 @@ async def run_images(project_id: str, req: RunImagesRequest):
             style_prompt=style_prompt,
             lora_keys=lora_keys,
             character_consistency=req.character_consistency,
-            project_seed=store.get_project_seed(project_id),
+            project_seed=seed,
+            cast=cast,
         )
         script["scenes"] = scenes
         store.save_json(project_id, "script.json", script)
@@ -787,6 +814,8 @@ async def regenerate_scene_images(project_id: str, scene_index: int, req: Regene
             lora_keys=lora_keys,
             reference_image=reference_image,
             project_seed=store.get_project_seed(project_id),
+            cast=script.get("cast") or [],
+            character_consistency=req.character_consistency,
         )
         scenes[scene_index] = updated_scene
         script["scenes"] = scenes
@@ -797,6 +826,83 @@ async def regenerate_scene_images(project_id: str, scene_index: int, req: Regene
     except Exception as e:
         tb = traceback.format_exc()
         log.error(f"Scene image regeneration failed: {tb}")
+        raise HTTPException(500, str(e))
+
+
+# ── Cast bible & character references ─────────────────────────
+
+@app.post("/api/projects/{project_id}/cast")
+async def run_cast(project_id: str, req: GenerateCastRequest):
+    """(Re)derive the character bible for the current script via LLM."""
+    state = store.load_state(project_id)
+    script = store.load_json(project_id, "script.json")
+    if not script:
+        raise HTTPException(400, "No script found — generate a script first")
+    try:
+        script = await cast_gen.ensure_cast(
+            script,
+            ollama_model=req.ollama_model or state.get("ollama_model"),
+            overwrite=req.overwrite,
+        )
+        store.save_json(project_id, "script.json", script)
+        return {"cast": script.get("cast", []), "scenes": script.get("scenes", [])}
+    except Exception as e:
+        tb = traceback.format_exc()
+        log.error(f"Cast generation failed: {tb}")
+        raise HTTPException(500, str(e))
+
+
+@app.put("/api/projects/{project_id}/cast/{cast_id}")
+async def update_cast_member(project_id: str, cast_id: str, req: UpdateCastMemberRequest):
+    """Manually edit one cast member's canonical description / portrait prompt."""
+    store.load_state(project_id)
+    script = store.load_json(project_id, "script.json")
+    if not script:
+        raise HTTPException(400, "No script found")
+    cast = script.get("cast") or []
+    member = next((m for m in cast if m.get("id") == cast_id), None)
+    if member is None:
+        raise HTTPException(404, f"Unknown cast member: {cast_id}")
+    for field in ("name", "role", "description", "reference_prompt"):
+        val = getattr(req, field, None)
+        if val is not None:
+            member[field] = val
+    store.save_json(project_id, "script.json", script)
+    return {"member": member}
+
+
+@app.post("/api/projects/{project_id}/characters")
+async def run_character_refs(project_id: str, req: GenerateCharacterRefsRequest):
+    """Render canonical portrait(s) for cast members (reused as references)."""
+    state = store.load_state(project_id)
+    script = store.load_json(project_id, "script.json")
+    if not script:
+        raise HTTPException(400, "No script found")
+
+    # Ensure a cast exists before we try to render portraits.
+    if not (script.get("cast") or []):
+        script = await cast_gen.ensure_cast(script, ollama_model=state.get("ollama_model"))
+    cast = script.get("cast") or []
+    if not cast:
+        raise HTTPException(400, "No cast could be derived for this script")
+
+    try:
+        style_prompt, _ = _resolve_image_style_request(req, script)
+        pdir = store.project_dir(project_id)
+        cast = await image_gen.generate_character_references(
+            cast=cast,
+            project_dir=pdir,
+            backend=req.backend,
+            style_prompt=style_prompt,
+            project_seed=store.get_project_seed(project_id),
+            only_ids=req.cast_ids,
+        )
+        script["cast"] = cast
+        store.save_json(project_id, "script.json", script)
+        return {"cast": cast}
+    except Exception as e:
+        tb = traceback.format_exc()
+        log.error(f"Character reference generation failed: {tb}")
         raise HTTPException(500, str(e))
 
 
@@ -944,6 +1050,135 @@ async def assembly_cancel_endpoint(project_id: str):
         fallback = "animated"  # preserve animation data on cancel
         store.update_state(project_id, step=fallback, error="Assembly cancelled")
     return {"cancelled": cancelled}
+
+
+# ── Shorts (vertical 9:16 clips) ─────────────────────────────
+
+_shorts_lock = threading.Lock()
+_shorts_tasks: dict[str, dict] = {}
+
+
+def _shorts_progress(project_id: str) -> dict:
+    with _shorts_lock:
+        st = _shorts_tasks.get(project_id)
+        if not st:
+            return {"active": False, "done": 0, "total": 0, "error": None, "shorts": []}
+        return dict(st)
+
+
+@app.post("/api/projects/{project_id}/shorts/suggest")
+async def suggest_shorts_endpoint(project_id: str, req: SuggestShortsRequest):
+    state = store.load_state(project_id)
+    script = store.load_json(project_id, "script.json")
+    if not script:
+        raise HTTPException(400, "No script found")
+    suggestions = await shorts_director.suggest_shorts(
+        script,
+        ollama_model=req.ollama_model or state.get("ollama_model"),
+        count=req.count,
+    )
+    return {"suggestions": suggestions}
+
+
+@app.get("/api/projects/{project_id}/shorts")
+async def list_shorts(project_id: str):
+    state = store.load_state(project_id)
+    return {"shorts": state.get("shorts", []), "progress": _shorts_progress(project_id)}
+
+
+@app.get("/api/projects/{project_id}/shorts/progress")
+async def shorts_progress_endpoint(project_id: str):
+    return _shorts_progress(project_id)
+
+
+@app.post("/api/projects/{project_id}/shorts")
+async def render_shorts_endpoint(project_id: str, req: RenderShortsRequest):
+    state = store.load_state(project_id)
+    script = store.load_json(project_id, "script.json")
+    if not script:
+        raise HTTPException(400, "No script found")
+    scenes = script.get("scenes") or []
+    if not scenes:
+        raise HTTPException(400, "Script has no scenes")
+
+    with _shorts_lock:
+        if _shorts_tasks.get(project_id, {}).get("active"):
+            return {"status": "already_rendering"}
+
+    # Resolve which scenes to cut and a hook line per scene.
+    hooks: dict[int, str] = dict(req.hooks or {})
+    if req.scene_indices:
+        indices = [i for i in req.scene_indices if 0 <= i < len(scenes)]
+    else:
+        suggestions = await shorts_director.suggest_shorts(
+            script,
+            ollama_model=req.ollama_model or state.get("ollama_model"),
+            count=req.count,
+        )
+        indices = [s["scene_index"] for s in suggestions]
+        for s in suggestions:
+            hooks.setdefault(s["scene_index"], s.get("hook", ""))
+    if not indices:
+        raise HTTPException(400, "No scenes selected for shorts")
+
+    pdir = store.project_dir(project_id)
+    out_dir = config.OUTPUT_DIR / project_id / "shorts"
+
+    with _shorts_lock:
+        _shorts_tasks[project_id] = {
+            "active": True, "done": 0, "total": len(indices),
+            "error": None, "shorts": [],
+        }
+
+    def _run():
+        produced: list[dict] = []
+        try:
+            shorts_dir = pdir / "shorts"
+            shorts_dir.mkdir(parents=True, exist_ok=True)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for rank, idx in enumerate(indices, start=1):
+                scene = scenes[idx]
+                output_path = shorts_dir / f"short_{rank}_{idx:04d}.mp4"
+                try:
+                    path, duration = shorts_mod.render_short(
+                        scene=scene,
+                        project_dir=pdir,
+                        output_path=output_path,
+                        hook=hooks.get(idx) or None,
+                        scenes=scenes,
+                    )
+                    rel = str(path.relative_to(pdir))
+                    try:
+                        shutil.copy2(str(path), str(out_dir / path.name))
+                    except Exception as ce:  # noqa: BLE001
+                        log.warning(f"Shorts output-folder copy failed: {ce}")
+                    produced.append({
+                        "scene_index": idx, "path": rel,
+                        "duration": duration, "hook": hooks.get(idx, ""),
+                    })
+                except Exception as se:  # noqa: BLE001
+                    log.error(f"Short for scene {idx} failed: {se}")
+                with _shorts_lock:
+                    st = _shorts_tasks.get(project_id)
+                    if st:
+                        st["done"] = rank
+                        st["shorts"] = produced
+            store.update_state(project_id, shorts=produced)
+        except Exception as e:
+            tb = traceback.format_exc()
+            log.error(f"Shorts render failed: {tb}")
+            with _shorts_lock:
+                st = _shorts_tasks.get(project_id)
+                if st:
+                    st["error"] = str(e)
+        finally:
+            with _shorts_lock:
+                st = _shorts_tasks.get(project_id)
+                if st:
+                    st["active"] = False
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "rendering", "count": len(indices), "scene_indices": indices}
 
 
 # ── Per-scene music suggestion ─────────────────────────────

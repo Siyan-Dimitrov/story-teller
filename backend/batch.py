@@ -10,7 +10,7 @@ import httpx
 
 from . import config
 from . import project_store as store
-from . import script_gen, voice_gen, image_gen, image_styles
+from . import script_gen, cast_gen, voice_gen, image_gen, image_styles
 from .video_assembly import assemble_video
 from .models import DEFAULT_VOICE_INSTRUCT
 
@@ -706,6 +706,22 @@ async def _run_chapter_pipeline(
         # look; fall back to the batch-wide style when the writer left it blank.
         story_style = (script.get("visual_style") or "").strip()
         effective_style = story_style or style_prompt
+        seed = store.get_project_seed(project_id)
+
+        # Nano Banana + consistency: ensure a cast bible and render its portraits
+        # so each scene reuses them as references (mirrors the single-project path).
+        cast = script.get("cast") or []
+        if image_backend == "nano_banana" and character_consistency:
+            script = await cast_gen.ensure_cast(script, ollama_model=state.get("ollama_model"))
+            cast = script.get("cast") or []
+            if cast:
+                cast = await image_gen.generate_character_references(
+                    cast=cast, project_dir=pdir, backend="nano_banana",
+                    style_prompt=effective_style, project_seed=seed,
+                )
+                script["cast"] = cast
+                store.save_json(project_id, "script.json", script)
+
         scenes = await image_gen.generate_all_scenes(
             scenes=script["scenes"],
             project_dir=pdir,
@@ -713,7 +729,8 @@ async def _run_chapter_pipeline(
             style_prompt=effective_style,
             lora_keys=lora_keys,
             character_consistency=character_consistency,
-            project_seed=store.get_project_seed(project_id),
+            project_seed=seed,
+            cast=cast,
         )
         script["scenes"] = scenes
         store.save_json(project_id, "script.json", script)

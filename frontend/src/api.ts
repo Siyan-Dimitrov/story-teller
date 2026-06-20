@@ -9,11 +9,22 @@ export interface HealthStatus {
   ffmpeg: boolean
 }
 
+export interface CastMember {
+  id: string
+  name: string
+  role?: string
+  description: string
+  reference_prompt?: string
+  reference_image_path?: string | null
+  reference_image_error?: string
+}
+
 export interface Scene {
   index: number
   narration: string
   image_prompt: string
   image_prompts?: string[]
+  characters?: string[]
   mood: string
   duration_hint: number
   audio_path?: string | null
@@ -23,8 +34,6 @@ export interface Scene {
   image_errors?: (string | null)[]
   image_safety_error?: boolean
   kb_effect: string
-  qc_results?: { image_index: number; passed: boolean; scores: Record<string, number>; average_score: number; reasoning: string; attempts: number; error?: string | null }[]
-  qc_passed?: boolean
   animation_types?: string[]
   motion_presets?: string[]
   depth_map_paths?: (string | null)[]
@@ -38,10 +47,33 @@ export interface Scene {
 export interface Script {
   title: string
   synopsis: string
+  cast?: CastMember[]
   scenes: Scene[]
   target_minutes?: number
   source_tale?: string
   tone?: string
+}
+
+export interface ShortSuggestion {
+  scene_index: number
+  hook: string
+  reason: string
+  score: number
+}
+
+export interface ShortItem {
+  scene_index: number
+  path: string
+  duration: number
+  hook: string
+}
+
+export interface ShortsProgress {
+  active: boolean
+  done: number
+  total: number
+  error: string | null
+  shorts: ShortItem[]
 }
 
 export interface ProjectState {
@@ -351,22 +383,6 @@ export const api = {
   regenerateSceneImages: (id: string, sceneIndex: number, body: { backend: string; style_id?: string; custom_style_prompt?: string; style_prompt?: string; lora_keys?: string[]; character_consistency?: boolean }) =>
     post<{ scene: Scene }>(`/api/projects/${id}/images/${sceneIndex}`, body),
 
-  runQC: (id: string, body: { vision_model?: string; pass_threshold?: number; style_id?: string; custom_style_prompt?: string; style_prompt?: string; targets?: { scene_index: number; image_index: number }[] }) =>
-    post<{ status: string }>(`/api/projects/${id}/qc`, body),
-
-  regenerateQC: (id: string, body: { targets: { scene_index: number; image_index: number }[]; style_id?: string; custom_style_prompt?: string; style_prompt?: string; lora_keys?: string[] }) =>
-    post<{ status: string }>(`/api/projects/${id}/qc-regenerate`, body),
-
-  qcProgress: (id: string) =>
-    request<{ active: boolean; progress: number; phase: string; error: string | null }>(
-      `/api/projects/${id}/qc-progress`
-    ),
-
-  retryQCImage: (id: string, sceneIndex: number, imageIndex: number) =>
-    post<{ scores: Record<string, number>; average_score: number; reasoning: string }>(
-      `/api/projects/${id}/qc-retry/${sceneIndex}/${imageIndex}`, {}
-    ),
-
   runAnimate: (id: string) =>
     post<{ status: string }>(`/api/projects/${id}/animate`, {}),
 
@@ -399,4 +415,22 @@ export const api = {
     post<{ original_project_id: string; new_project_ids: string[]; parts: number }>(`/api/projects/${projectId}/split`, { parts }),
   splitProjectIntelligent: (projectId: string, parts: number, ollamaModel?: string) =>
     post<{ original_project_id: string; new_project_ids: string[]; parts: number; split_details: { title: string; summary: string; char_count: number }[] }>(`/api/projects/${projectId}/split-intelligent`, { parts, ollama_model: ollamaModel }),
+
+  // ── Cast bible & character references ───────────────────────
+  generateCast: (id: string, body?: { ollama_model?: string; overwrite?: boolean }) =>
+    post<{ cast: CastMember[]; scenes: Scene[] }>(`/api/projects/${id}/cast`, body || {}),
+  updateCastMember: (id: string, castId: string, body: { name?: string; role?: string; description?: string; reference_prompt?: string }) =>
+    put<{ member: CastMember }>(`/api/projects/${id}/cast/${castId}`, body),
+  generateCharacterRefs: (id: string, body: { backend?: string; style_id?: string; custom_style_prompt?: string; style_prompt?: string; cast_ids?: string[] }) =>
+    post<{ cast: CastMember[] }>(`/api/projects/${id}/characters`, body),
+
+  // ── Shorts ──────────────────────────────────────────────────
+  suggestShorts: (id: string, body?: { ollama_model?: string; count?: number }) =>
+    post<{ suggestions: ShortSuggestion[] }>(`/api/projects/${id}/shorts/suggest`, body || {}),
+  renderShorts: (id: string, body?: { scene_indices?: number[]; count?: number; ollama_model?: string; hooks?: Record<number, string> }) =>
+    post<{ status: string; count?: number; scene_indices?: number[] }>(`/api/projects/${id}/shorts`, body || {}),
+  listShorts: (id: string) =>
+    request<{ shorts: ShortItem[]; progress: ShortsProgress }>(`/api/projects/${id}/shorts`),
+  shortsProgress: (id: string) =>
+    request<ShortsProgress>(`/api/projects/${id}/shorts/progress`),
 }

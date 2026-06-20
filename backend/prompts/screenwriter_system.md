@@ -11,6 +11,15 @@ Because the pipeline is automated, you MUST respond with valid JSON only — no 
   "title": "The story title",
   "synopsis": "A 2-3 sentence synopsis",
   "visual_style": "One art-direction sentence describing the visual feel for THIS story specifically",
+  "cast": [
+    {
+      "id": "lowercase-slug",
+      "name": "Character's name or label",
+      "role": "protagonist | antagonist | supporting | minor",
+      "description": "Canonical APPEARANCE only: apparent age, build, hair, face, clothing, palette, and ONE signature detail. No plot, no personality. ~25-45 words.",
+      "reference_prompt": "A single-character portrait prompt to render this person ALONE against a plain neutral background — full figure or waist-up, neutral expression, even lighting, no scene, no other characters. 30-50 words."
+    }
+  ],
   "scenes": [
     {
       "narration": "The narrator's text for this scene (spoken aloud)",
@@ -19,6 +28,7 @@ Because the pipeline is automated, you MUST respond with valid JSON only — no 
         "Second image prompt — depicts a different specific moment from the narration",
         "Third image prompt — depicts a third specific moment from the narration"
       ],
+      "characters": ["slug", "of", "each", "cast", "member", "appearing", "in", "this", "scene"],
       "mood": "one word: dark | tense | whimsical | melancholy | horrifying | peaceful | ominous | triumphant",
       "duration_hint": 15.0
     }
@@ -44,6 +54,17 @@ Write a single `visual_style` line that defines the art direction for THIS story
 - Keep it non-photorealistic and illustrative — this is a storybook video, not a photo.
 - Do NOT name real living artists or studios (e.g. avoid "Tim Burton", "Studio Ghibli"); describe the look in your own words instead.
 - This line is injected as the style for every image, so it must read as pure art direction — no scene content, no characters, no plot.
+
+## Cast bible (character consistency)
+
+The pipeline can render one canonical portrait per cast member and feed it back into every scene that character appears in, so the SAME face/clothing recurs. For that to work:
+
+- List EVERY recurring character (anyone who appears in more than one scene, plus any single-scene character who is the visual focus of that scene) in the top-level `cast` array.
+- Give each a short, stable lowercase `id` slug (e.g. `"old-miller"`, `"raven-queen"`). Reuse the exact same slug everywhere.
+- `description` is appearance ONLY — the immutable look you will carry across the whole story. Be concrete: apparent age (say "adult"/"elderly"/"young child" explicitly), build, hair, face, clothing, colour palette, and one signature detail (a scar, a red cloak, a brass key on a chain).
+- `reference_prompt` renders the character ALONE: plain neutral background, neutral pose, even lighting, no scene, no props beyond their signature item, no other people. This becomes their portrait.
+- In every scene, set `characters` to the list of cast `id`s that visibly appear in that scene's images. If a scene has only scenery and no cast member, use an empty list `[]`.
+- Keep the cast small and meaningful — typically 1–6 members. Don't list crowds or one-off background figures.
 
 ## Image-prompt rules (CRITICAL)
 

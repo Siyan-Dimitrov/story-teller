@@ -511,6 +511,210 @@ async def generate_image_replicate(
     raise last_error  # shouldn't reach here, but just in case
 
 
+# ── Nano Banana (Google Gemini image via Replicate) ─────────────
+# Reference-image-driven generation for character consistency. Unlike the
+# flux-dev-lora "image" param (which is img2img denoising), Nano Banana treats
+# `image_input` as true subject/style references and keeps them consistent.
+
+_NANO_REF_DIRECTIVE = (
+    " Use the provided reference image(s) to keep the recurring characters' "
+    "faces, hair, clothing, colours and body proportions identical; only the "
+    "pose, action, framing and setting should change to match this scene."
+)
+
+
+def _build_nano_banana_prompt(prompt: str, style_prompt: str, has_refs: bool) -> str:
+    """Compose the Nano Banana prompt: style art-direction + scene + (if refs)
+    an explicit consistency directive."""
+    if style_prompt and prompt:
+        full = f"{style_prompt}. {prompt}"
+    else:
+        full = style_prompt or prompt
+    if has_refs:
+        full = full + _NANO_REF_DIRECTIVE
+    return full
+
+
+async def generate_image_nano_banana(
+    prompt: str,
+    style_prompt: str,
+    output_path: Path,
+    seed: int | None = None,
+    reference_images: list[Path] | None = None,
+    aspect_ratio: str | None = None,
+    lora_keys: list[str] | None = None,  # accepted+ignored for call-site uniformity
+) -> Path:
+    """Generate an image with Google's Nano Banana model on Replicate.
+
+    Passes up to ``config.NANO_BANANA_MAX_REFS`` reference images via
+    ``image_input`` so recurring characters stay consistent. Mirrors the retry/
+    backoff and download behaviour of ``generate_image_replicate``.
+    """
+    import asyncio
+    import replicate as _replicate
+
+    refs = [p for p in (reference_images or []) if p and Path(p).exists()]
+    refs = refs[: config.NANO_BANANA_MAX_REFS]
+
+    model = config.REPLICATE_NANO_BANANA_MODEL
+    inp: dict = {
+        "prompt": _build_nano_banana_prompt(prompt, style_prompt, bool(refs)),
+        "output_format": config.NANO_BANANA_OUTPUT_FORMAT,
+        "aspect_ratio": aspect_ratio or _flux_aspect_ratio(),
+    }
+    if refs:
+        # Replicate's client accepts pathlib.Path inputs and uploads them.
+        inp[config.NANO_BANANA_IMAGE_PARAM] = [Path(p) for p in refs]
+
+    max_retries = config.REPLICATE_MAX_RETRIES
+    last_error = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            log.info(
+                f"Nano Banana [{model}]: generating with {len(refs)} ref(s) "
+                f"(attempt {attempt + 1}/{max_retries + 1})"
+            )
+            loop = asyncio.get_event_loop()
+            output = await loop.run_in_executor(None, lambda: _replicate.run(model, input=inp))
+
+            # Output may be a single FileOutput or a list of them.
+            if isinstance(output, list):
+                image_url = str(output[0])
+            else:
+                image_url = str(output)
+
+            async with httpx.AsyncClient(timeout=config.REPLICATE_TIMEOUT_SECONDS) as client:
+                resp = await client.get(image_url)
+                resp.raise_for_status()
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(resp.content)
+
+            log.info(f"Nano Banana image saved to {output_path}")
+            return output_path
+
+        except Exception as e:
+            last_error = e
+            err_str = str(e).lower()
+            is_retryable = any(kw in err_str for kw in [
+                "throttl", "rate", "429", "too many", "overloaded",
+                "503", "502", "timeout", "timed out",
+            ])
+            if not is_retryable or attempt >= max_retries:
+                log.error(f"Nano Banana generation failed: {e}")
+                raise
+            wait = 3.0 * (2 ** attempt)
+            log.warning(f"Nano Banana rate-limited/transient error, retrying in {wait:.0f}s: {e}")
+            await asyncio.sleep(wait)
+
+    raise last_error
+
+
+async def generate_character_references(
+    cast: list[dict],
+    project_dir: Path,
+    backend: str = "nano_banana",
+    style_prompt: str = image_styles.DEFAULT_STYLE_PROMPT,
+    project_seed: int | None = None,
+    only_ids: list[str] | None = None,
+) -> list[dict]:
+    """Render one canonical portrait per cast member and record its path.
+
+    Mutates and returns the cast list with ``reference_image_path`` set
+    (relative to ``project_dir``) for each member rendered. Members that
+    already have a portrait are skipped unless explicitly listed in
+    ``only_ids``.
+    """
+    import asyncio
+
+    chars_dir = project_dir / "characters"
+    chars_dir.mkdir(parents=True, exist_ok=True)
+
+    targets = cast
+    if only_ids is not None:
+        wanted = set(only_ids)
+        targets = [m for m in cast if m.get("id") in wanted]
+
+    generated = 0
+    for i, member in enumerate(cast):
+        cid = member.get("id")
+        if not cid or member not in targets:
+            continue
+        # Skip if already rendered and not explicitly requested.
+        if only_ids is None and member.get("reference_image_path"):
+            existing = project_dir / member["reference_image_path"]
+            if existing.exists():
+                continue
+
+        prompt = (member.get("reference_prompt") or member.get("description") or "").strip()
+        if not prompt:
+            log.warning(f"Cast member {cid!r} has no prompt/description — skipping portrait")
+            continue
+
+        output_path = chars_dir / f"{cid}.png"
+        seed = store.derive_image_seed(project_seed, 9000, i)
+
+        # Throttle cloud calls.
+        if backend in ("replicate", "nano_banana") and generated > 0:
+            await asyncio.sleep(config.REPLICATE_DELAY_SECONDS)
+        elif backend == "gpt_image" and generated > 0 and config.OPENAI_IMAGE_DELAY_SECONDS > 0:
+            await asyncio.sleep(config.OPENAI_IMAGE_DELAY_SECONDS)
+
+        try:
+            if backend == "nano_banana":
+                await generate_image_nano_banana(
+                    prompt=prompt,
+                    style_prompt=style_prompt,
+                    output_path=output_path,
+                    seed=seed,
+                    reference_images=None,
+                    aspect_ratio=config.NANO_BANANA_CHAR_ASPECT_RATIO,
+                )
+            elif backend == "replicate":
+                await generate_image_replicate(
+                    prompt=prompt,
+                    style_prompt=style_prompt,
+                    output_path=output_path,
+                    seed=seed,
+                )
+            elif backend == "gpt_image":
+                await generate_image_gpt_image(
+                    prompt=prompt,
+                    style_prompt=style_prompt,
+                    output_path=output_path,
+                    seed=seed,
+                )
+            else:
+                raise ValueError(f"Backend {backend!r} cannot render character references")
+            member["reference_image_path"] = str(output_path.relative_to(project_dir))
+            generated += 1
+            log.info(f"Character reference for {cid!r} saved ({generated} rendered)")
+        except Exception as e:
+            log.error(f"Character reference generation failed for {cid!r}: {e}")
+            member["reference_image_error"] = str(e)
+
+    return cast
+
+
+def _scene_reference_images(
+    scene: dict,
+    cast_ref_map: dict[str, Path],
+    style_anchor: Path | None,
+    character_consistency: bool,
+) -> list[Path]:
+    """Resolve the reference images for one scene: the portraits of the cast
+    members tagged on the scene, falling back to a style anchor when the scene
+    has no tagged characters but consistency is requested."""
+    refs: list[Path] = []
+    for cid in scene.get("characters") or []:
+        p = cast_ref_map.get(cid)
+        if p and p.exists():
+            refs.append(p)
+    if not refs and character_consistency and style_anchor and style_anchor.exists():
+        refs.append(style_anchor)
+    return refs
+
+
 GPT_IMAGE_STYLE_BOILERPLATE = [
     "dark fairy tale illustration",
     "gothic storybook art",
@@ -872,10 +1076,20 @@ async def generate_scene_images(
     lora_keys: list[str] | None = None,
     reference_image: Path | None = None,
     project_seed: int | None = None,
+    cast: list[dict] | None = None,
+    character_consistency: bool = False,
 ) -> dict:
     """Generate images for a single scene. Returns updated scene with image_paths."""
     images_dir = project_dir / "images"
     images_dir.mkdir(exist_ok=True)
+
+    cast_ref_map: dict[str, Path] = {}
+    for _m in (cast or []):
+        _rp = _m.get("reference_image_path")
+        if _rp:
+            _ap = project_dir / _rp
+            if _ap.exists():
+                cast_ref_map[_m.get("id")] = _ap
 
     idx = scene["index"]
     prompts = scene.get("image_prompts") or []
@@ -914,6 +1128,17 @@ async def generate_scene_images(
                     seed=image_seed,
                     lora_keys=lora_keys,
                     reference_image=reference_image,
+                )
+            elif backend == "nano_banana":
+                scene_refs = _scene_reference_images(
+                    scene, cast_ref_map, reference_image, character_consistency
+                )
+                await generate_image_nano_banana(
+                    prompt=prompt,
+                    style_prompt=style_prompt,
+                    output_path=output_path,
+                    seed=image_seed,
+                    reference_images=scene_refs,
                 )
             elif backend == "gpt_image":
                 await generate_image_gpt_image(
@@ -971,12 +1196,27 @@ async def generate_all_scenes(
     lora_keys: list[str] | None = None,
     character_consistency: bool = False,
     project_seed: int | None = None,
+    cast: list[dict] | None = None,
 ) -> list[dict]:
-    """Generate images for all scenes. Returns updated scenes with image_paths."""
+    """Generate images for all scenes. Returns updated scenes with image_paths.
+
+    When ``backend == "nano_banana"`` and ``cast`` is supplied, each scene's
+    images are generated with the tagged characters' canonical portraits as
+    reference images, keeping recurring characters visually consistent.
+    """
     images_dir = project_dir / "images"
     images_dir.mkdir(exist_ok=True)
 
     import asyncio
+
+    # Map cast id -> absolute portrait path (only those rendered on disk).
+    cast_ref_map: dict[str, Path] = {}
+    for _m in (cast or []):
+        _rp = _m.get("reference_image_path")
+        if _rp:
+            _ap = project_dir / _rp
+            if _ap.exists():
+                cast_ref_map[_m.get("id")] = _ap
 
     total_prompts = sum(
         len(s.get("image_prompts") or []) or (1 if s.get("image_prompt") else 0)
@@ -984,6 +1224,7 @@ async def generate_all_scenes(
     )
     generated = 0
     reference_image_path: Path | None = None
+    style_anchor: Path | None = None  # first good image, used as a fallback anchor
 
     for scene in scenes:
         idx = scene["index"]
@@ -1003,7 +1244,7 @@ async def generate_all_scenes(
             image_seed = store.derive_image_seed(project_seed, idx, img_idx)
 
             # Throttle cloud image calls to avoid common low-tier rate limits.
-            if backend == "replicate" and generated > 0:
+            if backend in ("replicate", "nano_banana") and generated > 0:
                 delay = config.REPLICATE_DELAY_SECONDS
                 log.info(f"Throttling: waiting {delay:.1f}s before next Replicate call")
                 await asyncio.sleep(delay)
@@ -1030,6 +1271,17 @@ async def generate_all_scenes(
                         lora_keys=lora_keys,
                         reference_image=reference_image_path,
                     )
+                elif backend == "nano_banana":
+                    scene_refs = _scene_reference_images(
+                        scene, cast_ref_map, style_anchor, character_consistency
+                    )
+                    await generate_image_nano_banana(
+                        prompt=prompt,
+                        style_prompt=style_prompt,
+                        output_path=output_path,
+                        seed=image_seed,
+                        reference_images=scene_refs,
+                    )
                 elif backend == "gpt_image":
                     await generate_image_gpt_image(
                         prompt=prompt,
@@ -1050,6 +1302,10 @@ async def generate_all_scenes(
                 if character_consistency and backend == "replicate" and reference_image_path is None:
                     reference_image_path = output_path
                     log.info(f"Character consistency: using {output_path} as reference image")
+                # For nano_banana, the first good image becomes a style anchor for
+                # scenes that have no tagged cast members.
+                if backend == "nano_banana" and style_anchor is None:
+                    style_anchor = output_path
                 generated += 1
                 log.info(f"Scene {idx} image {img_idx + 1}/{len(prompts)} done ({generated}/{total_prompts} total)")
             except OpenAIImageAccessError as e:

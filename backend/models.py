@@ -5,6 +5,23 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 
+# ── Cast (character bible for consistency) ───────────────────
+
+class CastMember(BaseModel):
+    """A recurring character whose look is held consistent across scenes.
+
+    The ``reference_image_path`` (a canonical portrait generated once) is fed
+    back into every scene this character appears in, so reference-image models
+    (Nano Banana / Flux Kontext) keep the character identical.
+    """
+    id: str = ""              # stable slug, e.g. "gretel"
+    name: str = ""            # display name
+    role: str = ""            # e.g. "protagonist", "antagonist", "minor"
+    description: str = ""     # canonical appearance — age, hair, clothing, build, one signature detail
+    reference_prompt: str = ""  # prompt used to render the canonical portrait
+    reference_image_path: Optional[str] = None  # relative path once generated
+
+
 # ── Scene ────────────────────────────────────────────────────
 
 class Scene(BaseModel):
@@ -12,6 +29,7 @@ class Scene(BaseModel):
     narration: str = ""
     image_prompt: str = ""
     image_prompts: list[str] = Field(default_factory=list)  # Multiple prompts per scene
+    characters: list[str] = Field(default_factory=list)  # cast ids appearing in this scene
     mood: str = "neutral"
     duration_hint: float = 10.0
     # Populated after generation
@@ -37,6 +55,7 @@ class Script(BaseModel):
     title: str = ""
     synopsis: str = ""
     visual_style: str = ""  # per-story art direction, derived from the story itself
+    cast: list[CastMember] = Field(default_factory=list)  # recurring characters
     scenes: list[Scene] = Field(default_factory=list)
     target_minutes: float = 5.0
     source_tale: str = ""
@@ -136,6 +155,52 @@ class RegenerateSceneImagesRequest(BaseModel):
     style_prompt: Optional[str] = None
     lora_keys: Optional[list[str]] = None
     character_consistency: bool = False
+
+
+# ── Cast / character references ──────────────────────────────
+
+class GenerateCastRequest(BaseModel):
+    """(Re)derive the character bible from the current script via LLM."""
+    ollama_model: Optional[str] = None
+    overwrite: bool = False  # replace an existing cast instead of keeping it
+
+
+class GenerateCharacterRefsRequest(BaseModel):
+    """Render canonical portrait(s) for cast members so they can be reused as
+    reference images across every scene."""
+    backend: str = "nano_banana"  # nano_banana | gpt_image | replicate
+    style_id: Optional[str] = None
+    custom_style_prompt: Optional[str] = None
+    style_prompt: Optional[str] = None
+    cast_ids: Optional[list[str]] = None  # None = all cast members
+
+
+class UpdateCastMemberRequest(BaseModel):
+    """Manual edit of a single cast member's canonical description/prompt."""
+    name: Optional[str] = None
+    role: Optional[str] = None
+    description: Optional[str] = None
+    reference_prompt: Optional[str] = None
+
+
+# ── Shorts ───────────────────────────────────────────────────
+
+class SuggestShortsRequest(BaseModel):
+    """Ask the LLM 'shorts director' to score scenes for standalone potential."""
+    ollama_model: Optional[str] = None
+    count: Optional[int] = None  # how many to suggest (default config.SHORTS_PER_PROJECT)
+
+
+class RenderShortsRequest(BaseModel):
+    """Render vertical shorts for the chosen scene indices.
+
+    ``scene_indices`` None means auto-pick via the director.
+    ``hooks`` optionally overrides the on-screen headline per scene index.
+    """
+    scene_indices: Optional[list[int]] = None
+    count: Optional[int] = None
+    ollama_model: Optional[str] = None
+    hooks: Optional[dict[int, str]] = None
 
 
 class SearchStoriesRequest(BaseModel):

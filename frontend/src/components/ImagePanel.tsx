@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef } from 'react'
-import { ImageIcon, Loader2, RefreshCw, ChevronDown, RotateCcw } from 'lucide-react'
-import type { ProjectState, LoraInfo, ImageStyle } from '../api'
+import { useState, useEffect } from 'react'
+import { ImageIcon, Loader2, RefreshCw, RotateCcw, Users } from 'lucide-react'
+import type { ProjectState, ImageStyle, CastMember } from '../api'
 import { api } from '../api'
 
 interface Props {
@@ -9,102 +9,32 @@ interface Props {
   onNext: () => void
 }
 
-function LoraDropdown({
-  label,
-  sublabel,
-  value,
-  onChange,
-  entries,
-  disabledKey,
-}: {
-  label: string
-  sublabel?: string
-  value: string
-  onChange: (v: string) => void
-  entries: [string, LoraInfo][]
-  disabledKey?: string
-}) {
-  const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [])
-
-  const selected = entries.find(([k]) => k === value)
-  const displayName = selected ? selected[0].replace(/_/g, ' ') : 'None'
-
-  return (
-    <div className="flex-1" ref={ref}>
-      <label className="block text-xs text-[var(--text-secondary)] mb-1.5">
-        {label}
-        {sublabel && <span className="ml-1 text-[var(--text-muted)]">{sublabel}</span>}
-      </label>
-      <div className="relative">
-        <button
-          type="button"
-          onClick={() => setOpen(!open)}
-          className="w-full flex items-center justify-between bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)] text-left"
-        >
-          <span className="capitalize truncate">{displayName}</span>
-          <ChevronDown size={14} className={`ml-2 transition-transform ${open ? 'rotate-180' : ''}`} />
-        </button>
-        {open && (
-          <div className="absolute z-50 mt-1 w-full max-h-64 overflow-y-auto bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg shadow-lg">
-            <button
-              type="button"
-              onClick={() => { onChange(''); setOpen(false) }}
-              className={`w-full text-left px-3 py-2 text-sm hover:bg-[var(--bg-secondary)] ${!value ? 'text-[var(--accent)]' : 'text-[var(--text-primary)]'}`}
-            >
-              None
-            </button>
-            {entries.map(([key, lora]) => {
-              const disabled = key === disabledKey
-              return (
-                <button
-                  key={key}
-                  type="button"
-                  disabled={disabled}
-                  onClick={() => { onChange(key); setOpen(false) }}
-                  className={`w-full text-left px-3 py-2 hover:bg-[var(--bg-secondary)] ${disabled ? 'opacity-40 cursor-not-allowed' : ''} ${key === value ? 'text-[var(--accent)]' : 'text-[var(--text-primary)]'}`}
-                >
-                  <div className="text-sm capitalize">{key.replace(/_/g, ' ')}</div>
-                  {lora.description && (
-                    <div className="text-[10px] text-[var(--text-muted)] mt-0.5 leading-tight">{lora.description}</div>
-                  )}
-                </button>
-              )
-            })}
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
+// Still-image backends offered in the UI. Nano Banana is the default (consistent
+// + cheap); GPT Image kept as a fallback. ComfyUI/Replicate-Flux/Ollama were
+// retired from the dropdown.
+const IMAGE_BACKENDS = ['nano_banana', 'gpt_image'] as const
+const DEFAULT_BACKEND = 'nano_banana'
 
 export default function ImagePanel({ project, onRefresh, onNext }: Props) {
-  const [backend, setBackend] = useState(project.image_backend || 'comfyui')
+  const [backend, setBackend] = useState(
+    (IMAGE_BACKENDS as readonly string[]).includes(project.image_backend)
+      ? project.image_backend
+      : DEFAULT_BACKEND
+  )
   const [imageStyles, setImageStyles] = useState<ImageStyle[]>([])
   const [selectedStyleId, setSelectedStyleId] = useState('')
   const [customStylePrompt, setCustomStylePrompt] = useState('')
   const [generating, setGenerating] = useState(false)
-  const [availableLoras, setAvailableLoras] = useState<Record<string, LoraInfo>>({})
-  const [primaryLora, setPrimaryLora] = useState('')
-  const [secondaryLora, setSecondaryLora] = useState('')
   const [characterConsistency, setCharacterConsistency] = useState(false)
   const [regeneratingScene, setRegeneratingScene] = useState<number | null>(null)
+  const [cast, setCast] = useState<CastMember[]>(project.script?.cast || [])
+  const [castBusy, setCastBusy] = useState<'cast' | 'refs' | null>(null)
 
   useEffect(() => {
-    api.loras().then(data => {
-      setAvailableLoras(data.available)
-      if (data.defaults.length > 0) setPrimaryLora(data.defaults[0])
-      if (data.defaults.length > 1) setSecondaryLora(data.defaults[1])
-    }).catch(() => {})
-  }, [])
+    setCast(project.script?.cast || [])
+  }, [project.script?.cast])
+
+  const supportsRefs = backend === 'nano_banana'
 
   useEffect(() => {
     api.imageStyles().then(data => {
@@ -119,12 +49,6 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
     ? { custom_style_prompt: customStyle, style_prompt: customStyle }
     : selectedStyleId ? { style_id: selectedStyleId } : {}
 
-  useEffect(() => {
-    const defaults = selectedStyle?.default_lora_keys || []
-    setPrimaryLora(defaults[0] || '')
-    setSecondaryLora(defaults[1] || '')
-  }, [selectedStyle])
-
   const scenes = project.script?.scenes || []
   const hasGeneratedImages = scenes.some(s => (s.image_paths && s.image_paths.length > 0) || s.image_path)
   const hasImageResults = scenes.some(s => (s.image_paths && s.image_paths.length > 0) || s.image_path || s.image_error)
@@ -132,12 +56,10 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
   const handleGenerate = async () => {
     setGenerating(true)
     try {
-      const lora_keys = [primaryLora, secondaryLora].filter(Boolean)
       await api.runImages(project.project_id, {
         backend,
         ...styleRequest,
-        ...(lora_keys.length > 0 && { lora_keys }),
-        ...(characterConsistency && backend === 'replicate' ? { character_consistency: true } : {}),
+        ...(characterConsistency && supportsRefs ? { character_consistency: true } : {}),
       })
       onRefresh()
     } catch (e) {
@@ -151,18 +73,45 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
   const handleRegenerateScene = async (sceneIndex: number) => {
     setRegeneratingScene(sceneIndex)
     try {
-      const lora_keys = [primaryLora, secondaryLora].filter(Boolean)
       await api.regenerateSceneImages(project.project_id, sceneIndex, {
         backend,
         ...styleRequest,
-        ...(lora_keys.length > 0 && { lora_keys }),
-        character_consistency: characterConsistency && backend === 'replicate',
+        character_consistency: characterConsistency && supportsRefs,
       })
       onRefresh()
     } catch (e) {
       alert('Scene regeneration failed: ' + (e as Error).message)
     } finally {
       setRegeneratingScene(null)
+    }
+  }
+
+  const handleGenerateCast = async () => {
+    setCastBusy('cast')
+    try {
+      const res = await api.generateCast(project.project_id, { overwrite: true })
+      setCast(res.cast)
+      onRefresh()
+    } catch (e) {
+      alert('Cast generation failed: ' + (e as Error).message)
+    } finally {
+      setCastBusy(null)
+    }
+  }
+
+  const handleGenerateRefs = async () => {
+    setCastBusy('refs')
+    try {
+      const res = await api.generateCharacterRefs(project.project_id, {
+        backend: 'nano_banana',
+        ...styleRequest,
+      })
+      setCast(res.cast)
+      onRefresh()
+    } catch (e) {
+      alert('Character portrait generation failed: ' + (e as Error).message)
+    } finally {
+      setCastBusy(null)
     }
   }
 
@@ -188,10 +137,8 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
                 onChange={e => setBackend(e.target.value)}
                 className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
               >
-                <option value="comfyui">ComfyUI (Local)</option>
-                <option value="replicate">Replicate Flux (Cloud)</option>
+                <option value="nano_banana">Nano Banana (Consistent)</option>
                 <option value="gpt_image">GPT Image 2 (OpenAI)</option>
-                <option value="ollama">Ollama (Placeholder)</option>
               </select>
             </div>
             <div className="flex-1">
@@ -222,33 +169,7 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
               className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--border-focus)] resize-none"
             />
           </div>
-          {(backend === 'comfyui' || backend === 'replicate') && Object.keys(availableLoras).length > 0 && (() => {
-            const loraEntries = Object.entries(availableLoras).filter(([, lora]) =>
-              backend === 'replicate' ? lora.has_flux : true
-            ) as [string, LoraInfo][]
-            if (loraEntries.length === 0) return null
-            return (
-              <div className="flex items-end gap-4">
-                <LoraDropdown
-                  label="Primary LoRA Style"
-                  sublabel={backend === 'replicate' ? '-- FLUX LoRA' : undefined}
-                  value={primaryLora}
-                  onChange={setPrimaryLora}
-                  entries={loraEntries}
-                  disabledKey={secondaryLora}
-                />
-                <LoraDropdown
-                  label="Secondary LoRA Style"
-                  sublabel="-- optional"
-                  value={secondaryLora}
-                  onChange={setSecondaryLora}
-                  entries={loraEntries}
-                  disabledKey={primaryLora}
-                />
-              </div>
-            )
-          })()}
-          {backend === 'replicate' && (
+          {supportsRefs && (
             <label className="flex items-center gap-2 text-sm text-[var(--text-secondary)] cursor-pointer">
               <input
                 type="checkbox"
@@ -257,12 +178,70 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
                 className="rounded border-[var(--border)]"
               />
               <span>Character Consistency</span>
-              <span className="text-[10px] text-[var(--text-muted)]">First image used as visual reference for all subsequent images</span>
+              <span className="text-[10px] text-[var(--text-muted)]">
+                {backend === 'nano_banana'
+                  ? 'Builds a cast bible + per-character reference portraits reused across every scene'
+                  : 'First image used as visual reference for all subsequent images'}
+              </span>
             </label>
+          )}
+          {backend === 'nano_banana' && characterConsistency && (
+            <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-tertiary)] p-3 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="flex items-center gap-1.5 text-xs font-medium text-[var(--text-secondary)]">
+                  <Users size={13} /> Cast & Character References
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleGenerateCast}
+                    disabled={castBusy !== null}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--accent)] disabled:opacity-50"
+                  >
+                    {castBusy === 'cast' ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
+                    {cast.length > 0 ? 'Rebuild cast' : 'Build cast'}
+                  </button>
+                  <button
+                    onClick={handleGenerateRefs}
+                    disabled={castBusy !== null || cast.length === 0}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white disabled:opacity-50"
+                  >
+                    {castBusy === 'refs' ? <Loader2 size={11} className="animate-spin" /> : <ImageIcon size={11} />}
+                    Generate portraits
+                  </button>
+                </div>
+              </div>
+              {cast.length === 0 ? (
+                <p className="text-[11px] text-[var(--text-muted)]">
+                  No cast yet. Build the cast bible (auto-extracted from the script), generate the portraits, then run image generation — each scene reuses its characters' portraits for a consistent look.
+                </p>
+              ) : (
+                <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                  {cast.map(member => (
+                    <div key={member.id} className="rounded-lg overflow-hidden border border-[var(--border)] bg-[var(--bg-secondary)]">
+                      {member.reference_image_path ? (
+                        <img
+                          src={api.artifactUrl(project.project_id, member.reference_image_path)}
+                          alt={member.name}
+                          className="w-full aspect-[3/4] object-cover"
+                        />
+                      ) : (
+                        <div className="w-full aspect-[3/4] flex items-center justify-center text-[var(--text-muted)]">
+                          <Users size={20} className="opacity-40" />
+                        </div>
+                      )}
+                      <div className="px-1.5 py-1">
+                        <div className="text-[11px] font-medium text-[var(--text-primary)] truncate" title={member.name}>{member.name}</div>
+                        {member.role && <div className="text-[9px] text-[var(--text-muted)] capitalize truncate">{member.role}</div>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
           {backend === 'gpt_image' && (
             <p className="text-xs text-[var(--text-muted)]">
-              Uses <code>OPENAI_API_KEY</code> from the backend <code>.env</code> file. LoRA selections are ignored; style is taken from the selected style or custom prompt.
+              Uses <code>OPENAI_API_KEY</code> from the backend <code>.env</code> file. Style is taken from the selected style or custom prompt. No character-reference consistency on this backend.
             </p>
           )}
           <div className="flex justify-end">
@@ -342,7 +321,7 @@ export default function ImagePanel({ project, onRefresh, onNext }: Props) {
             onClick={onNext}
             className="px-4 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-sm font-medium transition-colors"
           >
-            Next: Quality Check
+            Next: Animate
           </button>
         </div>
       )}
