@@ -404,10 +404,13 @@ def _animatediff_clip(
     duration: float,
     target_size: tuple[int, int] = (config.VIDEO_WIDTH, config.VIDEO_HEIGHT),
 ) -> VideoClip:
-    """Load AnimateDiff frames and create a clip that fills the required duration.
+    """Load I2V frames and build a clip that fills the required duration.
 
-    AnimateDiff produces ~16 frames at 8fps = 2 seconds. If the scene needs
-    longer, we ping-pong loop (forward then reverse) to fill the duration.
+    Plays the captured motion FORWARD and, when the scene slot is longer than
+    the clip, slows it down (up to ``config.I2V_MAX_SLOWDOWN``) to fill — so the
+    motion reads as one continuous shot rather than a ping-pong rewind. Only
+    slots longer than ``clip_len * I2V_MAX_SLOWDOWN`` fall back to a forward
+    loop for the remainder (a single forward cut, never a reverse).
     """
     clip_path = Path(clip_dir)
     frame_files = sorted(clip_path.glob("frame_*.png"))
@@ -417,40 +420,36 @@ def _animatediff_clip(
 
     frame_paths = [str(f) for f in frame_files]
     ad_fps = config.ANIMATEDIFF_DEFAULT_FPS
+    native = len(frame_paths) / ad_fps if ad_fps else duration
 
+    # Slowdown factor: stretch one forward pass up to the cap. If the slot is
+    # shorter than the clip this is < 1 (we speed up to fit). Never reverse.
+    slowdown = min(duration / native, config.I2V_MAX_SLOWDOWN) if native > 0 else 1.0
+    slowdown = max(slowdown, 0.01)
+    playback_fps = ad_fps / slowdown  # lower fps => each frame held longer => slower
+
+    looped = duration > native * config.I2V_MAX_SLOWDOWN + 0.05
     log.info(
-        f"[AnimateDiff clip] {clip_path.name}: {len(frame_paths)} frames, "
-        f"target duration={duration:.1f}s"
+        f"[I2V clip] {clip_path.name}: {len(frame_paths)} frames, native={native:.1f}s, "
+        f"slot={duration:.1f}s, slowdown={slowdown:.2f}x"
+        f"{', forward-loop tail' if looped else ''}"
     )
 
-    # Build ping-pong sequence: forward + reverse (minus endpoints to avoid stutter)
-    pingpong = frame_paths + frame_paths[-2:0:-1]
+    # Forward-only frames, repeated only if the slot exceeds one capped pass.
+    total_needed = max(1, math.ceil(duration * playback_fps))
+    repeated: list[str] = []
+    while len(repeated) < total_needed:
+        repeated.extend(frame_paths)
+    repeated = repeated[:total_needed]
 
-    # How many frames do we need at ad_fps to fill the target duration?
-    total_frames_needed = int(duration * ad_fps)
+    clip = ImageSequenceClip(repeated, fps=playback_fps)
 
-    # Repeat the ping-pong cycle to fill
-    repeated = []
-    while len(repeated) < total_frames_needed:
-        repeated.extend(pingpong)
-    repeated = repeated[:total_frames_needed]
-
-    # Create ImageSequenceClip
-    clip = ImageSequenceClip(repeated, fps=ad_fps)
-
-    # I2V models return frames at their own resolution (e.g. 720p = 1280x720).
-    # Without this, the clip composites at native size against 1920x1080
-    # scenes, producing black pillarboxing on the sides.
+    # I2V frames come at the model's own resolution (e.g. 720p); match the canvas
+    # so they don't pillarbox against 1920x1080 scenes.
     if tuple(clip.size) != tuple(target_size):
         clip = clip.resized(new_size=target_size)
 
-    # Adjust speed to match exact target duration
-    if abs(clip.duration - duration) > 0.1:
-        speed_factor = clip.duration / duration
-        clip = clip.with_speed_scaled(speed_factor)
-
     clip = clip.with_duration(duration).with_fps(config.VIDEO_FPS)
-
     return clip
 
 

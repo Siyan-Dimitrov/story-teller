@@ -258,6 +258,11 @@ I2V_DURATION_SECONDS = int(os.getenv("I2V_DURATION_SECONDS", "5"))  # kling: 5 o
 # resolution param directly.
 I2V_RESOLUTION = os.getenv("I2V_RESOLUTION", "720p")
 I2V_OUTPUT_FPS = int(os.getenv("I2V_OUTPUT_FPS", "16"))  # frames extracted from MP4
+# When an I2V clip is shorter than its scene slot, play it forward and SLOW it
+# down to fill (up to this factor) instead of ping-pong/looping — so motion
+# reads as continuous, not a rewind. e.g. 1.5 lets a 5s clip cover a ~7.5s slot.
+# Only slots longer than clip_len * this factor fall back to a forward loop.
+I2V_MAX_SLOWDOWN = float(os.getenv("I2V_MAX_SLOWDOWN", "1.5"))
 # Budget guard — clip count cap per project to avoid runaway spend.
 I2V_MAX_CLIPS_PER_PROJECT = int(os.getenv("I2V_MAX_CLIPS_PER_PROJECT", "36"))
 I2V_TIMEOUT_SECONDS = float(os.getenv("I2V_TIMEOUT_SECONDS", "600.0"))
