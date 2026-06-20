@@ -2,13 +2,37 @@
 
 import json
 import uuid
+import zlib
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import config
 from .config import PROJECTS_DIR
 
 log = logging.getLogger(__name__)
+
+MAX_SEED = 2**32
+
+
+def seed_from_project_id(project_id: str) -> int:
+    return zlib.crc32(project_id.encode("utf-8")) % MAX_SEED
+
+
+def derive_image_seed(project_seed: int | None, scene_index: int, image_index: int) -> int:
+    base = int(project_seed or 0) % MAX_SEED
+    return (base + scene_index * 1000 + image_index * 42) % MAX_SEED
+
+
+def get_project_seed(project_id: str) -> int:
+    state = load_state(project_id)
+    seed = state.get("project_seed")
+    if seed is not None:
+        return int(seed) % MAX_SEED
+
+    seed = seed_from_project_id(project_id)
+    update_state(project_id, project_seed=seed)
+    return seed
 
 
 def create_project() -> tuple[str, Path]:
@@ -27,7 +51,13 @@ def create_project() -> tuple[str, Path]:
         "voice_profile_id": None,
         "voice_language": "en",
         "ollama_model": "kimi-k2.5:cloud",
+        "script_backend": config.SCRIPT_BACKEND,
+        "claude_model": None,
+        "pipeline_writer_model": None,
+        "pipeline_critic_model": None,
+        "pipeline_reviser_model": None,
         "image_backend": "comfyui",
+        "project_seed": seed_from_project_id(project_id),
         "target_minutes": 5.0,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }

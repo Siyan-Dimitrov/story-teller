@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { Sparkles, Loader2, Play, X, Eye } from 'lucide-react'
+import { Sparkles, Loader2, Play, Eye } from 'lucide-react'
 import type { ProjectState } from '../api'
 import { api } from '../api'
 
@@ -30,7 +30,6 @@ export default function AnimationPanel({ project, onRefresh, onNext }: Props) {
   const [error, setError] = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  const isAnimated = project.step === 'animated'
   const scenes = project.script?.scenes || []
   const hasImages = scenes.some(s => (s.image_paths && s.image_paths.length > 0) || s.image_path)
   const hasDepthMaps = scenes.some(s => s.depth_map_paths && s.depth_map_paths.length > 0)

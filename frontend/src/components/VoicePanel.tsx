@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Mic, Play, Loader2 } from 'lucide-react'
+import { Mic, Play, Loader2, AlertTriangle } from 'lucide-react'
 import type { ProjectState, VoiceProfile } from '../api'
 import { api } from '../api'
 
@@ -21,15 +21,23 @@ export default function VoicePanel({ project, onRefresh, onNext }: Props) {
   const [instruct, setInstruct] = useState(DEFAULT_INSTRUCT)
   const [generating, setGenerating] = useState(false)
   const [playingScene, setPlayingScene] = useState<number | null>(null)
+  const [loadingProfiles, setLoadingProfiles] = useState(true)
+  const [voiceboxDown, setVoiceboxDown] = useState(false)
 
   const scenes = project.script?.scenes || []
   const hasAudio = scenes.some(s => s.audio_path)
 
   useEffect(() => {
+    setLoadingProfiles(true)
     api.profiles().then(p => {
       setProfiles(p)
+      setVoiceboxDown(p.length === 0)
       if (!selectedProfile && p.length > 0) setSelectedProfile(p[0].id)
-    }).catch(() => {})
+    }).catch(() => {
+      setVoiceboxDown(true)
+    }).finally(() => {
+      setLoadingProfiles(false)
+    })
   }, [])
 
   const handleGenerate = async () => {
@@ -60,15 +68,36 @@ export default function VoicePanel({ project, onRefresh, onNext }: Props) {
 
   if (!project.script) {
     return (
-      <div className="text-center py-16 text-[var(--text-muted)]">
-        <Mic size={40} className="mx-auto mb-3 opacity-30" />
-        <p>Generate a script first before creating voice-over.</p>
+      <div className="text-center py-16">
+        <Mic size={40} className="mx-auto mb-3 text-[var(--text-secondary)] opacity-50" />
+        <p className="text-[var(--text-secondary)]">Generate a script first before creating voice-over.</p>
       </div>
     )
   }
 
   return (
     <div className="space-y-4">
+      {/* VoiceBox status */}
+      {!loadingProfiles && voiceboxDown && (
+        <div className="flex items-center gap-3 p-4 rounded-xl border border-[var(--warning)]/30 bg-[var(--warning)]/5">
+          <AlertTriangle size={18} className="text-[var(--warning)] shrink-0" />
+          <div>
+            <p className="text-sm font-medium text-[var(--text-primary)]">VoiceBox is not running</p>
+            <p className="text-xs text-[var(--text-secondary)] mt-0.5">
+              Start VoiceBox or check the connection. Voice generation needs VoiceBox at localhost:17493.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Loading profiles */}
+      {loadingProfiles && (
+        <div className="flex items-center justify-center gap-2 py-8 text-[var(--text-secondary)]">
+          <Loader2 size={16} className="animate-spin" />
+          <span className="text-sm">Loading voice profiles...</span>
+        </div>
+      )}
+
       {/* Voice settings */}
       <div className="p-4 rounded-xl border border-[var(--border)] bg-[var(--bg-secondary)] space-y-3">
         <div className="flex items-end gap-4">
@@ -130,9 +159,9 @@ export default function VoicePanel({ project, onRefresh, onNext }: Props) {
             className="flex items-center gap-3 p-3 rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)]"
           >
             <span className="text-xs font-medium text-[var(--accent)] w-16 shrink-0">Scene {i + 1}</span>
-            <p className="flex-1 text-xs text-[var(--text-secondary)] truncate">{scene.narration.slice(0, 100)}...</p>
-            {scene.audio_duration && (
-              <span className="text-xs text-[var(--text-muted)] shrink-0">{scene.audio_duration.toFixed(1)}s</span>
+            <p className="flex-1 text-xs text-[var(--text-secondary)] truncate">{(scene.narration || '').slice(0, 100)}...</p>
+            {scene.audio_duration != null && (
+              <span className="text-xs text-[var(--text-muted)] shrink-0">{Number(scene.audio_duration).toFixed(1)}s</span>
             )}
             {scene.audio_path ? (
               <button

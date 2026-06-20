@@ -1,47 +1,114 @@
-"""Image generation via ComfyUI API or Ollama."""
+"""Image generation via ComfyUI, Replicate, OpenAI GPT Image, or Ollama."""
 
+import base64
+import re
 import time
 import uuid
 import logging
 from pathlib import Path
 import httpx
 
-from . import config
+from . import config, image_styles
+from . import project_store as store
 
 log = logging.getLogger(__name__)
 
+
+class OpenAIImageAccessError(RuntimeError):
+    """Raised when OpenAI rejects the image request for auth or org access."""
+
+
+class OpenAIImageSafetyError(RuntimeError):
+    """Raised when OpenAI rejects the image request for safety reasons."""
+
+    def __init__(self, message: str, request_id: str | None = None):
+        super().__init__(message)
+        self.request_id = request_id
+
 # ── Available LoRAs ─────────────────────────────────────────────
 # Each entry: filename, trigger words to prepend, strength_model, strength_clip
+# For ComfyUI: Uses local .safetensors files
+# For Replicate: Uses flux_lora_key to look up URL in config.FLUX_LORA_URLS
 AVAILABLE_LORAS = {
     "tim_burton": {
         "file": "Tim_Burton_Painting_Style_SDXL.safetensors",
-        "trigger": "Tim Burton Style",
-        "strength_model": 0.7,
+        "trigger": "vicgoth",
+        "strength_model": 1.0,
         "strength_clip": 0.7,
+        "flux_lora_key": "tim_burton",
+        "description": "Sepia-toned Victorian horror with aged, haunting aesthetic and dramatic contrasts",
     },
     "storybook": {
         "file": "StorybookRedmondV2.safetensors",
-        "trigger": "KidsRedmAF",
-        "strength_model": 0.6,
+        "trigger": "d00dlet00n",
+        "strength_model": 0.8,
         "strength_clip": 0.6,
+        "flux_lora_key": "storybook",
+        "description": "Hand-drawn storybook illustration with marker and pencil textures",
     },
     "dark_gothic": {
         "file": "dark_gothic_fantasy_xl.safetensors",
-        "trigger": "dark gothic fantasy",
-        "strength_model": 0.65,
+        "trigger": "",
+        "strength_model": 1.2,
         "strength_clip": 0.65,
+        "flux_lora_key": "dark_gothic",
+        "description": "Rich, painterly dark fantasy with deep shadows and atmospheric lighting",
     },
     "mark_ryden": {
         "file": "Mark_Ryden_Style.safetensors",
-        "trigger": "Mark Ryden Style",
-        "strength_model": 0.7,
+        "trigger": "evangsurreal",
+        "strength_model": 0.8,
         "strength_clip": 0.7,
+        "flux_lora_key": "mark_ryden",
+        "description": "Dreamlike surrealist art with otherworldly atmosphere and sci-fi undertones",
     },
-    "dave_mckean": {
-        "file": "Dave_McKean_Style.safetensors",
-        "trigger": "Dave McKean Style",
-        "strength_model": 0.65,
-        "strength_clip": 0.65,
+    "painterly_illustration": {
+        "file": "",
+        "trigger": "artistic style blends reality and illustration elements",
+        "strength_model": 0.8,
+        "strength_clip": 0.7,
+        "flux_lora_key": "painterly_illustration",
+        "description": "Illustrated characters with realistic backgrounds, blending painterly and photographic styles",
+    },
+    "golden_atmosphere": {
+        "file": "",
+        "trigger": "Golden Dust",
+        "strength_model": 0.8,
+        "strength_clip": 0.7,
+        "flux_lora_key": "golden_atmosphere",
+        "description": "Warm golden hour tones with luminous dust particles and sun-drenched light",
+    },
+    "ghibli_whimsical": {
+        "file": "",
+        "trigger": "GHIBSKY style",
+        "strength_model": 0.8,
+        "strength_clip": 0.7,
+        "flux_lora_key": "ghibli_whimsical",
+        "description": "Studio Ghibli meets Makoto Shinkai — warm, lush landscapes with hand-painted feel",
+    },
+    "children_sketch": {
+        "file": "",
+        "trigger": "sketched style",
+        "strength_model": 0.8,
+        "strength_clip": 0.7,
+        "flux_lora_key": "children_sketch",
+        "description": "Simple hand-drawn children's illustration with soft pastel colors and gentle linework",
+    },
+    "concept_art": {
+        "file": "",
+        "trigger": "mj painterly",
+        "strength_model": 0.8,
+        "strength_clip": 0.7,
+        "flux_lora_key": "concept_art",
+        "description": "Cinematic concept art with dramatic composition and rich painterly detail",
+    },
+    "sketch_paint": {
+        "file": "",
+        "trigger": "sk3tchpa1nt",
+        "strength_model": 0.8,
+        "strength_clip": 0.7,
+        "flux_lora_key": "sketch_paint",
+        "description": "Blend of sketch linework and painterly color washes, mixing drawing and painting",
     },
 }
 
@@ -104,8 +171,8 @@ def _build_workflow(
         prev_clip_ref = [node_id, 1]
         lora_nodes.append(key)
 
-    # Collect trigger words from active LoRAs
-    triggers = ", ".join(AVAILABLE_LORAS[k]["trigger"] for k in valid_loras)
+    # Collect trigger words from active LoRAs (skip empty triggers)
+    triggers = ", ".join(t for k in valid_loras if (t := AVAILABLE_LORAS[k]["trigger"]))
     full_prompt = f"{triggers}, {prompt_text}" if triggers else prompt_text
 
     # CLIP text encoders — connect to last LoRA (or checkpoint if no LoRAs)
@@ -288,16 +355,876 @@ async def generate_image_ollama(
     return output_path
 
 
+def _flux_aspect_ratio() -> str:
+    """Map IMAGE_WIDTH x IMAGE_HEIGHT to the closest Flux-supported aspect ratio."""
+    ratio = config.IMAGE_WIDTH / config.IMAGE_HEIGHT
+    supported = [
+        ("1:1", 1.0), ("16:9", 16 / 9), ("21:9", 21 / 9), ("3:2", 3 / 2),
+        ("2:3", 2 / 3), ("4:5", 4 / 5), ("5:4", 5 / 4), ("3:4", 3 / 4),
+        ("4:3", 4 / 3), ("9:16", 9 / 16), ("9:21", 9 / 21),
+    ]
+    return min(supported, key=lambda x: abs(x[1] - ratio))[0]
+
+
+def _build_kontext_input(
+    prompt: str,
+    style_prompt: str,
+    seed: int,
+    lora_keys: list[str] | None = None,
+    reference_image: "Path | None" = None,
+) -> dict:
+    """Build Replicate FLUX LoRA input parameters.
+
+    Supports up to 2 LoRAs via lora_weights and extra_lora parameters.
+    """
+    # Collect trigger words from active LoRAs
+    triggers = []
+    lora_urls = []
+    lora_scales = []
+
+    if lora_keys:
+        for key in lora_keys:
+            if key in AVAILABLE_LORAS:
+                lora_info = AVAILABLE_LORAS[key]
+                if lora_info["trigger"]:  # Only add non-empty triggers
+                    triggers.append(lora_info["trigger"])
+                flux_key = lora_info.get("flux_lora_key")
+                if flux_key:
+                    lora_url = config.FLUX_LORA_URLS.get(flux_key)
+                    if lora_url:
+                        lora_urls.append(lora_url)
+                        lora_scales.append(lora_info.get("strength_model", 0.7))
+
+    # Combine trigger words with style and scene prompt
+    trigger_str = ", ".join(triggers) if triggers else ""
+    if trigger_str and style_prompt:
+        full_prompt = f"{trigger_str}, {style_prompt}, {prompt}"
+    elif trigger_str:
+        full_prompt = f"{trigger_str}, {prompt}"
+    elif style_prompt:
+        full_prompt = f"{style_prompt}, {prompt}"
+    else:
+        full_prompt = prompt
+
+    inp = {
+        "prompt": full_prompt,
+        "aspect_ratio": _flux_aspect_ratio(),
+        "megapixels": "1",
+        "seed": seed,
+        "num_outputs": 1,
+        "output_format": "png",
+        "guidance_scale": 3.5,
+    }
+
+    if reference_image is not None:
+        inp["image"] = reference_image
+
+    # Add LoRA weights if available
+    if len(lora_urls) >= 1:
+        inp["lora_weights"] = lora_urls[0]
+        inp["lora_scale"] = lora_scales[0]
+        log.info(f"Primary LoRA: {lora_urls[0]} (scale={lora_scales[0]})")
+
+    if len(lora_urls) >= 2:
+        inp["extra_lora"] = lora_urls[1]
+        inp["extra_lora_scale"] = lora_scales[1]
+        log.info(f"Secondary LoRA: {lora_urls[1]} (scale={lora_scales[1]})")
+
+    # Add API tokens if using CivitAI URLs
+    if any("civitai.com" in url for url in lora_urls):
+        if config.CIVITAI_API_TOKEN:
+            inp["civitai_api_token"] = config.CIVITAI_API_TOKEN
+            log.debug("Added CivitAI API token")
+
+    return inp
+
+
+async def generate_image_replicate(
+    prompt: str,
+    style_prompt: str,
+    output_path: Path,
+    seed: int | None = None,
+    lora_keys: list[str] | None = None,
+    reference_image: "Path | None" = None,
+) -> Path:
+    """Generate an image using Replicate's FLUX model with LoRA support.
+
+    Supports loading LoRA weights from HuggingFace or CivitAI URLs.
+    Includes retry with exponential backoff for rate-limit (429) and transient errors.
+    """
+    import asyncio
+    import replicate as _replicate
+
+    if seed is None:
+        seed = int(time.time() * 1000) % (2**32)
+
+    model = config.REPLICATE_MODEL
+    inp = _build_kontext_input(prompt, style_prompt, seed, lora_keys, reference_image=reference_image)
+
+    # Add inference steps based on model variant
+    if "schnell" in model:
+        inp["num_inference_steps"] = 4
+        inp["go_fast"] = True  # Use fp8 quantization for speed
+    else:
+        inp["num_inference_steps"] = 28
+        inp["go_fast"] = False  # Use bf16 for better LoRA fidelity
+
+    max_retries = config.REPLICATE_MAX_RETRIES
+    last_error = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            log.info(f"Replicate [{model}]: generating (seed={seed}, attempt {attempt + 1}/{max_retries + 1})")
+
+            loop = asyncio.get_event_loop()
+            output = await loop.run_in_executor(None, lambda: _replicate.run(model, input=inp))
+
+            # output is a list of FileOutput objects (URL-like)
+            image_url = str(output[0]) if isinstance(output, list) else str(output)
+
+            async with httpx.AsyncClient(timeout=config.REPLICATE_TIMEOUT_SECONDS) as client:
+                resp = await client.get(image_url)
+                resp.raise_for_status()
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(resp.content)
+
+            log.info(f"Replicate image saved to {output_path}")
+            return output_path
+
+        except Exception as e:
+            last_error = e
+            err_str = str(e).lower()
+            is_retryable = any(kw in err_str for kw in [
+                "throttl", "rate", "429", "too many", "overloaded",
+                "503", "502", "timeout", "timed out",
+            ])
+
+            if not is_retryable or attempt >= max_retries:
+                log.error(f"Replicate generation failed (not retryable or out of retries): {e}")
+                raise
+
+            # Exponential backoff: 3s, 6s, 12s ...
+            wait = 3.0 * (2 ** attempt)
+            log.warning(f"Replicate rate-limited/transient error, retrying in {wait:.0f}s: {e}")
+            await asyncio.sleep(wait)
+
+    raise last_error  # shouldn't reach here, but just in case
+
+
+# ── Nano Banana (Google Gemini image via Replicate) ─────────────
+# Reference-image-driven generation for character consistency. Unlike the
+# flux-dev-lora "image" param (which is img2img denoising), Nano Banana treats
+# `image_input` as true subject/style references and keeps them consistent.
+
+_NANO_REF_DIRECTIVE = (
+    " Use the provided reference image(s) to keep the recurring characters' "
+    "faces, hair, clothing, colours and body proportions identical; only the "
+    "pose, action, framing and setting should change to match this scene."
+)
+
+
+def _build_nano_banana_prompt(prompt: str, style_prompt: str, has_refs: bool) -> str:
+    """Compose the Nano Banana prompt: style art-direction + scene + (if refs)
+    an explicit consistency directive."""
+    if style_prompt and prompt:
+        full = f"{style_prompt}. {prompt}"
+    else:
+        full = style_prompt or prompt
+    if has_refs:
+        full = full + _NANO_REF_DIRECTIVE
+    return full
+
+
+async def generate_image_nano_banana(
+    prompt: str,
+    style_prompt: str,
+    output_path: Path,
+    seed: int | None = None,
+    reference_images: list[Path] | None = None,
+    aspect_ratio: str | None = None,
+    lora_keys: list[str] | None = None,  # accepted+ignored for call-site uniformity
+) -> Path:
+    """Generate an image with Google's Nano Banana model on Replicate.
+
+    Passes up to ``config.NANO_BANANA_MAX_REFS`` reference images via
+    ``image_input`` so recurring characters stay consistent. Mirrors the retry/
+    backoff and download behaviour of ``generate_image_replicate``.
+    """
+    import asyncio
+    import replicate as _replicate
+
+    refs = [p for p in (reference_images or []) if p and Path(p).exists()]
+    refs = refs[: config.NANO_BANANA_MAX_REFS]
+
+    model = config.REPLICATE_NANO_BANANA_MODEL
+    inp: dict = {
+        "prompt": _build_nano_banana_prompt(prompt, style_prompt, bool(refs)),
+        "output_format": config.NANO_BANANA_OUTPUT_FORMAT,
+        "aspect_ratio": aspect_ratio or _flux_aspect_ratio(),
+    }
+    if refs:
+        # Replicate's client accepts pathlib.Path inputs and uploads them.
+        inp[config.NANO_BANANA_IMAGE_PARAM] = [Path(p) for p in refs]
+
+    max_retries = config.REPLICATE_MAX_RETRIES
+    last_error = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            log.info(
+                f"Nano Banana [{model}]: generating with {len(refs)} ref(s) "
+                f"(attempt {attempt + 1}/{max_retries + 1})"
+            )
+            loop = asyncio.get_event_loop()
+            output = await loop.run_in_executor(None, lambda: _replicate.run(model, input=inp))
+
+            # Output may be a single FileOutput or a list of them.
+            if isinstance(output, list):
+                image_url = str(output[0])
+            else:
+                image_url = str(output)
+
+            async with httpx.AsyncClient(timeout=config.REPLICATE_TIMEOUT_SECONDS) as client:
+                resp = await client.get(image_url)
+                resp.raise_for_status()
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(resp.content)
+
+            log.info(f"Nano Banana image saved to {output_path}")
+            return output_path
+
+        except Exception as e:
+            last_error = e
+            err_str = str(e).lower()
+            is_retryable = any(kw in err_str for kw in [
+                "throttl", "rate", "429", "too many", "overloaded",
+                "503", "502", "timeout", "timed out",
+            ])
+            if not is_retryable or attempt >= max_retries:
+                log.error(f"Nano Banana generation failed: {e}")
+                raise
+            wait = 3.0 * (2 ** attempt)
+            log.warning(f"Nano Banana rate-limited/transient error, retrying in {wait:.0f}s: {e}")
+            await asyncio.sleep(wait)
+
+    raise last_error
+
+
+async def generate_character_references(
+    cast: list[dict],
+    project_dir: Path,
+    backend: str = "nano_banana",
+    style_prompt: str = image_styles.DEFAULT_STYLE_PROMPT,
+    project_seed: int | None = None,
+    only_ids: list[str] | None = None,
+) -> list[dict]:
+    """Render one canonical portrait per cast member and record its path.
+
+    Mutates and returns the cast list with ``reference_image_path`` set
+    (relative to ``project_dir``) for each member rendered. Members that
+    already have a portrait are skipped unless explicitly listed in
+    ``only_ids``.
+    """
+    import asyncio
+
+    chars_dir = project_dir / "characters"
+    chars_dir.mkdir(parents=True, exist_ok=True)
+
+    targets = cast
+    if only_ids is not None:
+        wanted = set(only_ids)
+        targets = [m for m in cast if m.get("id") in wanted]
+
+    generated = 0
+    for i, member in enumerate(cast):
+        cid = member.get("id")
+        if not cid or member not in targets:
+            continue
+        # Skip if already rendered and not explicitly requested.
+        if only_ids is None and member.get("reference_image_path"):
+            existing = project_dir / member["reference_image_path"]
+            if existing.exists():
+                continue
+
+        prompt = (member.get("reference_prompt") or member.get("description") or "").strip()
+        if not prompt:
+            log.warning(f"Cast member {cid!r} has no prompt/description — skipping portrait")
+            continue
+
+        output_path = chars_dir / f"{cid}.png"
+        seed = store.derive_image_seed(project_seed, 9000, i)
+
+        # Throttle cloud calls.
+        if backend in ("replicate", "nano_banana") and generated > 0:
+            await asyncio.sleep(config.REPLICATE_DELAY_SECONDS)
+        elif backend == "gpt_image" and generated > 0 and config.OPENAI_IMAGE_DELAY_SECONDS > 0:
+            await asyncio.sleep(config.OPENAI_IMAGE_DELAY_SECONDS)
+
+        try:
+            if backend == "nano_banana":
+                await generate_image_nano_banana(
+                    prompt=prompt,
+                    style_prompt=style_prompt,
+                    output_path=output_path,
+                    seed=seed,
+                    reference_images=None,
+                    aspect_ratio=config.NANO_BANANA_CHAR_ASPECT_RATIO,
+                )
+            elif backend == "replicate":
+                await generate_image_replicate(
+                    prompt=prompt,
+                    style_prompt=style_prompt,
+                    output_path=output_path,
+                    seed=seed,
+                )
+            elif backend == "gpt_image":
+                await generate_image_gpt_image(
+                    prompt=prompt,
+                    style_prompt=style_prompt,
+                    output_path=output_path,
+                    seed=seed,
+                )
+            else:
+                raise ValueError(f"Backend {backend!r} cannot render character references")
+            member["reference_image_path"] = str(output_path.relative_to(project_dir))
+            generated += 1
+            log.info(f"Character reference for {cid!r} saved ({generated} rendered)")
+        except Exception as e:
+            log.error(f"Character reference generation failed for {cid!r}: {e}")
+            member["reference_image_error"] = str(e)
+
+    return cast
+
+
+def _scene_reference_images(
+    scene: dict,
+    cast_ref_map: dict[str, Path],
+    style_anchor: Path | None,
+    character_consistency: bool,
+) -> list[Path]:
+    """Resolve the reference images for one scene: the portraits of the cast
+    members tagged on the scene, falling back to a style anchor when the scene
+    has no tagged characters but consistency is requested."""
+    refs: list[Path] = []
+    for cid in scene.get("characters") or []:
+        p = cast_ref_map.get(cid)
+        if p and p.exists():
+            refs.append(p)
+    if not refs and character_consistency and style_anchor and style_anchor.exists():
+        refs.append(style_anchor)
+    return refs
+
+
+GPT_IMAGE_STYLE_BOILERPLATE = [
+    "dark fairy tale illustration",
+    "gothic storybook art",
+    "atmospheric",
+    "detailed",
+    "moody lighting",
+    "dramatic shadows",
+    "rich colors",
+]
+
+# Story-agnostic safety rewrites. These soften the categories that image
+# moderation commonly rejects (gore, death, weapons, fire, restraint, sexual
+# content, cannibalism, children-in-danger) into symbolic, non-graphic folklore
+# imagery — without referencing any particular story or character. Ordered most
+# specific → most general so multi-word phrases are caught before single words.
+GPT_IMAGE_SAFETY_REPLACEMENTS = [
+    # ── Real-artist name-drops the model may refuse ──
+    (r"\bTim Burton(?: ?-?inspired| style)?\b", "whimsical gothic silhouettes"),
+    (r"\bStudio Ghibli(?: style)?\b", "warm hand-painted animation aesthetic"),
+    (r"\bMark Ryden(?: style)?\b", "dreamlike surrealist storybook aesthetic"),
+
+    # ── Blood & gore ──
+    (r"\bpool of blood\b", "spreading dark red shadow"),
+    (r"\bcovered in blood\b", "marked with deep red"),
+    (r"\bblood(?:y|ied|stained|-stained|-soaked)?\b", "deep red color"),
+    (r"\bgore\b", "dark dramatic detail"),
+    (r"\bgory\b", "darkly dramatic"),
+    (r"\bgaping wound\b", "dark tear in the cloth"),
+    (r"\bwounds?\b", "dark mark"),
+    (r"\bguts?\b", "tangled red ribbons"),
+    (r"\bentrails\b", "tangled red ribbons"),
+
+    # ── Death & bodies ──
+    (r"\bsevered\b", "broken"),
+    (r"\bdecapitat(?:e|ed|ion)\b", "shadowed and faceless"),
+    (r"\bmutilat(?:e|ed|ion)\b", "broken"),
+    (r"\bcorpses?\b", "motionless figure"),
+    (r"\bdead bod(?:y|ies)\b", "motionless figure"),
+    (r"\bbody lying\b", "resting figure"),
+    (r"\brotting\b", "withered"),
+    (r"\bdecaying\b", "withered"),
+    (r"\bdead\b", "still and silent"),
+    (r"\bdeath\b", "eternal stillness"),
+    (r"\bdying\b", "fading"),
+
+    # ── Weapons & violence ──
+    (r"\bstabb(?:ing|ed)\b", "reaching dramatically toward"),
+    (r"\bslitting\b", "drawing a line across"),
+    (r"\bbloody (?:knife|blade|dagger|sword|axe)\b", "gleaming ceremonial blade"),
+    (r"\b(?:hunting|carving|butcher'?s?) knife\b", "small ceremonial blade"),
+    (r"\bcleaver\b", "ceremonial blade"),
+
+    # ── Restraint / captivity ──
+    (r"\bbound (?:with|in) (?:ropes?|chains?)\b", "surrounded by guards"),
+    (r"\btied to (?:a |the )?(?:burning |flaming )?(?:stake|post|tree|chair|pyre)\b", "standing before a wooden post"),
+    (r"\btied (?:up|down)\b", "standing"),
+    (r"\btied to\b", "standing before"),
+    (r"\biron chains\b", "heavy dark garments"),
+    (r"\bchains\b", "dark ribbons"),
+    (r"\bshackl(?:e|es|ed)\b", "dark ribbons"),
+    (r"\bnoose\b", "looped rope ornament"),
+
+    # ── Fire / burning ──
+    (r"\bburned alive\b", "encircled by distant firelight"),
+    (r"\bburning at the stake\b", "standing before a firelit platform"),
+    (r"\bwooden pyre\b", "ceremonial wooden platform"),
+    (r"\bpyre\b", "ceremonial platform"),
+    (r"\bengulfed in flames\b", "lit by warm orange firelight"),
+    (r"\bburning\b", "glowing with warm firelight"),
+    (r"\bset (?:on|a)?\s*fire\b", "lit by warm firelight"),
+    (r"\bstake\b", "wooden post"),
+
+    # ── Torture / cruelty ──
+    (r"\btortur(?:e|ed|ing)\b", "facing a grim ordeal"),
+    (r"\bscream(?:ing)? of horror\b", "a startled cry"),
+    (r"\bscreaming\b", "crying out"),
+    (r"\bhorror\b", "dread"),
+
+    # ── Sexual content / nudity ──
+    (r"\bnaked\b", "draped in flowing cloth"),
+    (r"\bnude\b", "draped in flowing cloth"),
+    (r"\bbare(?:-| )(?:breasts?|chest|skin)\b", "draped in flowing cloth"),
+    (r"\bbreasts?\b", "draped bodice"),
+    (r"\bcleavage\b", "draped bodice"),
+    (r"\bpregnant\b", "wearing a full flowing gown"),
+    (r"\bnursing\b", "cradling"),
+    (r"\bsuckling\b", "cradling"),
+
+    # ── Cannibalism / consumption ──
+    (r"\bcannibal(?:ism)?\b", "grim symbolic feast"),
+    (r"\broasted (?:human )?(?:flesh|meat|body)\b", "covered banquet dish"),
+    (r"\bhuman flesh\b", "covered banquet dish"),
+    (r"\beating (?:a |the )?(?:child|children|baby|infant|person|man|woman)\b", "a grim symbolic feast"),
+
+    # ── Children in danger ──
+    (r"\bchild(?:ren)? in danger\b", "children depicted safely"),
+    (r"\b(?:dead|murdered|harmed) child(?:ren)?\b", "a sleeping child"),
+]
+
+
+def _normalize_prompt_text(text: str) -> str:
+    text = re.sub(r"\s+", " ", text or "")
+    text = re.sub(r"\s+,", ",", text)
+    text = re.sub(r",\s*,+", ", ", text)
+    return text.strip(" ,")
+
+
+def _strip_gpt_image_style_boilerplate(text: str) -> str:
+    cleaned = text or ""
+    for phrase in GPT_IMAGE_STYLE_BOILERPLATE:
+        cleaned = re.sub(rf"(?:,\s*)?\b{re.escape(phrase)}\b", "", cleaned, flags=re.IGNORECASE)
+    return _normalize_prompt_text(cleaned)
+
+
+def _make_gpt_image_safe_text(text: str) -> str:
+    safe_text = _strip_gpt_image_style_boilerplate(text)
+    for pattern, replacement in GPT_IMAGE_SAFETY_REPLACEMENTS:
+        safe_text = re.sub(pattern, replacement, safe_text, flags=re.IGNORECASE)
+    return _normalize_prompt_text(safe_text)
+
+
+def _build_gpt_image_prompt(
+    prompt: str,
+    style_prompt: str,
+    lora_keys: list[str] | None = None,
+    safety_mode: bool = False,
+) -> str:
+    style_parts = []
+    if style_prompt:
+        style_parts.append(style_prompt)
+
+    # GPT Image cannot load LoRA weights, but preserving the selected style
+    # descriptions keeps batch presets meaningful when this backend is selected.
+    if lora_keys:
+        descriptions = [
+            AVAILABLE_LORAS[key]["description"]
+            for key in lora_keys
+            if key in AVAILABLE_LORAS and AVAILABLE_LORAS[key].get("description")
+        ]
+        if descriptions:
+            style_parts.append("Visual style references: " + "; ".join(descriptions))
+
+    # The style text carries the per-story visual "feel" (see
+    # `_resolve_image_style_request` in main.py, which prefers the script's
+    # story-derived `visual_style`). It is intentionally NOT run through the
+    # boilerplate stripper — that would erase the very mood words that give each
+    # story its own look. Only the scene description is stripped, since scene
+    # prompts are meant to be pure description with no style boilerplate.
+    style_text = ", ".join(style_parts) or "atmospheric storybook illustration"
+    scene_text = _strip_gpt_image_style_boilerplate(prompt)
+
+    if safety_mode:
+        scene_text = _make_gpt_image_safe_text(scene_text)
+        style_text = _make_gpt_image_safe_text(style_text)
+        return (
+            "Illustrate this scene as a 16:9 frame for an adult folklore story video, "
+            "in the visual style described below.\n"
+            f"Scene: {scene_text}\n"
+            f"Style: {style_text}\n"
+            "Keep the visual symbolic and non-graphic: no gore, no visible injury, "
+            "no sexual content, no intimate contact, no restraint, no torture, "
+            "no explicit burning, and no minors in danger. Honor the style's mood, "
+            "with strong composition, rich detail, and no captions, watermarks, "
+            "UI elements, logos, or unintended text."
+        )
+
+    return (
+        "Illustrate this scene as a 16:9 frame for an adult folklore story video, "
+        "in the visual style described below.\n"
+        f"Scene: {scene_text}\n"
+        f"Style: {style_text}\n"
+        "Honor the style's mood and palette, with strong composition and rich "
+        "detail, and no captions, watermarks, UI elements, logos, or unintended text."
+    )
+
+
+def _extract_openai_error(resp: httpx.Response) -> tuple[str, dict, str | None]:
+    detail = resp.text
+    error_obj: dict = {}
+    request_id = resp.headers.get("x-request-id") or resp.headers.get("openai-request-id")
+    try:
+        parsed = resp.json()
+        if isinstance(parsed, dict) and isinstance(parsed.get("error"), dict):
+            error_obj = parsed["error"]
+            detail = error_obj.get("message") or detail
+    except Exception:
+        pass
+    return detail, error_obj, request_id
+
+
+def _is_openai_safety_error(status_code: int, detail: str, error_obj: dict) -> bool:
+    fields = [detail]
+    for key in ("message", "code", "type", "param"):
+        value = error_obj.get(key)
+        if value:
+            fields.append(str(value))
+    haystack = " ".join(fields).lower()
+    markers = (
+        "safety",
+        "content_policy",
+        "content policy",
+        "moderation",
+        "unsafe",
+        "disallowed",
+        "rejected",
+    )
+    return status_code == 400 and any(marker in haystack for marker in markers)
+
+
+def _raise_openai_image_error(resp: httpx.Response) -> None:
+    detail, error_obj, request_id = _extract_openai_error(resp)
+    request_text = f" Request ID: {request_id}." if request_id else ""
+
+    if resp.status_code in (401, 403):
+        raise OpenAIImageAccessError(
+            f"OpenAI image generation failed ({resp.status_code}): {detail}{request_text}"
+        )
+
+    if _is_openai_safety_error(resp.status_code, detail, error_obj):
+        raise OpenAIImageSafetyError(
+            "OpenAI rejected this image prompt for safety reasons."
+            f"{request_text} Try a symbolic, non-graphic version of the scene.",
+            request_id=request_id,
+        )
+
+    raise RuntimeError(f"OpenAI image generation failed ({resp.status_code}): {detail}{request_text}")
+
+
+async def _request_gpt_image(client: httpx.AsyncClient, payload: dict) -> bytes:
+    resp = await client.post(
+        f"{config.OPENAI_IMAGE_BASE_URL}/images/generations",
+        json=payload,
+    )
+
+    if resp.status_code >= 400:
+        _raise_openai_image_error(resp)
+
+    data = resp.json()
+    images = data.get("data") or []
+    if not images:
+        raise RuntimeError("OpenAI image generation returned no image data")
+
+    image_info = images[0]
+    b64_json = image_info.get("b64_json")
+    if b64_json:
+        return base64.b64decode(b64_json)
+    if image_info.get("url"):
+        image_resp = await client.get(image_info["url"], timeout=60)
+        image_resp.raise_for_status()
+        return image_resp.content
+    raise RuntimeError("OpenAI image generation response had no b64_json or url")
+
+
+async def generate_image_gpt_image(
+    prompt: str,
+    style_prompt: str,
+    output_path: Path,
+    seed: int | None = None,
+    lora_keys: list[str] | None = None,
+) -> Path:
+    """Generate an image using OpenAI GPT Image 2 through the Images API."""
+    if not config.OPENAI_API_KEY:
+        raise RuntimeError("OpenAI image backend requires OPENAI_API_KEY in the repo .env file.")
+
+    headers = {
+        "Authorization": f"Bearer {config.OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    if config.OPENAI_ORG_ID:
+        headers["OpenAI-Organization"] = config.OPENAI_ORG_ID
+
+    payload = {
+        "model": config.OPENAI_IMAGE_MODEL,
+        "prompt": _build_gpt_image_prompt(prompt, style_prompt, lora_keys),
+        "n": 1,
+        "size": config.OPENAI_IMAGE_SIZE,
+        "quality": config.OPENAI_IMAGE_QUALITY,
+        "output_format": config.OPENAI_IMAGE_FORMAT,
+    }
+    if config.OPENAI_IMAGE_BACKGROUND:
+        payload["background"] = config.OPENAI_IMAGE_BACKGROUND
+
+    log.info(
+        "OpenAI image [%s]: generating size=%s quality=%s seed=%s",
+        config.OPENAI_IMAGE_MODEL,
+        config.OPENAI_IMAGE_SIZE,
+        config.OPENAI_IMAGE_QUALITY,
+        seed,
+    )
+
+    async with httpx.AsyncClient(
+        timeout=config.OPENAI_IMAGE_TIMEOUT_SECONDS,
+        headers=headers,
+    ) as client:
+        try:
+            image_bytes = await _request_gpt_image(client, payload)
+        except OpenAIImageSafetyError as first_error:
+            log.warning(
+                "OpenAI safety rejected image prompt; retrying with sanitized prompt%s",
+                f" (request_id={first_error.request_id})" if first_error.request_id else "",
+            )
+            safe_payload = dict(payload)
+            safe_payload["prompt"] = _build_gpt_image_prompt(
+                prompt,
+                style_prompt,
+                lora_keys,
+                safety_mode=True,
+            )
+            try:
+                image_bytes = await _request_gpt_image(client, safe_payload)
+            except OpenAIImageSafetyError as retry_error:
+                raise OpenAIImageSafetyError(
+                    "OpenAI rejected this image prompt after a safe retry."
+                    " Rewrite the scene as symbolic, non-graphic folklore imagery and retry.",
+                    request_id=retry_error.request_id or first_error.request_id,
+                ) from retry_error
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(image_bytes)
+    log.info(f"OpenAI image saved to {output_path}")
+    return output_path
+
+
+def _record_scene_image_error(
+    scene: dict,
+    image_index: int,
+    message: str,
+    *,
+    safety: bool = False,
+) -> None:
+    image_errors = scene.setdefault("image_errors", [])
+    while len(image_errors) <= image_index:
+        image_errors.append(None)
+    image_errors[image_index] = message
+
+    active_errors = [err for err in image_errors if err]
+    if len(active_errors) == 1:
+        scene["image_error"] = active_errors[0]
+    elif active_errors:
+        scene["image_error"] = f"{len(active_errors)} image prompts failed. First error: {active_errors[0]}"
+
+    if safety:
+        scene["image_safety_error"] = True
+
+
+def _finalize_scene_image_errors(scene: dict) -> None:
+    image_errors = scene.get("image_errors") or []
+    if not any(image_errors):
+        scene.pop("image_errors", None)
+        scene.pop("image_error", None)
+        scene.pop("image_safety_error", None)
+
+
+async def generate_scene_images(
+    scene: dict,
+    project_dir: Path,
+    backend: str = "comfyui",
+    style_prompt: str = image_styles.DEFAULT_STYLE_PROMPT,
+    lora_keys: list[str] | None = None,
+    reference_image: Path | None = None,
+    project_seed: int | None = None,
+    cast: list[dict] | None = None,
+    character_consistency: bool = False,
+) -> dict:
+    """Generate images for a single scene. Returns updated scene with image_paths."""
+    images_dir = project_dir / "images"
+    images_dir.mkdir(exist_ok=True)
+
+    cast_ref_map: dict[str, Path] = {}
+    for _m in (cast or []):
+        _rp = _m.get("reference_image_path")
+        if _rp:
+            _ap = project_dir / _rp
+            if _ap.exists():
+                cast_ref_map[_m.get("id")] = _ap
+
+    idx = scene["index"]
+    prompts = scene.get("image_prompts") or []
+    if not prompts:
+        single = scene.get("image_prompt", "")
+        prompts = [single] if single else []
+
+    scene["image_paths"] = []
+    scene["image_errors"] = []
+    scene.pop("image_error", None)
+    scene.pop("image_safety_error", None)
+
+    for img_idx, prompt in enumerate(prompts):
+        output_path = images_dir / f"scene_{idx:04d}_img_{img_idx}.png"
+        image_seed = store.derive_image_seed(project_seed, idx, img_idx)
+
+        if backend == "gpt_image" and img_idx > 0 and config.OPENAI_IMAGE_DELAY_SECONDS > 0:
+            delay = config.OPENAI_IMAGE_DELAY_SECONDS
+            log.info(f"Throttling: waiting {delay:.1f}s before next OpenAI image call")
+            await _async_sleep(delay)
+
+        try:
+            if backend == "comfyui":
+                await generate_image_comfyui(
+                    prompt=prompt,
+                    style_prompt=style_prompt,
+                    output_path=output_path,
+                    seed=image_seed,
+                    lora_keys=lora_keys,
+                )
+            elif backend == "replicate":
+                await generate_image_replicate(
+                    prompt=prompt,
+                    style_prompt=style_prompt,
+                    output_path=output_path,
+                    seed=image_seed,
+                    lora_keys=lora_keys,
+                    reference_image=reference_image,
+                )
+            elif backend == "nano_banana":
+                scene_refs = _scene_reference_images(
+                    scene, cast_ref_map, reference_image, character_consistency
+                )
+                await generate_image_nano_banana(
+                    prompt=prompt,
+                    style_prompt=style_prompt,
+                    output_path=output_path,
+                    seed=image_seed,
+                    reference_images=scene_refs,
+                )
+            elif backend == "gpt_image":
+                await generate_image_gpt_image(
+                    prompt=prompt,
+                    style_prompt=style_prompt,
+                    output_path=output_path,
+                    seed=image_seed,
+                    lora_keys=lora_keys,
+                )
+            else:
+                await generate_image_ollama(
+                    prompt=prompt,
+                    style_prompt=style_prompt,
+                    output_path=output_path,
+                )
+            rel = str(output_path.relative_to(project_dir))
+            scene["image_paths"].append(rel)
+            log.info(f"Scene {idx} image {img_idx + 1}/{len(prompts)} done")
+        except OpenAIImageAccessError as e:
+            log.error(f"OpenAI image access failed for scene {idx} img {img_idx}: {e}")
+            scene["image_error"] = str(e)
+            raise
+        except OpenAIImageSafetyError as e:
+            log.error(f"OpenAI image safety rejection for scene {idx} img {img_idx}: {e}")
+            _record_scene_image_error(scene, img_idx, str(e), safety=True)
+        except Exception as e:
+            log.error(f"Image generation failed for scene {idx} img {img_idx}: {e}")
+            try:
+                await generate_image_ollama(
+                    prompt=prompt,
+                    style_prompt="",
+                    output_path=output_path,
+                )
+                rel = str(output_path.relative_to(project_dir))
+                scene["image_paths"].append(rel)
+                _record_scene_image_error(
+                    scene,
+                    img_idx,
+                    f"Generated placeholder after image backend failed: {e}",
+                )
+            except Exception as e2:
+                log.error(f"Placeholder also failed for scene {idx} img {img_idx}: {e2}")
+                _record_scene_image_error(scene, img_idx, str(e))
+
+    scene["image_path"] = scene["image_paths"][0] if scene["image_paths"] else None
+    _finalize_scene_image_errors(scene)
+    return scene
+
+
 async def generate_all_scenes(
     scenes: list[dict],
     project_dir: Path,
     backend: str = "comfyui",
-    style_prompt: str = "dark fairy tale illustration, gothic storybook art, atmospheric, detailed, moody lighting",
+    style_prompt: str = image_styles.DEFAULT_STYLE_PROMPT,
     lora_keys: list[str] | None = None,
+    character_consistency: bool = False,
+    project_seed: int | None = None,
+    cast: list[dict] | None = None,
 ) -> list[dict]:
-    """Generate images for all scenes. Returns updated scenes with image_paths."""
+    """Generate images for all scenes. Returns updated scenes with image_paths.
+
+    When ``backend == "nano_banana"`` and ``cast`` is supplied, each scene's
+    images are generated with the tagged characters' canonical portraits as
+    reference images, keeping recurring characters visually consistent.
+    """
     images_dir = project_dir / "images"
     images_dir.mkdir(exist_ok=True)
+
+    import asyncio
+
+    # Map cast id -> absolute portrait path (only those rendered on disk).
+    cast_ref_map: dict[str, Path] = {}
+    for _m in (cast or []):
+        _rp = _m.get("reference_image_path")
+        if _rp:
+            _ap = project_dir / _rp
+            if _ap.exists():
+                cast_ref_map[_m.get("id")] = _ap
+
+    total_prompts = sum(
+        len(s.get("image_prompts") or []) or (1 if s.get("image_prompt") else 0)
+        for s in scenes
+    )
+    generated = 0
+    reference_image_path: Path | None = None
+    style_anchor: Path | None = None  # first good image, used as a fallback anchor
 
     for scene in scenes:
         idx = scene["index"]
@@ -308,16 +1235,59 @@ async def generate_all_scenes(
             prompts = [single] if single else []
 
         scene["image_paths"] = []
+        scene["image_errors"] = []
+        scene.pop("image_error", None)  # clear previous errors
+        scene.pop("image_safety_error", None)
 
         for img_idx, prompt in enumerate(prompts):
             output_path = images_dir / f"scene_{idx:04d}_img_{img_idx}.png"
+            image_seed = store.derive_image_seed(project_seed, idx, img_idx)
+
+            # Throttle cloud image calls to avoid common low-tier rate limits.
+            if backend in ("replicate", "nano_banana") and generated > 0:
+                delay = config.REPLICATE_DELAY_SECONDS
+                log.info(f"Throttling: waiting {delay:.1f}s before next Replicate call")
+                await asyncio.sleep(delay)
+            elif backend == "gpt_image" and generated > 0 and config.OPENAI_IMAGE_DELAY_SECONDS > 0:
+                delay = config.OPENAI_IMAGE_DELAY_SECONDS
+                log.info(f"Throttling: waiting {delay:.1f}s before next OpenAI image call")
+                await asyncio.sleep(delay)
+
             try:
                 if backend == "comfyui":
                     await generate_image_comfyui(
                         prompt=prompt,
                         style_prompt=style_prompt,
                         output_path=output_path,
-                        seed=idx * 1000 + img_idx * 42,
+                        seed=image_seed,
+                        lora_keys=lora_keys,
+                    )
+                elif backend == "replicate":
+                    await generate_image_replicate(
+                        prompt=prompt,
+                        style_prompt=style_prompt,
+                        output_path=output_path,
+                        seed=image_seed,
+                        lora_keys=lora_keys,
+                        reference_image=reference_image_path,
+                    )
+                elif backend == "nano_banana":
+                    scene_refs = _scene_reference_images(
+                        scene, cast_ref_map, style_anchor, character_consistency
+                    )
+                    await generate_image_nano_banana(
+                        prompt=prompt,
+                        style_prompt=style_prompt,
+                        output_path=output_path,
+                        seed=image_seed,
+                        reference_images=scene_refs,
+                    )
+                elif backend == "gpt_image":
+                    await generate_image_gpt_image(
+                        prompt=prompt,
+                        style_prompt=style_prompt,
+                        output_path=output_path,
+                        seed=image_seed,
                         lora_keys=lora_keys,
                     )
                 else:
@@ -328,7 +1298,24 @@ async def generate_all_scenes(
                     )
                 rel = str(output_path.relative_to(project_dir))
                 scene["image_paths"].append(rel)
-                log.info(f"Scene {idx} image {img_idx + 1}/{len(prompts)} done")
+                # Capture first image as reference for character consistency
+                if character_consistency and backend == "replicate" and reference_image_path is None:
+                    reference_image_path = output_path
+                    log.info(f"Character consistency: using {output_path} as reference image")
+                # For nano_banana, the first good image becomes a style anchor for
+                # scenes that have no tagged cast members.
+                if backend == "nano_banana" and style_anchor is None:
+                    style_anchor = output_path
+                generated += 1
+                log.info(f"Scene {idx} image {img_idx + 1}/{len(prompts)} done ({generated}/{total_prompts} total)")
+            except OpenAIImageAccessError as e:
+                log.error(f"OpenAI image access failed for scene {idx} img {img_idx}: {e}")
+                scene["image_error"] = str(e)
+                raise
+            except OpenAIImageSafetyError as e:
+                log.error(f"OpenAI image safety rejection for scene {idx} img {img_idx}: {e}")
+                _record_scene_image_error(scene, img_idx, str(e), safety=True)
+                generated += 1
             except Exception as e:
                 log.error(f"Image generation failed for scene {idx} img {img_idx}: {e}")
                 # Fallback to text placeholder
@@ -340,12 +1327,19 @@ async def generate_all_scenes(
                     )
                     rel = str(output_path.relative_to(project_dir))
                     scene["image_paths"].append(rel)
+                    _record_scene_image_error(
+                        scene,
+                        img_idx,
+                        f"Generated placeholder after image backend failed: {e}",
+                    )
                 except Exception as e2:
                     log.error(f"Placeholder also failed for scene {idx} img {img_idx}: {e2}")
-                    scene["image_error"] = str(e)
+                    _record_scene_image_error(scene, img_idx, str(e))
+                generated += 1
 
         # Backward compat: set image_path to first image
         scene["image_path"] = scene["image_paths"][0] if scene["image_paths"] else None
+        _finalize_scene_image_errors(scene)
 
     return scenes
 

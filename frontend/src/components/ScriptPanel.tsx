@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Wand2, Save, Plus, Trash2, GripVertical } from 'lucide-react'
+import { Wand2, Save, Plus, Trash2, GripVertical, ChevronDown, ChevronRight, ArrowUp, ArrowDown } from 'lucide-react'
 import type { ProjectState, Scene } from '../api'
 import { api } from '../api'
 
@@ -20,12 +20,36 @@ export default function ScriptPanel({ project, onRefresh, onNext }: Props) {
   const [synopsis, setSynopsis] = useState(script?.synopsis || '')
   const [scenes, setScenes] = useState<Scene[]>(script?.scenes || [])
   const [dirty, setDirty] = useState(false)
+  const [expandedPrompts, setExpandedPrompts] = useState<Set<number>>(new Set())
+
+  const togglePrompts = (index: number) => {
+    setExpandedPrompts(prev => {
+      const next = new Set(prev)
+      next.has(index) ? next.delete(index) : next.add(index)
+      return next
+    })
+  }
+
+  const updateImagePrompt = (sceneIndex: number, promptIndex: number, value: string) => {
+    setScenes(prev => prev.map((s, i) => {
+      if (i !== sceneIndex) return s
+      const prompts = [...(s.image_prompts || [])]
+      prompts[promptIndex] = value
+      return { ...s, image_prompts: prompts, image_prompt: prompts[0] || '' }
+    }))
+    setDirty(true)
+  }
 
   const handleGenerate = async () => {
     setGenerating(true)
     try {
       const result = await api.runScript(project.project_id, {
         ollama_model: project.ollama_model,
+        script_backend: project.script_backend,
+        claude_model: project.claude_model || undefined,
+        pipeline_writer_model: project.pipeline_writer_model || undefined,
+        pipeline_critic_model: project.pipeline_critic_model || undefined,
+        pipeline_reviser_model: project.pipeline_reviser_model || undefined,
         target_minutes: project.target_minutes,
         custom_prompt: customPrompt,
       })
@@ -71,10 +95,23 @@ export default function ScriptPanel({ project, onRefresh, onNext }: Props) {
       index: prev.length,
       narration: '',
       image_prompt: '',
+      image_prompts: [],
       mood: 'dark',
       duration_hint: 15,
       kb_effect: 'zoom_in',
     }])
+    setDirty(true)
+  }
+
+  const moveScene = (index: number, direction: -1 | 1) => {
+    setScenes(prev => {
+      const next = [...prev]
+      const target = index + direction
+      if (target < 0 || target >= next.length) return prev
+      const [removed] = next.splice(index, 1)
+      next.splice(target, 0, removed)
+      return next.map((s, i) => ({ ...s, index: i }))
+    })
     setDirty(true)
   }
 
@@ -134,6 +171,22 @@ export default function ScriptPanel({ project, onRefresh, onNext }: Props) {
               <div key={i} className="p-4 rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)]">
                 <div className="flex items-center gap-2 mb-3">
                   <GripVertical size={14} className="text-[var(--text-muted)]" />
+                  <button
+                    onClick={() => moveScene(i, -1)}
+                    disabled={i === 0}
+                    className="p-0.5 rounded text-[var(--text-muted)] hover:text-[var(--accent)] disabled:opacity-30 transition-colors"
+                    title="Move up"
+                  >
+                    <ArrowUp size={12} />
+                  </button>
+                  <button
+                    onClick={() => moveScene(i, 1)}
+                    disabled={i === scenes.length - 1}
+                    className="p-0.5 rounded text-[var(--text-muted)] hover:text-[var(--accent)] disabled:opacity-30 transition-colors"
+                    title="Move down"
+                  >
+                    <ArrowDown size={12} />
+                  </button>
                   <span className="text-xs font-medium text-[var(--accent)]">Scene {i + 1}</span>
                   <select
                     value={scene.mood}
@@ -172,13 +225,46 @@ export default function ScriptPanel({ project, onRefresh, onNext }: Props) {
                     />
                   </div>
                   <div>
-                    <label className="block text-[10px] uppercase tracking-wider text-[var(--text-muted)] mb-1">Image Prompt</label>
-                    <textarea
-                      value={scene.image_prompt}
-                      onChange={e => updateScene(i, { image_prompt: e.target.value })}
-                      rows={2}
-                      className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)] resize-y"
-                    />
+                    {scene.image_prompts && scene.image_prompts.length > 1 ? (
+                      <>
+                        <button
+                          onClick={() => togglePrompts(i)}
+                          className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-[var(--text-muted)] mb-1 hover:text-[var(--text-secondary)] transition-colors"
+                        >
+                          {expandedPrompts.has(i) ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+                          Image Prompts ({scene.image_prompts.length} storyboard panels)
+                        </button>
+                        {expandedPrompts.has(i) ? (
+                          <div className="space-y-1.5">
+                            {scene.image_prompts.map((prompt, j) => (
+                              <div key={j} className="flex gap-2">
+                                <span className="text-[9px] text-[var(--accent)] mt-2 w-4 shrink-0">{j + 1}</span>
+                                <textarea
+                                  value={prompt}
+                                  onChange={e => updateImagePrompt(i, j, e.target.value)}
+                                  rows={2}
+                                  className="flex-1 bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)] resize-y"
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-xs text-[var(--text-muted)] truncate pl-3.5">
+                            {scene.image_prompts[0]?.slice(0, 100)}...
+                          </p>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        <label className="block text-[10px] uppercase tracking-wider text-[var(--text-muted)] mb-1">Image Prompt</label>
+                        <textarea
+                          value={scene.image_prompt}
+                          onChange={e => updateScene(i, { image_prompt: e.target.value, image_prompts: [e.target.value] })}
+                          rows={2}
+                          className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)] resize-y"
+                        />
+                      </>
+                    )}
                   </div>
                 </div>
               </div>

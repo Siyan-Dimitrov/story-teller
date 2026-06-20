@@ -3,6 +3,7 @@
 import logging
 import math
 import random
+import subprocess
 import threading
 from pathlib import Path
 
@@ -13,9 +14,11 @@ from proglog import ProgressBarLogger
 from moviepy import (
     VideoClip,
     AudioFileClip,
+    CompositeAudioClip,
     ImageSequenceClip,
     concatenate_videoclips,
 )
+from moviepy.audio.fx import MultiplyVolume, AudioFadeIn, AudioFadeOut, AudioLoop
 
 from . import config
 
@@ -401,10 +404,13 @@ def _animatediff_clip(
     duration: float,
     target_size: tuple[int, int] = (config.VIDEO_WIDTH, config.VIDEO_HEIGHT),
 ) -> VideoClip:
-    """Load AnimateDiff frames and create a clip that fills the required duration.
+    """Load I2V frames and build a clip that fills the required duration.
 
-    AnimateDiff produces ~16 frames at 8fps = 2 seconds. If the scene needs
-    longer, we ping-pong loop (forward then reverse) to fill the duration.
+    Plays the captured motion FORWARD and, when the scene slot is longer than
+    the clip, slows it down (up to ``config.I2V_MAX_SLOWDOWN``) to fill — so the
+    motion reads as one continuous shot rather than a ping-pong rewind. Only
+    slots longer than ``clip_len * I2V_MAX_SLOWDOWN`` fall back to a forward
+    loop for the remainder (a single forward cut, never a reverse).
     """
     clip_path = Path(clip_dir)
     frame_files = sorted(clip_path.glob("frame_*.png"))
@@ -414,38 +420,142 @@ def _animatediff_clip(
 
     frame_paths = [str(f) for f in frame_files]
     ad_fps = config.ANIMATEDIFF_DEFAULT_FPS
+    native = len(frame_paths) / ad_fps if ad_fps else duration
 
+    # Slowdown factor: stretch one forward pass up to the cap. If the slot is
+    # shorter than the clip this is < 1 (we speed up to fit). Never reverse.
+    slowdown = min(duration / native, config.I2V_MAX_SLOWDOWN) if native > 0 else 1.0
+    slowdown = max(slowdown, 0.01)
+    playback_fps = ad_fps / slowdown  # lower fps => each frame held longer => slower
+
+    looped = duration > native * config.I2V_MAX_SLOWDOWN + 0.05
     log.info(
-        f"[AnimateDiff clip] {clip_path.name}: {len(frame_paths)} frames, "
-        f"target duration={duration:.1f}s"
+        f"[I2V clip] {clip_path.name}: {len(frame_paths)} frames, native={native:.1f}s, "
+        f"slot={duration:.1f}s, slowdown={slowdown:.2f}x"
+        f"{', forward-loop tail' if looped else ''}"
     )
 
-    # Build ping-pong sequence: forward + reverse (minus endpoints to avoid stutter)
-    pingpong = frame_paths + frame_paths[-2:0:-1]
+    # Forward-only frames, repeated only if the slot exceeds one capped pass.
+    total_needed = max(1, math.ceil(duration * playback_fps))
+    repeated: list[str] = []
+    while len(repeated) < total_needed:
+        repeated.extend(frame_paths)
+    repeated = repeated[:total_needed]
 
-    # How many frames do we need at ad_fps to fill the target duration?
-    total_frames_needed = int(duration * ad_fps)
+    clip = ImageSequenceClip(repeated, fps=playback_fps)
 
-    # Repeat the ping-pong cycle to fill
-    repeated = []
-    while len(repeated) < total_frames_needed:
-        repeated.extend(pingpong)
-    repeated = repeated[:total_frames_needed]
-
-    # Create ImageSequenceClip
-    clip = ImageSequenceClip(repeated, fps=ad_fps)
-
-    # Adjust speed to match exact target duration
-    if abs(clip.duration - duration) > 0.1:
-        speed_factor = clip.duration / duration
-        clip = clip.with_speed_scaled(speed_factor)
+    # I2V frames come at the model's own resolution (e.g. 720p); match the canvas
+    # so they don't pillarbox against 1920x1080 scenes.
+    if tuple(clip.size) != tuple(target_size):
+        clip = clip.resized(new_size=target_size)
 
     clip = clip.with_duration(duration).with_fps(config.VIDEO_FPS)
-
     return clip
 
 
 # ── Assembly ─────────────────────────────────────────────────
+
+def _resolve_music_path(music_track: str | None) -> Path | None:
+    """Resolve a user-supplied music_track to an absolute path.
+
+    Accepts an absolute path, a filename inside data/music/, an http(s) URL
+    (which will be downloaded into the music cache), or None.
+    """
+    if not music_track:
+        return None
+    if music_track.startswith(("http://", "https://")):
+        from . import music_search
+        return music_search.download_music_to_cache(music_track)
+    candidate = Path(music_track)
+    if candidate.is_absolute() and candidate.exists():
+        return candidate
+    in_music_dir = config.MUSIC_DIR / music_track
+    if in_music_dir.exists():
+        return in_music_dir
+    log.warning(f"Music track not found: {music_track}")
+    return None
+
+
+def _loudnorm_track(src: Path) -> Path:
+    """Return a loudness-normalized copy of src (cached on disk).
+
+    Different tracks ship at wildly different mastering levels, so a single master
+    volume multiplier sounds inconsistent scene-to-scene. We pre-process each track
+    through ffmpeg's EBU R128 loudnorm filter so every bed hits the same perceived
+    loudness target (-23 LUFS) — then the user's volume slider lands predictably.
+
+    Cached copies live in data/music/.loudnorm/ and are keyed by source mtime so
+    edits/replacements invalidate automatically. Falls back to the raw file if
+    ffmpeg is unavailable or the pass fails — we don't want to block assembly.
+    """
+    cache_dir = config.MUSIC_DIR / ".loudnorm"
+    cache_dir.mkdir(exist_ok=True)
+
+    try:
+        mtime = int(src.stat().st_mtime)
+    except OSError:
+        return src
+
+    cache_path = cache_dir / f"{src.stem}_{mtime}.mp3"
+    if cache_path.exists() and cache_path.stat().st_size > 0:
+        return cache_path
+
+    try:
+        result = subprocess.run(
+            [
+                config.FFMPEG_PATH, "-y",
+                "-i", str(src),
+                "-filter:a", "loudnorm=I=-23:TP=-2:LRA=7",
+                "-c:a", "libmp3lame",
+                "-b:a", "192k",
+                "-ar", "44100",
+                str(cache_path),
+            ],
+            capture_output=True,
+            timeout=120,
+        )
+        if result.returncode != 0 or not cache_path.exists() or cache_path.stat().st_size == 0:
+            log.warning(
+                f"loudnorm failed for {src.name} (rc={result.returncode}), using raw track. "
+                f"stderr: {result.stderr.decode('utf-8', errors='replace')[-400:]}"
+            )
+            if cache_path.exists():
+                cache_path.unlink(missing_ok=True)
+            return src
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        log.warning(f"loudnorm unavailable/timed out for {src.name}: {e}. Using raw track.")
+        return src
+
+    log.info(f"loudnorm: cached normalized copy of {src.name} → {cache_path.name}")
+    return cache_path
+
+
+def _build_music_bed(music_path: Path, total_duration: float, volume: float) -> AudioFileClip | None:
+    """Load music, loop to cover total_duration, fade, scale volume."""
+    normalized_path = _loudnorm_track(music_path)
+    try:
+        bed = AudioFileClip(str(normalized_path))
+    except Exception as e:
+        log.error(f"Failed to load music {normalized_path}: {e}")
+        return None
+
+    if bed.duration < total_duration:
+        bed = bed.with_effects([AudioLoop(duration=total_duration)])
+    else:
+        bed = bed.with_duration(total_duration)
+
+    fade = min(config.MUSIC_FADE_SECONDS, total_duration / 4)
+    bed = bed.with_effects([
+        MultiplyVolume(max(0.0, min(1.0, volume))),
+        AudioFadeIn(fade),
+        AudioFadeOut(fade),
+    ])
+    log.info(
+        f"Music bed: {music_path.name} @ vol={volume:.2f}, "
+        f"{total_duration:.1f}s with {fade:.1f}s fades"
+    )
+    return bed
+
 
 def assemble_video(
     scenes: list[dict],
@@ -453,8 +563,14 @@ def assemble_video(
     output_filename: str = "final.mp4",
     crossfade: float = config.CROSSFADE_DURATION,
     project_id: str | None = None,
+    music_track: str | None = None,
+    music_volume: float | None = None,
 ) -> tuple[Path, float]:
-    """Assemble final video from scenes with images and audio."""
+    """Assemble final video from scenes with images and audio.
+
+    music_track: filename inside data/music/ or an absolute path. Optional.
+    music_volume: 0.0-1.0, defaults to config.MUSIC_DEFAULT_VOLUME.
+    """
     output_path = project_dir / output_filename
     clips = []
 
@@ -572,7 +688,32 @@ def assemble_video(
                 scene_video = concatenate_videoclips(scene_clips, method="compose")
 
             if audio_clip:
-                scene_video = scene_video.with_audio(audio_clip)
+                # Check for per-scene music override
+                scene_music_track = scene.get("music_track")
+                if scene_music_track:
+                    scene_music_path = _resolve_music_path(scene_music_track)
+                    if scene_music_path is not None:
+                        scene_vol = scene.get("music_volume")
+                        vol = scene_vol if scene_vol is not None else (music_volume if music_volume is not None else config.MUSIC_DEFAULT_VOLUME)
+                        bed = _build_music_bed(scene_music_path, scene_duration, vol)
+                        if bed is not None:
+                            scene_audio = CompositeAudioClip([audio_clip, bed])
+                            scene_video = scene_video.with_audio(scene_audio)
+                        else:
+                            scene_video = scene_video.with_audio(audio_clip)
+                    else:
+                        scene_video = scene_video.with_audio(audio_clip)
+                else:
+                    scene_video = scene_video.with_audio(audio_clip)
+            elif scene.get("music_track"):
+                # Scene has music but no voice audio — just use the music bed
+                scene_music_path = _resolve_music_path(scene.get("music_track"))
+                if scene_music_path is not None:
+                    scene_vol = scene.get("music_volume")
+                    vol = scene_vol if scene_vol is not None else (music_volume if music_volume is not None else config.MUSIC_DEFAULT_VOLUME)
+                    bed = _build_music_bed(scene_music_path, scene_duration, vol)
+                    if bed is not None:
+                        scene_video = scene_video.with_audio(bed)
 
             clips.append(scene_video)
 
@@ -589,6 +730,19 @@ def assemble_video(
             final = concatenate_videoclips(clips, method="compose")
 
         final = final.with_fps(config.VIDEO_FPS)
+
+        # Mix in global background music bed only if no per-scene music was used
+        any_scene_music = any(s.get("music_track") for s in scenes)
+        music_path = _resolve_music_path(music_track)
+        if music_path is not None and not any_scene_music:
+            vol = music_volume if music_volume is not None else config.MUSIC_DEFAULT_VOLUME
+            bed = _build_music_bed(music_path, final.duration, vol)
+            if bed is not None:
+                if final.audio is not None:
+                    composite = CompositeAudioClip([final.audio, bed])
+                else:
+                    composite = bed
+                final = final.with_audio(composite)
 
         # Build logger for progress tracking
         progress_logger = None
