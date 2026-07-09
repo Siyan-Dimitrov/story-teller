@@ -44,8 +44,6 @@ export default function ScriptPanel({ project, onRefresh, onNext }: Props) {
     setGenerating(true)
     try {
       const result = await api.runScript(project.project_id, {
-        ollama_model: project.ollama_model,
-        script_backend: project.script_backend,
         claude_model: project.claude_model || undefined,
         pipeline_writer_model: project.pipeline_writer_model || undefined,
         pipeline_critic_model: project.pipeline_critic_model || undefined,

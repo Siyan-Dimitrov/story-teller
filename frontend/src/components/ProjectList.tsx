@@ -70,15 +70,13 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
   const [sourceMode, setSourceMode] = useState<SourceMode>('grimm')
   const [selectedTale, setSelectedTale] = useState('')
   const [targetMinutes, setTargetMinutes] = useState(5)
-  const [ollamaModel, setOllamaModel] = useState('kimi-k2.5:cloud')
-  const [scriptBackend, setScriptBackend] = useState<'ollama' | 'claude'>('ollama')
-  const [claudeModel, setClaudeModel] = useState('claude-sonnet-4-5')
+  const [claudeModel, setClaudeModel] = useState('claude-opus-4-8')
   // Per-pass model overrides (only consulted when perPassEnabled is true).
   // Values use "provider:model" syntax; the backend parser understands both.
   const [perPassEnabled, setPerPassEnabled] = useState(false)
-  const [writerModel, setWriterModel] = useState('claude:claude-sonnet-4-5')
-  const [criticModel, setCriticModel] = useState('claude:claude-opus-4-7')
-  const [reviserModel, setReviserModel] = useState('claude:claude-sonnet-4-5')
+  const [writerModel, setWriterModel] = useState('claude-opus-4-8')
+  const [criticModel, setCriticModel] = useState('claude-opus-4-8')
+  const [reviserModel, setReviserModel] = useState('claude-opus-4-8')
   const [tone, setTone] = useState('dark')
   const [creating, setCreating] = useState(false)
 
@@ -174,7 +172,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
     setSearching(true)
     setSelectedSearch(null)
     try {
-      const res = await api.searchStories(searchQuery, 6, ollamaModel)
+      const res = await api.searchStories(searchQuery, 6)
       setSearchResults(res.results)
     } catch (e) {
       alert('Search failed: ' + (e as Error).message)
@@ -254,7 +252,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
       const textRes = await api.gutenbergText(selectedOnline.text_url, 0)
       setFullText(textRes.text)
       // Send to LLM for analysis
-      const res = await api.analyzeChapters(textRes.text, selectedOnline.title, ollamaModel)
+      const res = await api.analyzeChapters(textRes.text, selectedOnline.title)
       setAnalyzedChapters(res.chapters)
       setBookTitle(res.book_title)
       setSelectedChapters(new Set(res.chapters.map((_, i) => i)))
@@ -392,7 +390,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
     setSplittingIntelligent(true)
     setIntelligentSplitResults(null)
     try {
-      const res = await api.splitProjectIntelligent(projectId, splitParts, ollamaModel)
+      const res = await api.splitProjectIntelligent(projectId, splitParts)
       setIntelligentSplitResults(res.split_details)
       refresh()
       // Don't close panel - show the results first
@@ -420,7 +418,6 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
       await api.batchCreate({
         book_title: bookTitle,
         chapters: chaptersToCreate,
-        ollama_model: ollamaModel,
         voice_profile_id: batchVoiceProfile || undefined,
         voice_language: 'en',
         image_backend: batchImageBackend,
@@ -458,7 +455,6 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
       const createRes = await api.batchCreate({
         book_title: bookTitle,
         chapters: chaptersToCreate,
-        ollama_model: ollamaModel,
         voice_profile_id: batchVoiceProfile || undefined,
         voice_language: 'en',
         image_backend: batchImageBackend,
@@ -580,12 +576,10 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
         source_tale,
         custom_prompt,
         target_minutes: targetMinutes,
-        ollama_model: ollamaModel,
-        script_backend: scriptBackend,
-        claude_model: scriptBackend === 'claude' ? claudeModel : undefined,
-        pipeline_writer_model: scriptBackend === 'claude' && perPassEnabled ? writerModel : undefined,
-        pipeline_critic_model: scriptBackend === 'claude' && perPassEnabled ? criticModel : undefined,
-        pipeline_reviser_model: scriptBackend === 'claude' && perPassEnabled ? reviserModel : undefined,
+        claude_model: claudeModel,
+        pipeline_writer_model: perPassEnabled ? writerModel : undefined,
+        pipeline_critic_model: perPassEnabled ? criticModel : undefined,
+        pipeline_reviser_model: perPassEnabled ? reviserModel : undefined,
         tone,
       })
       onSelect(proj.project_id)
@@ -1303,7 +1297,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
               </select>
             </div>
 
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs text-[var(--text-secondary)] mb-1.5">Target Length (minutes)</label>
                 <input
@@ -1316,46 +1310,21 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                 />
               </div>
               <div>
-                <label className="block text-xs text-[var(--text-secondary)] mb-1.5">Script Backend</label>
+                <label className="block text-xs text-[var(--text-secondary)] mb-1.5">Claude Model</label>
                 <select
-                  value={scriptBackend}
-                  onChange={e => setScriptBackend(e.target.value as 'ollama' | 'claude')}
+                  value={claudeModel}
+                  onChange={e => setClaudeModel(e.target.value)}
                   className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
-                  title="Which model writes the screenplay. Claude uses your Claude Code subscription and runs a writer + critic + reviser pipeline."
                 >
-                  <option value="ollama">Ollama (local / Kimi)</option>
-                  <option value="claude">Claude (subscription, 3-pass)</option>
+                  <option value="claude-opus-4-8">claude-opus-4-8 (default, best quality)</option>
+                  <option value="claude-sonnet-5">claude-sonnet-5</option>
+                  <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+                  <option value="claude-haiku-4-5">claude-haiku-4-5 (fastest)</option>
                 </select>
               </div>
-              {scriptBackend === 'ollama' ? (
-                <div>
-                  <label className="block text-xs text-[var(--text-secondary)] mb-1.5">Ollama Model</label>
-                  <input
-                    type="text"
-                    value={ollamaModel}
-                    onChange={e => setOllamaModel(e.target.value)}
-                    className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
-                  />
-                </div>
-              ) : (
-                <div>
-                  <label className="block text-xs text-[var(--text-secondary)] mb-1.5">Claude Model</label>
-                  <select
-                    value={claudeModel}
-                    onChange={e => setClaudeModel(e.target.value)}
-                    className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
-                  >
-                    <option value="claude-opus-4-7">claude-opus-4-7 (best quality)</option>
-                    <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
-                    <option value="claude-sonnet-4-5">claude-sonnet-4-5 (default)</option>
-                    <option value="claude-haiku-4-5-20251001">claude-haiku-4-5 (fastest)</option>
-                  </select>
-                </div>
-              )}
             </div>
 
-            {scriptBackend === 'claude' && (
-              <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] p-3 space-y-3">
+            <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] p-3 space-y-3">
                 <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)] cursor-pointer">
                   <input
                     type="checkbox"
@@ -1379,18 +1348,16 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                           onChange={e => setter(e.target.value)}
                           className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-2 py-1.5 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
                         >
-                          <option value="claude:claude-opus-4-7">Opus 4.7 (best)</option>
-                          <option value="claude:claude-sonnet-4-6">Sonnet 4.6</option>
-                          <option value="claude:claude-sonnet-4-5">Sonnet 4.5</option>
-                          <option value="claude:claude-haiku-4-5-20251001">Haiku 4.5 (fast)</option>
-                          <option value="ollama:kimi-k2.5:cloud">Kimi K2.5 (Ollama)</option>
+                          <option value="claude-opus-4-8">Opus 4.8 (best)</option>
+                          <option value="claude-sonnet-5">Sonnet 5</option>
+                          <option value="claude-sonnet-4-6">Sonnet 4.6</option>
+                          <option value="claude-haiku-4-5">Haiku 4.5 (fast)</option>
                         </select>
                       </div>
                     ))}
                   </div>
                 )}
               </div>
-            )}
 
             <button
               onClick={handleCreate}

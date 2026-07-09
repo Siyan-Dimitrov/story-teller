@@ -72,13 +72,11 @@ class ProjectState(BaseModel):
     source_tale: str = ""
     voice_profile_id: Optional[str] = None
     voice_language: str = "en"
-    ollama_model: str = "kimi-k2.5:cloud"
-    script_backend: str = "ollama"  # ollama | claude
-    claude_model: Optional[str] = None  # base model when script_backend="claude" (used as default for all 3 roles)
+    claude_model: Optional[str] = None  # base Claude model (used as default for all 3 roles)
     pipeline_writer_model: Optional[str] = None   # override claude_model for the writer pass
     pipeline_critic_model: Optional[str] = None   # override claude_model for the critic pass
     pipeline_reviser_model: Optional[str] = None  # override claude_model for the reviser pass
-    image_backend: str = "comfyui"  # comfyui | ollama | replicate | gpt_image
+    image_backend: str = "comfyui"  # comfyui | replicate | gpt_image
     project_seed: Optional[int] = None
     target_minutes: float = 5.0
     suggested_length: Optional[str] = None  # e.g., "5 min", "short story", "flash fiction"
@@ -98,9 +96,7 @@ class CreateProjectRequest(BaseModel):
     source_tale: str = ""
     custom_prompt: str = ""
     target_minutes: float = 5.0
-    ollama_model: str = "kimi-k2.5:cloud"
-    script_backend: Optional[str] = None  # None falls back to config.SCRIPT_BACKEND
-    claude_model: Optional[str] = None  # only consulted when script_backend == "claude"
+    claude_model: Optional[str] = None  # base Claude model (used as default for all 3 roles)
     pipeline_writer_model: Optional[str] = None
     pipeline_critic_model: Optional[str] = None
     pipeline_reviser_model: Optional[str] = None
@@ -108,8 +104,6 @@ class CreateProjectRequest(BaseModel):
 
 
 class RunScriptRequest(BaseModel):
-    ollama_model: Optional[str] = None
-    script_backend: Optional[str] = None  # one-shot override (otherwise uses project state)
     claude_model: Optional[str] = None
     pipeline_writer_model: Optional[str] = None
     pipeline_critic_model: Optional[str] = None
@@ -138,7 +132,7 @@ class RunVoiceRequest(BaseModel):
 
 
 class RunImagesRequest(BaseModel):
-    backend: str = "comfyui"  # comfyui | ollama | replicate | gpt_image
+    backend: str = "comfyui"  # comfyui | replicate | gpt_image
     style_id: Optional[str] = None
     custom_style_prompt: Optional[str] = None
     style_prompt: Optional[str] = None  # legacy clients can still send a full prompt
@@ -161,7 +155,6 @@ class RegenerateSceneImagesRequest(BaseModel):
 
 class GenerateCastRequest(BaseModel):
     """(Re)derive the character bible from the current script via LLM."""
-    ollama_model: Optional[str] = None
     overwrite: bool = False  # replace an existing cast instead of keeping it
 
 
@@ -187,7 +180,6 @@ class UpdateCastMemberRequest(BaseModel):
 
 class SuggestShortsRequest(BaseModel):
     """Ask the LLM 'shorts director' to score scenes for standalone potential."""
-    ollama_model: Optional[str] = None
     count: Optional[int] = None  # how many to suggest (default config.SHORTS_PER_PROJECT)
 
 
@@ -199,14 +191,12 @@ class RenderShortsRequest(BaseModel):
     """
     scene_indices: Optional[list[int]] = None
     count: Optional[int] = None
-    ollama_model: Optional[str] = None
     hooks: Optional[dict[int, str]] = None
 
 
 class SearchStoriesRequest(BaseModel):
     query: str = ""  # e.g. "revenge", "transformation", "brothers grimm"
     count: int = 6
-    ollama_model: Optional[str] = None  # Uses config default if not specified
 
 
 class StorySearchResult(BaseModel):
@@ -262,7 +252,7 @@ class RunAssembleRequest(BaseModel):
 # ── API responses ────────────────────────────────────────────
 
 class HealthStatus(BaseModel):
-    ollama: bool = False
+    claude: bool = False
     voicebox: bool = False
     comfyui: bool = False
     replicate: bool = False
@@ -303,7 +293,6 @@ class SplitProjectRequest(BaseModel):
 
 class IntelligentSplitRequest(BaseModel):
     parts: int = 2  # Number of logical parts to split into
-    ollama_model: Optional[str] = None
 
 
 class TextPart(BaseModel):
@@ -330,7 +319,6 @@ class VoiceProfile(BaseModel):
 class AnalyzeChaptersRequest(BaseModel):
     text: str
     book_title: str = ""
-    ollama_model: Optional[str] = None
 
 
 class AnalyzedChapter(BaseModel):
@@ -351,7 +339,6 @@ class AnalyzeChaptersResponse(BaseModel):
 class BatchCreateRequest(BaseModel):
     book_title: str = ""
     chapters: list[AnalyzedChapter] = Field(default_factory=list)
-    ollama_model: str = "kimi-k2.5:cloud"
     voice_profile_id: Optional[str] = None
     voice_language: str = "en"
     image_backend: str = "comfyui"

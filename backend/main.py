@@ -1,6 +1,7 @@
 """Story Teller — FastAPI backend."""
 
 import asyncio
+import importlib.util
 import json
 import logging
 import re
@@ -18,6 +19,7 @@ import httpx
 
 from . import config
 from . import project_store as store
+from . import llm
 from . import script_gen, claude_script_gen, cast_gen, voice_gen, image_gen, image_styles, gutenberg, batch, music_search
 from . import url_guard
 from . import shorts as shorts_mod
@@ -114,12 +116,8 @@ def _resolve_image_style_request(req, script: dict | None = None) -> tuple[str, 
 @app.get("/api/health")
 async def health() -> HealthStatus:
     status = HealthStatus()
+    status.claude = importlib.util.find_spec("claude_agent_sdk") is not None
     async with httpx.AsyncClient(timeout=5) as client:
-        try:
-            r = await client.get(f"{config.OLLAMA_URL}/api/tags")
-            status.ollama = r.status_code == 200
-        except Exception:
-            pass
         try:
             r = await client.get(f"{config.VOICEBOX_URL}/health")
             status.voicebox = r.status_code == 200
@@ -160,7 +158,6 @@ async def search_stories(req: SearchStoriesRequest):
         results = await script_gen.search_stories(
             query=req.query,
             count=req.count,
-            ollama_model=req.ollama_model,
         )
         return {"results": results}
     except Exception as e:
@@ -217,7 +214,6 @@ async def analyze_chapters(req: AnalyzeChaptersRequest):
         result = await batch.analyze_chapters(
             text=req.text,
             book_title=req.book_title,
-            ollama_model=req.ollama_model,
         )
         return result
     except Exception as e:
@@ -234,7 +230,6 @@ async def batch_create(req: BatchCreateRequest):
         group_id, project_ids = batch.create_batch_projects(
             book_title=req.book_title,
             chapters=[ch.model_dump() for ch in req.chapters],
-            ollama_model=req.ollama_model,
             voice_profile_id=req.voice_profile_id,
             voice_language=req.voice_language,
             image_backend=req.image_backend,
@@ -486,14 +481,9 @@ def get_text_stats(project: dict) -> dict:
 @app.post("/api/projects")
 async def create_project(req: CreateProjectRequest):
     pid, pdir = store.create_project()
-    script_backend = (req.script_backend or config.SCRIPT_BACKEND).strip().lower()
-    if script_backend not in ("ollama", "claude"):
-        raise HTTPException(400, f"Unknown script_backend: {script_backend!r}")
     store.update_state(
         pid,
         source_tale=req.source_tale,
-        ollama_model=req.ollama_model,
-        script_backend=script_backend,
         claude_model=req.claude_model,
         pipeline_writer_model=req.pipeline_writer_model,
         pipeline_critic_model=req.pipeline_critic_model,
@@ -577,8 +567,7 @@ async def duplicate_project(project_id: str):
     new_id, new_dir = store.create_project()
     # Copy settings from source
     copy_fields = [
-        "source_tale", "tone", "target_minutes", "ollama_model",
-        "script_backend", "claude_model",
+        "source_tale", "tone", "target_minutes", "claude_model",
         "pipeline_writer_model", "pipeline_critic_model", "pipeline_reviser_model",
         "voice_language", "image_backend", "suggested_length",
         "title", "music_track", "music_volume",
@@ -626,34 +615,17 @@ async def run_script(project_id: str, req: RunScriptRequest):
     state = store.load_state(project_id)
     store.update_state(project_id, step="generating_script", error=None)
 
-    backend = (
-        req.script_backend
-        or state.get("script_backend")
-        or config.SCRIPT_BACKEND
-    ).strip().lower()
-
     try:
-        common_kwargs = dict(
+        script = await claude_script_gen.generate_script(
             source_tale=state.get("source_tale", ""),
             custom_prompt=req.custom_prompt or state.get("custom_prompt", ""),
             target_minutes=req.target_minutes or state.get("target_minutes", 5.0),
             tone=state.get("tone", ""),
+            claude_model=req.claude_model or state.get("claude_model") or None,
+            pipeline_writer_model=req.pipeline_writer_model or state.get("pipeline_writer_model") or None,
+            pipeline_critic_model=req.pipeline_critic_model or state.get("pipeline_critic_model") or None,
+            pipeline_reviser_model=req.pipeline_reviser_model or state.get("pipeline_reviser_model") or None,
         )
-        if backend == "claude":
-            script = await claude_script_gen.generate_script(
-                claude_model=req.claude_model or state.get("claude_model") or None,
-                pipeline_writer_model=req.pipeline_writer_model or state.get("pipeline_writer_model") or None,
-                pipeline_critic_model=req.pipeline_critic_model or state.get("pipeline_critic_model") or None,
-                pipeline_reviser_model=req.pipeline_reviser_model or state.get("pipeline_reviser_model") or None,
-                **common_kwargs,
-            )
-        elif backend == "ollama":
-            script = await script_gen.generate_script(
-                ollama_model=req.ollama_model or state.get("ollama_model"),
-                **common_kwargs,
-            )
-        else:
-            raise HTTPException(400, f"Unknown script_backend: {backend!r}")
         store.save_json(project_id, "script.json", script)
         store.update_state(
             project_id,
@@ -757,7 +729,7 @@ async def run_images(project_id: str, req: RunImagesRequest):
         # render the canonical portraits that get fed back as references.
         cast = script.get("cast") or []
         if req.backend == "nano_banana" and req.character_consistency:
-            script = await cast_gen.ensure_cast(script, ollama_model=state.get("ollama_model"))
+            script = await cast_gen.ensure_cast(script)
             cast = script.get("cast") or []
             if cast:
                 cast = await image_gen.generate_character_references(
@@ -854,7 +826,6 @@ async def run_cast(project_id: str, req: GenerateCastRequest):
     try:
         script = await cast_gen.ensure_cast(
             script,
-            ollama_model=req.ollama_model or state.get("ollama_model"),
             overwrite=req.overwrite,
         )
         store.save_json(project_id, "script.json", script)
@@ -894,7 +865,7 @@ async def run_character_refs(project_id: str, req: GenerateCharacterRefsRequest)
 
     # Ensure a cast exists before we try to render portraits.
     if not (script.get("cast") or []):
-        script = await cast_gen.ensure_cast(script, ollama_model=state.get("ollama_model"))
+        script = await cast_gen.ensure_cast(script)
     cast = script.get("cast") or []
     if not cast:
         raise HTTPException(400, "No cast could be derived for this script")
@@ -935,7 +906,6 @@ async def run_animate(project_id: str):
 
     store.update_state(project_id, step="animating", error=None)
     pdir = store.project_dir(project_id)
-    ollama_model = state.get("ollama_model")
     story_style = (script.get("visual_style") or "").strip() or None
 
     def _run():
@@ -946,7 +916,6 @@ async def run_animate(project_id: str):
                 prepare_animations(
                     scenes=script["scenes"],
                     project_dir=pdir,
-                    ollama_model=ollama_model,
                     project_id=project_id,
                     style_prompt=story_style,
                 )
@@ -1022,7 +991,6 @@ async def run_assemble(project_id: str, req: RunAssembleRequest):
                         tone=tone,
                         themes=themes,
                         scene_count=len(script.get("scenes", [])),
-                        ollama_model=state.get("ollama_model"),
                         book_title=state.get("book_title", ""),
                     )
                 )
@@ -1087,7 +1055,6 @@ async def suggest_shorts_endpoint(project_id: str, req: SuggestShortsRequest):
         raise HTTPException(400, "No script found")
     suggestions = await shorts_director.suggest_shorts(
         script,
-        ollama_model=req.ollama_model or state.get("ollama_model"),
         count=req.count,
     )
     return {"suggestions": suggestions}
@@ -1125,7 +1092,6 @@ async def render_shorts_endpoint(project_id: str, req: RenderShortsRequest):
     else:
         suggestions = await shorts_director.suggest_shorts(
             script,
-            ollama_model=req.ollama_model or state.get("ollama_model"),
             count=req.count,
         )
         indices = [s["scene_index"] for s in suggestions]
@@ -1244,7 +1210,7 @@ def _mood_to_query(mood: str) -> str:
 
 @app.post("/api/projects/{project_id}/suggest-music")
 async def suggest_music(project_id: str):
-    """Suggest per-scene background music by querying Ollama and Jamendo."""
+    """Suggest per-scene background music by querying Claude and Jamendo."""
     state = store.load_state(project_id)
     script = store.load_json(project_id, "script.json")
     if not script:
@@ -1253,9 +1219,6 @@ async def suggest_music(project_id: str):
     scenes = script.get("scenes", [])
     if not scenes:
         raise HTTPException(400, "No scenes in script")
-
-    ollama_model = state.get("ollama_model", config.OLLAMA_MODEL)
-    base_url = config.OLLAMA_URL
 
     # Build prompt with scene summaries
     scene_descriptions = []
@@ -1267,39 +1230,22 @@ async def suggest_music(project_id: str):
 
     queries = []
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                f"{base_url}/api/chat",
-                json={
-                    "model": ollama_model,
-                    "messages": [
-                        {"role": "system", "content": SUGGEST_MUSIC_PROMPT},
-                        {"role": "user", "content": user_message},
-                    ],
-                    "stream": False,
-                    "options": {"temperature": 0.5, "num_predict": 2000},
-                },
-            )
-        if resp.status_code == 200:
-            data = resp.json()
-            content = data.get("message", {}).get("content", "")
-            if content:
-                # Try to extract JSON array
-                import json
-                content = content.strip()
-                # Remove markdown fences if present
-                if content.startswith("```"):
-                    content = content.split("\n", 1)[1]
-                if content.endswith("```"):
-                    content = content.rsplit("\n", 1)[0]
-                if content.startswith("json"):
-                    content = content[4:].strip()
-                try:
-                    parsed = json.loads(content)
-                    if isinstance(parsed, list):
-                        queries = parsed
-                except json.JSONDecodeError:
-                    log.warning(f"Could not parse LLM music suggestion response: {content[:200]}")
+        raw = await llm.complete(
+            SUGGEST_MUSIC_PROMPT,
+            user_message,
+            model=config.CLAUDE_FAST_MODEL,
+            pass_name="music-suggest",
+            timeout=config.CLAUDE_FAST_TIMEOUT_SECONDS,
+        )
+        content = llm.strip_code_fences(raw)
+        if content.startswith("json"):
+            content = content[4:].strip()
+        try:
+            parsed = json.loads(content)
+            if isinstance(parsed, list):
+                queries = parsed
+        except json.JSONDecodeError:
+            log.warning(f"Could not parse LLM music suggestion response: {content[:200]}")
     except Exception as e:
         log.warning(f"LLM music suggestion failed: {e}")
 
@@ -1518,7 +1464,6 @@ async def split_project(project_id: str, req: SplitProjectRequest):
     book_title = state.get("book_title", "")
     chapter_index = state.get("chapter_index", 0)
     base_title = state.get("title", "Untitled")
-    ollama_model = state.get("ollama_model", config.OLLAMA_MODEL)
     image_backend = state.get("image_backend", "comfyui")
     tone = state.get("tone", "")
     voice_profile_id = state.get("voice_profile_id")
@@ -1551,7 +1496,6 @@ async def split_project(project_id: str, req: SplitProjectRequest):
             book_group_id=book_group_id,
             book_title=book_title,
             chapter_index=chapter_index + part_idx,
-            ollama_model=ollama_model,
             target_minutes=part_duration,
             tone=tone,
             custom_prompt=part_text,
@@ -1585,7 +1529,6 @@ async def _do_regular_split(project_id: str, full_text: str, state: dict, num_pa
     book_title = state.get("book_title", "")
     chapter_index = state.get("chapter_index", 0)
     base_title = state.get("title", "Untitled")
-    ollama_model = state.get("ollama_model", config.OLLAMA_MODEL)
     image_backend = state.get("image_backend", "comfyui")
     tone = state.get("tone", "")
     voice_profile_id = state.get("voice_profile_id")
@@ -1621,7 +1564,6 @@ async def _do_regular_split(project_id: str, full_text: str, state: dict, num_pa
             book_group_id=book_group_id,
             book_title=book_title,
             chapter_index=chapter_index + part_idx,
-            ollama_model=ollama_model,
             target_minutes=part_duration,
             tone=tone,
             custom_prompt=part_text,
@@ -1756,10 +1698,8 @@ def _extract_json_from_llm_response(content: str) -> dict | None:
 async def _find_split_points_with_llm(
     text: str,
     num_parts: int,
-    model: str,
-    base_url: str,
 ) -> list[dict]:
-    """Use LLM to find logical split points in the text."""
+    """Use Claude to find logical split points in the text."""
     avg_pct = 100 / num_parts
     min_pct = max(14, int(avg_pct * 0.7))
     max_pct = min(86, int(avg_pct * 1.3))
@@ -1777,66 +1717,16 @@ async def _find_split_points_with_llm(
         f"Text ({len(text)} chars total, {'showing first ' + str(max_text) + ' chars' if len(text) > max_text else 'full text'}):\n\n{text_for_llm}"
     )
 
-    log.info(f"Calling LLM for intelligent split: model={model}, num_parts={num_parts}, text_len={len(text_for_llm)}")
+    log.info(f"Calling Claude for intelligent split: num_parts={num_parts}, text_len={len(text_for_llm)}")
 
     try:
-        # First test if Ollama is reachable
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            try:
-                health = await client.get(f"{base_url}/api/tags")
-                log.info(f"Ollama health check: {health.status_code}")
-                if health.status_code == 200:
-                    models_data = health.json()
-                    available_models = [m.get('name', m.get('model', '')) for m in models_data.get('models', [])]
-                    log.info(f"Available Ollama models: {available_models}")
-                    if model not in available_models and not any(m.startswith(model.split(':')[0]) for m in available_models):
-                        log.error(f"Model '{model}' not found in available models: {available_models}")
-            except Exception as e:
-                log.error(f"Cannot connect to Ollama at {base_url}: {e}")
-                return []
-
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            resp = await client.post(
-                f"{base_url}/api/chat",
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": prompt},
-                        {"role": "user", "content": user_message},
-                    ],
-                    "stream": False,
-                    "options": {
-                        "temperature": 0.3,
-                        "num_predict": 8000,
-                    },
-                },
-            )
-
-        log.info(f"LLM response status: {resp.status_code}")
-
-        if resp.status_code != 200:
-            log.error(f"LLM split failed (HTTP {resp.status_code}), response: {resp.text[:500]}")
-            try:
-                error_data = resp.json()
-                log.error(f"Ollama error details: {error_data}")
-            except:
-                pass
-            return []
-
-        data = resp.json()
-        log.info(f"LLM response data keys: {list(data.keys()) if isinstance(data, dict) else 'not a dict'}")
-
-        # Try to get content directly from message.content (ollama standard)
-        msg = data.get("message", {})
-        content = msg.get("content", "") or ""
-
-        # Also check for thinking field (some models use this)
-        if not content:
-            content = msg.get("thinking", "") or ""
-
-        # Fallback to script_gen extractor
-        if not content:
-            content = script_gen._extract_llm_content(data)
+        content = await llm.complete(
+            prompt,
+            user_message,
+            model=config.CLAUDE_FAST_MODEL,
+            pass_name="chapter-split",
+            timeout=config.CLAUDE_FAST_TIMEOUT_SECONDS,
+        )
 
         log.info(f"LLM content length: {len(content) if content else 0}")
 
@@ -1864,9 +1754,6 @@ async def _find_split_points_with_llm(
         log.info(f"LLM found {len(parts)} split points")
         return parts
 
-    except (httpx.TimeoutException, httpx.ReadTimeout):
-        log.error("LLM split request timed out after 300s")
-        return []
     except Exception as exc:
         log.error(f"LLM split error: {type(exc).__name__}: {exc}")
         import traceback
@@ -2046,24 +1933,18 @@ async def split_project_intelligent(project_id: str, req: IntelligentSplitReques
     if not full_text.strip():
         raise HTTPException(400, "Source text is empty")
 
-    # Get LLM model
-    ollama_model = req.ollama_model or state.get("ollama_model", config.OLLAMA_MODEL)
-    base_url = config.OLLAMA_URL
-
     # Ask LLM to find split points
-    log.info(f"Requesting intelligent split for {project_id} into {req.parts} parts using {ollama_model}")
-    log.info(f"Text length: {len(full_text)} chars, sending {min(len(full_text), 4000)} to LLM")
+    log.info(f"Requesting intelligent split for {project_id} into {req.parts} parts")
+    log.info(f"Text length: {len(full_text)} chars")
 
     split_points = await _find_split_points_with_llm(
         text=full_text,
         num_parts=req.parts,
-        model=ollama_model,
-        base_url=base_url,
     )
 
     if not split_points:
         log.error(f"Intelligent split failed for {project_id}: LLM returned no split points")
-        raise HTTPException(500, f"LLM could not determine split points using model '{ollama_model}'. Check that Ollama is running, the model is available, and try again.")
+        raise HTTPException(500, "Claude could not determine split points. Check that Claude is authenticated (run `claude login`) and try again.")
 
     # Split text based on LLM suggestions
     parts = _split_text_intelligently(full_text, split_points)
@@ -2109,7 +1990,6 @@ async def split_project_intelligent(project_id: str, req: IntelligentSplitReques
             book_group_id=book_group_id,
             book_title=book_title,
             chapter_index=chapter_index + part_idx,
-            ollama_model=ollama_model,
             target_minutes=part_duration,
             tone=tone,
             custom_prompt=part_text,

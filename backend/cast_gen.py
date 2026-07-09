@@ -1,10 +1,10 @@
 """Cast-bible extraction for character consistency.
 
 The screenwriter is asked to emit a ``cast`` array and per-scene ``characters``
-tags directly (see ``prompts/screenwriter_system.md``). But older scripts, the
-Ollama backend, or a model that simply forgot won't have one. ``ensure_cast``
-backfills a cast bible from an existing script via the LLM so the
-reference-image consistency path works regardless of how the script was made.
+tags directly (see ``prompts/screenwriter_system.md``). But older scripts or a
+model that simply forgot won't have one. ``ensure_cast`` backfills a cast bible
+from an existing script via the LLM so the reference-image consistency path
+works regardless of how the script was made.
 
 The derived cast feeds ``image_gen``: one canonical portrait is rendered per
 member and passed back as a reference image into every scene that member
@@ -13,14 +13,11 @@ appears in.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from typing import Any
 
-import httpx
-
-from . import config
+from . import llm
 from .script_gen import _normalize_cast, normalize_scenes
 
 log = logging.getLogger(__name__)
@@ -71,59 +68,7 @@ def _build_cast_user_prompt(script: dict[str, Any]) -> str:
     )
 
 
-def _extract_json_object(text: str) -> str:
-    text = text.strip()
-    if text.startswith("```"):
-        text = "\n".join(ln for ln in text.split("\n") if not ln.strip().startswith("```")).strip()
-    start = text.find("{")
-    if start < 0:
-        return text
-    depth = 0
-    in_str = False
-    esc = False
-    for i in range(start, len(text)):
-        ch = text[i]
-        if esc:
-            esc = False
-            continue
-        if ch == "\\" and in_str:
-            esc = True
-            continue
-        if ch == '"':
-            in_str = not in_str
-            continue
-        if in_str:
-            continue
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : i + 1]
-    return text[start:]
-
-
-async def _call_ollama(system: str, user: str, model: str) -> str:
-    async with httpx.AsyncClient(timeout=config.LLM_TIMEOUT_SECONDS) as client:
-        resp = await client.post(
-            f"{config.OLLAMA_URL}/api/chat",
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "stream": False,
-                "options": {"temperature": 0.4, "num_predict": config.LLM_MAX_TOKENS},
-            },
-        )
-    resp.raise_for_status()
-    # Reuse script_gen's tolerant extractor for thinking-model variants.
-    from .script_gen import _extract_llm_content
-    return _extract_llm_content(resp.json()).strip()
-
-
-async def generate_cast(script: dict[str, Any], ollama_model: str | None = None) -> dict[str, Any]:
+async def generate_cast(script: dict[str, Any], **_ignored) -> dict[str, Any]:
     """Derive a cast bible from a finished script. Returns the updated script
     (with ``cast`` populated and each scene's ``characters`` tagged).
 
@@ -131,10 +76,13 @@ async def generate_cast(script: dict[str, Any], ollama_model: str | None = None)
     parse fails — consistency simply degrades to no-reference generation rather
     than breaking the pipeline.
     """
-    model = ollama_model or config.OLLAMA_MODEL
     try:
-        raw = await _call_ollama(_CAST_SYSTEM, _build_cast_user_prompt(script), model)
-        data = json.loads(_extract_json_object(raw))
+        raw = await llm.complete(
+            _CAST_SYSTEM,
+            _build_cast_user_prompt(script),
+            pass_name="cast bible",
+        )
+        data = llm.parse_json(raw)
     except Exception as e:  # noqa: BLE001
         log.warning("Cast extraction failed (%s) — leaving cast empty", e)
         script.setdefault("cast", [])
@@ -166,12 +114,12 @@ async def generate_cast(script: dict[str, Any], ollama_model: str | None = None)
 
 async def ensure_cast(
     script: dict[str, Any],
-    ollama_model: str | None = None,
     overwrite: bool = False,
+    **_ignored,
 ) -> dict[str, Any]:
     """Ensure ``script['cast']`` is populated, deriving it if needed."""
     existing = script.get("cast")
     if existing and not overwrite:
         return script
     log.info("Backfilling cast bible from script via LLM")
-    return await generate_cast(script, ollama_model=ollama_model)
+    return await generate_cast(script)

@@ -1,14 +1,12 @@
 """Image animation — LLM classification and depth-based parallax preparation."""
 
-import json
 import logging
 import threading
 import numpy as np
 from pathlib import Path
 from PIL import Image as PILImage, ImageFilter
-import httpx
 
-from . import config
+from . import config, llm
 
 log = logging.getLogger(__name__)
 
@@ -135,66 +133,27 @@ ALL_VALID_MOTIONS = VALID_DEPTHFLOW_MOTIONS | VALID_PORTRAIT_MOTIONS | VALID_ANI
 async def _classify_batch(
     entries: list[str],
     start_index: int,
-    model: str,
+    model: str | None = None,
 ) -> dict[int, dict]:
-    """Classify a batch of image entries via LLM. Returns {global_index: classification}."""
+    """Classify a batch of image entries via Claude. Returns {global_index: classification}."""
     user_prompt = (
         f"Classify these {len(entries)} image prompts for animation:\n\n"
         + "\n\n".join(entries)
     )
 
     try:
-        async with httpx.AsyncClient(timeout=config.LLM_TIMEOUT_SECONDS) as client:
-            resp = await client.post(
-                f"{config.OLLAMA_URL}/api/chat",
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": CLASSIFY_PROMPT},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    "stream": False,
-                    "options": {"temperature": 0.3, "num_predict": 8000},
-                },
-            )
-            resp.raise_for_status()
-
-        data = resp.json()
-        # Handle thinking models (e.g. kimi-k2.5) where content is in 'thinking' field
-        msg = data.get("message", {})
-        content = (msg.get("content") or "").strip()
-        if not content:
-            thinking = (msg.get("thinking") or "").strip()
-            if thinking:
-                # Extract JSON from thinking text
-                json_start = thinking.find("{")
-                json_end = thinking.rfind("}") + 1
-                if json_start >= 0 and json_end > json_start:
-                    content = thinking[json_start:json_end]
-                    log.info(f"[Animation] Batch {start_index}: extracted JSON from thinking field")
+        raw = await llm.complete(
+            CLASSIFY_PROMPT,
+            user_prompt,
+            model=model or config.CLAUDE_FAST_MODEL,
+            pass_name=f"classify-{start_index}",
+            timeout=config.CLAUDE_FAST_TIMEOUT_SECONDS,
+        )
         log.info(
             f"[Animation] Batch {start_index}-{start_index + len(entries) - 1}: "
-            f"LLM response ({len(content)} chars): {content[:300]}"
+            f"LLM response ({len(raw)} chars): {raw[:300]}"
         )
-
-        if not content:
-            log.warning(f"[Animation] Batch {start_index}: empty LLM response")
-            return {}
-
-        # Strip markdown fences if present
-        if "```" in content:
-            lines = content.split("\n")
-            lines = [l for l in lines if not l.strip().startswith("```")]
-            content = "\n".join(lines).strip()
-
-        # Extract JSON object if there's surrounding text
-        if not content.startswith("{"):
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start >= 0 and end > start:
-                content = content[start:end]
-
-        result = json.loads(content)
+        result = llm.parse_json(raw)
         batch_cls = {}
         for c in result.get("classifications", []):
             # Map batch-local index to global index
@@ -204,16 +163,6 @@ async def _classify_batch(
             batch_cls[global_idx]["index"] = global_idx
         return batch_cls
 
-    except httpx.ConnectError:
-        log.error(f"[Animation] Cannot connect to Ollama at {config.OLLAMA_URL}")
-        return {}
-    except httpx.TimeoutException:
-        log.error(f"[Animation] Batch {start_index}: timed out after {config.LLM_TIMEOUT_SECONDS}s")
-        return {}
-    except json.JSONDecodeError as e:
-        log.error(f"[Animation] Batch {start_index}: JSON parse error: {e}")
-        log.error(f"[Animation] Raw content: {content[:500]}")
-        return {}
     except Exception as e:
         log.error(f"[Animation] Batch {start_index}: {type(e).__name__}: {e}")
         return {}
@@ -224,10 +173,10 @@ _CLASSIFY_BATCH_SIZE = 8  # images per LLM call — keeps prompt small for cloud
 
 async def classify_scene_animations(
     scenes: list[dict],
-    ollama_model: str | None = None,
+    model: str | None = None,
 ) -> list[dict]:
-    """Use LLM to classify each image for animation type and motion preset."""
-    model = ollama_model or config.OLLAMA_MODEL
+    """Use Claude to classify each image for animation type and motion preset."""
+    model = model or config.CLAUDE_FAST_MODEL
 
     # Build list of (mood, prompt) tuples and scene mapping
     image_data: list[tuple[str, str]] = []  # (mood, prompt)
@@ -640,7 +589,7 @@ def _cap_animatediff_per_scene(scenes: list[dict], cap: int) -> None:
 async def prepare_animations(
     scenes: list[dict],
     project_dir: Path,
-    ollama_model: str | None = None,
+    model: str | None = None,
     project_id: str | None = None,
     style_prompt: str | None = None,
 ) -> list[dict]:
@@ -668,7 +617,7 @@ async def prepare_animations(
         if project_id:
             _update_anim_progress(project_id, phase="classifying images", progress=0.05)
 
-        scenes = await classify_scene_animations(scenes, ollama_model)
+        scenes = await classify_scene_animations(scenes, model)
         log.info("Animation classification complete")
 
         # One motion clip per scene is the budget/quality sweet spot — the rest

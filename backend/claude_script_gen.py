@@ -1,76 +1,38 @@
 """Claude-powered screenplay generation.
 
 Three-pass pipeline (writer → critic → reviser) driven by the Claude Agent
-SDK. Authenticates against the user's existing Claude Code OAuth credentials
-(``~/.claude/.credentials.json``), so no Anthropic API key is required when
-the user is signed into Claude Code.
-
-Exposes ``generate_script(...)`` with the same signature shape as
-``script_gen.generate_script`` so ``main.py`` can route either backend.
+SDK via :mod:`backend.llm`. Authenticates against the user's existing Claude
+Code OAuth credentials (``~/.claude/.credentials.json``), so no Anthropic API
+key is required when the user is signed into Claude Code.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import httpx
-
-from . import config
+from . import config, llm
+from .llm import ClaudeAuthError, ClaudeBackendError, parse_json  # noqa: F401 — re-exported
 from .grimm_tales import get_tale
-from .script_gen import normalize_scenes, _repair_truncated_json, _extract_llm_content
+from .script_gen import normalize_scenes
 
 log = logging.getLogger(__name__)
 
 
-class ClaudeAuthError(RuntimeError):
-    """Raised when the Claude Agent SDK cannot authenticate."""
+def _resolve_model(value: str | None, fallback: str) -> str:
+    """Resolve a per-role model override to a bare Claude model name.
 
-
-class ClaudeBackendError(RuntimeError):
-    """Raised when the Claude backend fails for a non-auth reason."""
-
-
-@dataclass(frozen=True)
-class RoleSpec:
-    """Which provider+model runs a given pass of the pipeline."""
-    provider: str  # "claude" | "ollama"
-    model: str
-
-    def label(self) -> str:
-        return f"{self.provider}:{self.model}"
-
-
-def _parse_role(value: str | None, fallback_claude_model: str) -> RoleSpec:
-    """Parse a role spec.
-
-    Accepts:
-      - empty / None         → claude with ``fallback_claude_model``
-      - "claude:opus-4-7"    → explicit Claude
-      - "ollama:kimi-k2.5:cloud" → explicit Ollama (model may itself contain colons)
-      - "claude-sonnet-4-5"  → bare model name, provider inferred as claude
-      - "kimi-k2.5:cloud"    → bare model name with a colon — inferred as ollama
+    Tolerates the legacy ``claude:<model>`` prefix from before master became
+    Claude-only; anything else is used verbatim.
     """
     if not value:
-        return RoleSpec("claude", fallback_claude_model)
+        return fallback
     v = value.strip()
     if v.startswith("claude:"):
-        return RoleSpec("claude", v[len("claude:"):].strip())
-    if v.startswith("ollama:"):
-        return RoleSpec("ollama", v[len("ollama:"):].strip())
-    if v.lower().startswith("claude-"):
-        return RoleSpec("claude", v)
-    # A bare model name with a colon almost always means an Ollama tag
-    # (e.g. "kimi-k2.5:cloud", "llama3.2:3b"). Fall through to Claude only
-    # for colon-free names that don't match the "claude-*" pattern.
-    if ":" in v:
-        return RoleSpec("ollama", v)
-    return RoleSpec("claude", v)
+        v = v[len("claude:"):].strip()
+    return v or fallback
 
 
 _PROMPT_CACHE: dict[str, str] = {}
@@ -86,64 +48,6 @@ def _read_prompt(name: str) -> str:
     text = path.read_text(encoding="utf-8")
     _PROMPT_CACHE[name] = text
     return text
-
-
-def _strip_code_fences(text: str) -> str:
-    text = text.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        lines = [ln for ln in lines if not ln.strip().startswith("```")]
-        text = "\n".join(lines).strip()
-    return text
-
-
-def _extract_first_json_object(text: str) -> str:
-    """Slice out the first top-level ``{...}`` block, in case the model
-    surrounds it with stray prose. We still fail fast on real garbage."""
-    start = text.find("{")
-    if start < 0:
-        return text
-    depth = 0
-    in_string = False
-    escape = False
-    for i in range(start, len(text)):
-        ch = text[i]
-        if escape:
-            escape = False
-            continue
-        if ch == "\\" and in_string:
-            escape = True
-            continue
-        if ch == '"':
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : i + 1]
-    return text[start:]
-
-
-def _parse_json(raw: str) -> dict[str, Any]:
-    """Parse model output as JSON. Tolerates code fences and a trailing
-    truncation. Raises ``ClaudeBackendError`` on unrecoverable garbage."""
-    text = _strip_code_fences(raw)
-    text = _extract_first_json_object(text)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as e:
-        log.warning("Claude JSON parse failed (%s) — attempting truncation repair", e)
-        try:
-            return json.loads(_repair_truncated_json(text))
-        except json.JSONDecodeError as e2:
-            preview = text[:400].replace("\n", " ")
-            raise ClaudeBackendError(
-                f"Claude returned malformed JSON: {e2}. Preview: {preview!r}"
-            ) from e2
 
 
 def _validate_script(script: dict[str, Any]) -> list[str]:
@@ -177,153 +81,6 @@ def _validate_script(script: dict[str, Any]) -> list[str]:
     return errors
 
 
-async def _run_claude(
-    *, system_prompt: str, user_prompt: str, model: str, pass_name: str,
-) -> tuple[str, float]:
-    """Run one Claude pass via the Agent SDK. Returns (text, cost_usd).
-
-    On Windows the FastAPI process runs under ``WindowsSelectorEventLoopPolicy``
-    (see ``backend/main.py``), and that loop cannot spawn subprocesses — but
-    the SDK shells out to ``claude.exe``. We bounce the SDK call into a
-    worker thread with its own ``ProactorEventLoop`` so the subprocess
-    transport works without changing the parent loop policy.
-    """
-    try:
-        from claude_agent_sdk import (
-            ClaudeAgentOptions,
-            query,
-            AssistantMessage,
-            ResultMessage,
-            TextBlock,
-        )
-    except ImportError as e:
-        raise ClaudeBackendError(
-            "claude-agent-sdk is not installed. Run `pip install -r requirements.txt`."
-        ) from e
-
-    options = ClaudeAgentOptions(
-        system_prompt=system_prompt,
-        model=model,
-        max_turns=1,
-        allowed_tools=[],
-        disallowed_tools=[
-            "Read", "Write", "Edit", "Bash", "Glob", "Grep",
-            "WebFetch", "WebSearch", "TaskCreate", "TaskUpdate", "TaskList",
-            "NotebookEdit",
-        ],
-        permission_mode="bypassPermissions",
-        setting_sources=[],
-    )
-
-    async def _do_call() -> tuple[str, float]:
-        chunks: list[str] = []
-        cost_usd = 0.0
-        async for message in query(prompt=user_prompt, options=options):
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        chunks.append(block.text)
-            elif isinstance(message, ResultMessage):
-                cost_usd = float(getattr(message, "total_cost_usd", 0.0) or 0.0)
-        return "".join(chunks).strip(), cost_usd
-
-    def _thread_run() -> tuple[str, float]:
-        if sys.platform == "win32":
-            loop = asyncio.ProactorEventLoop()
-        else:
-            loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(
-                asyncio.wait_for(_do_call(), timeout=config.CLAUDE_TIMEOUT_SECONDS)
-            )
-        finally:
-            loop.close()
-
-    try:
-        text, cost_usd = await asyncio.to_thread(_thread_run)
-    except asyncio.TimeoutError as e:
-        raise ClaudeBackendError(
-            f"Claude {pass_name} pass timed out after {config.CLAUDE_TIMEOUT_SECONDS:.0f}s"
-        ) from e
-    except Exception as e:
-        msg = str(e).lower()
-        if "credential" in msg or "unauthorized" in msg or "auth" in msg or "login" in msg:
-            raise ClaudeAuthError(
-                "Claude Agent SDK could not authenticate. Run `claude login` once "
-                "to sign in with your Claude Code subscription, then retry."
-            ) from e
-        raise ClaudeBackendError(f"Claude {pass_name} pass failed: {e}") from e
-
-    if not text:
-        raise ClaudeBackendError(f"Claude {pass_name} pass returned no text content")
-    return text, cost_usd
-
-
-async def _run_ollama(
-    *, system_prompt: str, user_prompt: str, model: str, pass_name: str,
-) -> tuple[str, float]:
-    """Run one Ollama pass via /api/chat. Returns (text, 0.0).
-
-    Cost is always 0 — Ollama runs locally (or against the user's own
-    Ollama-compatible cloud endpoint). Reuses the same response-extraction
-    logic as ``script_gen.py`` to handle thinking-model variants.
-    """
-    base_url = config.OLLAMA_URL
-    try:
-        async with httpx.AsyncClient(timeout=config.CLAUDE_TIMEOUT_SECONDS) as client:
-            resp = await client.post(
-                f"{base_url}/api/chat",
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    "stream": False,
-                    "options": {
-                        "temperature": config.LLM_TEMPERATURE,
-                        "num_predict": config.LLM_MAX_TOKENS,
-                    },
-                },
-            )
-    except httpx.TimeoutException as e:
-        raise ClaudeBackendError(
-            f"Ollama {pass_name} pass timed out after {config.CLAUDE_TIMEOUT_SECONDS:.0f}s"
-        ) from e
-    except httpx.HTTPError as e:
-        raise ClaudeBackendError(
-            f"Ollama {pass_name} pass failed: {e} (check OLLAMA_URL={base_url})"
-        ) from e
-
-    if resp.status_code != 200:
-        raise ClaudeBackendError(
-            f"Ollama {pass_name} pass returned {resp.status_code}: {resp.text[:300]}"
-        )
-    text = _extract_llm_content(resp.json()).strip()
-    if not text:
-        raise ClaudeBackendError(f"Ollama {pass_name} pass returned no content")
-    return text, 0.0
-
-
-async def _run_pass(
-    *, role: RoleSpec, system_prompt: str, user_prompt: str, pass_name: str,
-) -> tuple[str, float]:
-    """Dispatch one pass to the configured provider."""
-    log.info("Pass %s: %s", pass_name, role.label())
-    if role.provider == "claude":
-        return await _run_claude(
-            system_prompt=system_prompt, user_prompt=user_prompt,
-            model=role.model, pass_name=pass_name,
-        )
-    if role.provider == "ollama":
-        return await _run_ollama(
-            system_prompt=system_prompt, user_prompt=user_prompt,
-            model=role.model, pass_name=pass_name,
-        )
-    raise ClaudeBackendError(f"Unknown provider for {pass_name}: {role.provider!r}")
-
-
 def _build_writer_user_prompt(
     *,
     source_tale: str,
@@ -345,9 +102,8 @@ def _build_writer_user_prompt(
         parts.append(f"\nAdaptation tone: {tone}. Infuse the story with this tone throughout.")
     if custom_prompt:
         if len(custom_prompt) > 160_000:
-            # Claude Sonnet's context comfortably exceeds typical chapter
-            # length; this guard only protects against accidental whole-book
-            # paste. Real long-form handling lives in a future streaming path.
+            # Claude's context comfortably exceeds typical chapter length;
+            # this guard only protects against accidental whole-book paste.
             log.warning("Custom prompt is %d chars — truncating to 160000", len(custom_prompt))
             custom_prompt = custom_prompt[:160_000] + "\n[... truncated ...]"
         parts.append(f"\nSource material / additional direction:\n{custom_prompt}")
@@ -410,23 +166,23 @@ def _summarize_source(
     return "\n".join(parts)
 
 
-def _resolve_roles(
+def _resolve_models(
     *,
     claude_model: str | None,
     writer_model: str | None,
     critic_model: str | None,
     reviser_model: str | None,
-) -> tuple[RoleSpec, RoleSpec, RoleSpec]:
-    """Resolve the three role specs in this priority order, per role:
+) -> tuple[str, str, str]:
+    """Resolve the three role models in this priority order, per role:
 
     1. explicit per-role argument (from API request / project state)
     2. matching env-var override (PIPELINE_<ROLE>_MODEL)
     3. the project's ``claude_model`` (or env CLAUDE_MODEL) used for all roles
     """
     fallback = (claude_model or config.CLAUDE_MODEL).strip()
-    writer = _parse_role(writer_model or config.PIPELINE_WRITER_MODEL or None, fallback)
-    critic = _parse_role(critic_model or config.PIPELINE_CRITIC_MODEL or None, fallback)
-    reviser = _parse_role(reviser_model or config.PIPELINE_REVISER_MODEL or None, fallback)
+    writer = _resolve_model(writer_model or config.PIPELINE_WRITER_MODEL or None, fallback)
+    critic = _resolve_model(critic_model or config.PIPELINE_CRITIC_MODEL or None, fallback)
+    reviser = _resolve_model(reviser_model or config.PIPELINE_REVISER_MODEL or None, fallback)
     return writer, critic, reviser
 
 
@@ -440,17 +196,14 @@ async def generate_script(
     pipeline_reviser_model: str | None = None,
     tone: str = "",
     max_revisions: int | None = None,
-    **_ignored,  # absorb ollama_* args so main.py can call either backend uniformly
+    **_ignored,  # absorb legacy args (e.g. ollama_model) from old project state
 ) -> dict[str, Any]:
     """Generate a screenplay using the three-pass writer/critic/reviser pipeline.
 
-    Each pass can run on a different provider+model. By default all three use
+    Each pass can run on a different Claude model. By default all three use
     the project's ``claude_model``; pass ``pipeline_*_model`` to override.
-
-    The return shape matches ``script_gen.generate_script`` so downstream
-    pipeline stages (voice, images, assembly) need no changes.
     """
-    writer_role, critic_role, reviser_role = _resolve_roles(
+    writer_model, critic_model, reviser_model = _resolve_models(
         claude_model=claude_model,
         writer_model=pipeline_writer_model,
         critic_model=pipeline_critic_model,
@@ -459,8 +212,7 @@ async def generate_script(
     revisions = config.CLAUDE_MAX_REVISIONS if max_revisions is None else max_revisions
     log.info(
         "Screenplay pipeline: writer=%s critic=%s reviser=%s target=%smin revisions=%d",
-        writer_role.label(), critic_role.label(), reviser_role.label(),
-        target_minutes, revisions,
+        writer_model, critic_model, reviser_model, target_minutes, revisions,
     )
 
     writer_system = _read_prompt("screenwriter_system.md")
@@ -472,13 +224,10 @@ async def generate_script(
     )
 
     # ── Pass 1: writer ────────────────────────────────────────
-    draft_raw, draft_cost = await _run_pass(
-        role=writer_role,
-        system_prompt=writer_system,
-        user_prompt=writer_user,
-        pass_name="writer",
+    draft_raw, draft_cost = await llm.complete_with_cost(
+        writer_system, writer_user, model=writer_model, pass_name="writer",
     )
-    draft = _parse_json(draft_raw)
+    draft = parse_json(draft_raw)
     draft_errors = _validate_script(draft)
     if draft_errors:
         log.warning("Writer draft validation errors: %s — requesting repair", draft_errors)
@@ -488,14 +237,11 @@ async def generate_script(
             + "\n".join(f"- {e}" for e in draft_errors)
             + "\nReturn a corrected JSON object."
         )
-        draft_raw, repair_cost = await _run_pass(
-            role=writer_role,
-            system_prompt=writer_system,
-            user_prompt=repair_prompt,
-            pass_name="writer-repair",
+        draft_raw, repair_cost = await llm.complete_with_cost(
+            writer_system, repair_prompt, model=writer_model, pass_name="writer-repair",
         )
         draft_cost += repair_cost
-        draft = _parse_json(draft_raw)
+        draft = parse_json(draft_raw)
         draft_errors = _validate_script(draft)
         if draft_errors:
             raise ClaudeBackendError(
@@ -513,15 +259,15 @@ async def generate_script(
             tone=tone,
             target_minutes=target_minutes,
         )
-        critic_raw, critic_cost = await _run_pass(
-            role=critic_role,
-            system_prompt=_read_prompt("screenplay_critic_system.md"),
-            user_prompt=_build_critic_user_prompt(source_summary=source_summary, draft=draft),
+        critic_raw, critic_cost = await llm.complete_with_cost(
+            _read_prompt("screenplay_critic_system.md"),
+            _build_critic_user_prompt(source_summary=source_summary, draft=draft),
+            model=critic_model,
             pass_name="critic",
         )
         total_cost += critic_cost
         try:
-            critique = _parse_json(critic_raw)
+            critique = parse_json(critic_raw)
         except ClaudeBackendError as e:
             log.warning("Critic JSON unparseable (%s) — shipping draft", e)
             critique = {"overall": "ship", "issues": []}
@@ -530,16 +276,16 @@ async def generate_script(
         issues = critique.get("issues") or []
         if verdict == "revise" and issues:
             log.info("Critic flagged %d issues — running reviser", len(issues))
-            revised_raw, revised_cost = await _run_pass(
-                role=reviser_role,
-                system_prompt=_read_prompt("screenwriter_reviser_system.md"),
-                user_prompt=_build_reviser_user_prompt(
+            revised_raw, revised_cost = await llm.complete_with_cost(
+                _read_prompt("screenwriter_reviser_system.md"),
+                _build_reviser_user_prompt(
                     source_summary=source_summary, draft=draft, critique=critique,
                 ),
+                model=reviser_model,
                 pass_name="reviser",
             )
             total_cost += revised_cost
-            revised = _parse_json(revised_raw)
+            revised = parse_json(revised_raw)
             revised_errors = _validate_script(revised)
             if revised_errors:
                 log.warning(
@@ -554,9 +300,9 @@ async def generate_script(
     final = normalize_scenes(final)
     final.setdefault("_claude_cost_usd", round(total_cost, 4))
     final.setdefault("_pipeline_models", {
-        "writer": writer_role.label(),
-        "critic": critic_role.label(),
-        "reviser": reviser_role.label(),
+        "writer": writer_model,
+        "critic": critic_model,
+        "reviser": reviser_model,
     })
     log.info("Screenplay pipeline complete — notional cost ≈ $%.4f", total_cost)
     return final

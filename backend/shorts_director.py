@@ -9,12 +9,9 @@ length fits the 8-58s short window.
 
 from __future__ import annotations
 
-import json
 import logging
 
-import httpx
-
-from . import config
+from . import config, llm
 
 log = logging.getLogger(__name__)
 
@@ -90,18 +87,10 @@ def _build_user_prompt(script: dict, count: int) -> str:
     )
 
 
-def _extract_json(text: str) -> str:
-    text = text.strip()
-    if text.startswith("```"):
-        text = "\n".join(ln for ln in text.split("\n") if not ln.strip().startswith("```")).strip()
-    start, end = text.find("{"), text.rfind("}")
-    return text[start:end + 1] if start >= 0 and end > start else text
-
-
 async def suggest_shorts(
     script: dict,
-    ollama_model: str | None = None,
     count: int | None = None,
+    **_ignored,
 ) -> list[dict]:
     """Return a ranked list of {scene_index, hook, reason, score}."""
     scenes = script.get("scenes") or []
@@ -110,24 +99,15 @@ async def suggest_shorts(
     n = count or config.SHORTS_PER_PROJECT
     n = max(1, min(n, len(scenes)))
 
-    model = ollama_model or config.OLLAMA_MODEL
     try:
-        async with httpx.AsyncClient(timeout=config.LLM_TIMEOUT_SECONDS) as client:
-            resp = await client.post(
-                f"{config.OLLAMA_URL}/api/chat",
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": _SYSTEM},
-                        {"role": "user", "content": _build_user_prompt(script, n)},
-                    ],
-                    "stream": False,
-                    "options": {"temperature": 0.5, "num_predict": 2000},
-                },
-            )
-        resp.raise_for_status()
-        from .script_gen import _extract_llm_content
-        data = json.loads(_extract_json(_extract_llm_content(resp.json())))
+        raw = await llm.complete(
+            _SYSTEM,
+            _build_user_prompt(script, n),
+            model=config.CLAUDE_FAST_MODEL,
+            pass_name="shorts director",
+            timeout=config.CLAUDE_FAST_TIMEOUT_SECONDS,
+        )
+        data = llm.parse_json(raw)
         picks = data.get("shorts") or []
         valid_idx = {sc.get("index") for sc in scenes}
         out = []

@@ -1,7 +1,7 @@
 // ── Types ────────────────────────────────────────────────────
 
 export interface HealthStatus {
-  ollama: boolean
+  claude?: boolean
   voicebox: boolean
   comfyui: boolean
   replicate: boolean
@@ -84,8 +84,6 @@ export interface ProjectState {
   source_tale: string
   voice_profile_id?: string | null
   voice_language: string
-  ollama_model: string
-  script_backend?: 'ollama' | 'claude'
   claude_model?: string | null
   pipeline_writer_model?: string | null
   pipeline_critic_model?: string | null
@@ -313,8 +311,8 @@ export const api = {
     put<Scene>(`/api/projects/${id}/scenes/${sceneIndex}/music`, body),
 
   listProjects: () => request<ProjectSummary[]>('/api/projects'),
-  searchStories: (query: string, count?: number, ollama_model?: string) =>
-    post<{ results: StorySearchResult[] }>('/api/search-stories', { query, count: count || 6, ...(ollama_model && { ollama_model }) }),
+  searchStories: (query: string, count?: number) =>
+    post<{ results: StorySearchResult[] }>('/api/search-stories', { query, count: count || 6 }),
 
   gutenbergSearch: (query: string, page?: number, topic?: string, languages?: string) =>
     post<GutenbergSearchResponse>('/api/gutenberg/search', { query, page: page || 1, topic: topic || '', languages: languages || '' }),
@@ -322,13 +320,12 @@ export const api = {
   gutenbergText: (text_url: string, max_chars?: number) =>
     post<GutenbergTextResponse>('/api/gutenberg/text', { text_url, max_chars: max_chars ?? 2000 }),
 
-  analyzeChapters: (text: string, book_title?: string, ollama_model?: string) =>
-    post<AnalyzeChaptersResponse>('/api/analyze-chapters', { text, book_title: book_title || '', ...(ollama_model && { ollama_model }) }),
+  analyzeChapters: (text: string, book_title?: string) =>
+    post<AnalyzeChaptersResponse>('/api/analyze-chapters', { text, book_title: book_title || '' }),
 
   batchCreate: (body: {
     book_title: string
     chapters: AnalyzedChapter[]
-    ollama_model: string
     voice_profile_id?: string
     voice_language?: string
     image_backend?: string
@@ -357,7 +354,7 @@ export const api = {
   batchResume: (groupId: string) =>
     post<{ status: string }>(`/api/batch/${groupId}/resume`, {}),
 
-  createProject: (body: { source_tale: string; custom_prompt?: string; target_minutes: number; ollama_model: string; script_backend?: 'ollama' | 'claude'; claude_model?: string; pipeline_writer_model?: string; pipeline_critic_model?: string; pipeline_reviser_model?: string; tone?: string }) =>
+  createProject: (body: { source_tale: string; custom_prompt?: string; target_minutes: number; claude_model?: string; pipeline_writer_model?: string; pipeline_critic_model?: string; pipeline_reviser_model?: string; tone?: string }) =>
     post<ProjectState>('/api/projects', body),
   getProject: (id: string) => request<ProjectState>(`/api/projects/${id}`),
   duplicateProject: (id: string) => post<ProjectState>(`/api/projects/${id}/duplicate`),
@@ -369,7 +366,7 @@ export const api = {
   updateSettings: (id: string, body: { tone?: string; target_minutes?: number; suggested_length?: string; music_track?: string | null; music_volume?: number | null }) =>
     put<Record<string, unknown>>(`/api/projects/${id}/settings`, body),
 
-  runScript: (id: string, body: { ollama_model?: string; script_backend?: 'ollama' | 'claude'; claude_model?: string; pipeline_writer_model?: string; pipeline_critic_model?: string; pipeline_reviser_model?: string; target_minutes?: number; custom_prompt?: string }) =>
+  runScript: (id: string, body: { claude_model?: string; pipeline_writer_model?: string; pipeline_critic_model?: string; pipeline_reviser_model?: string; target_minutes?: number; custom_prompt?: string }) =>
     post<Script>(`/api/projects/${id}/script`, body),
   updateScript: (id: string, body: { title: string; synopsis: string; scenes: Scene[] }) =>
     put<Script>(`/api/projects/${id}/script`, body),
@@ -413,11 +410,11 @@ export const api = {
     request<{ text: string; char_count: number; project_id: string; title: string; book_group_id?: string; chapter_index?: number }>(`/api/projects/${projectId}/source-text`),
   splitProject: (projectId: string, parts: number) =>
     post<{ original_project_id: string; new_project_ids: string[]; parts: number }>(`/api/projects/${projectId}/split`, { parts }),
-  splitProjectIntelligent: (projectId: string, parts: number, ollamaModel?: string) =>
-    post<{ original_project_id: string; new_project_ids: string[]; parts: number; split_details: { title: string; summary: string; char_count: number }[] }>(`/api/projects/${projectId}/split-intelligent`, { parts, ollama_model: ollamaModel }),
+  splitProjectIntelligent: (projectId: string, parts: number) =>
+    post<{ original_project_id: string; new_project_ids: string[]; parts: number; split_details: { title: string; summary: string; char_count: number }[] }>(`/api/projects/${projectId}/split-intelligent`, { parts }),
 
   // ── Cast bible & character references ───────────────────────
-  generateCast: (id: string, body?: { ollama_model?: string; overwrite?: boolean }) =>
+  generateCast: (id: string, body?: { overwrite?: boolean }) =>
     post<{ cast: CastMember[]; scenes: Scene[] }>(`/api/projects/${id}/cast`, body || {}),
   updateCastMember: (id: string, castId: string, body: { name?: string; role?: string; description?: string; reference_prompt?: string }) =>
     put<{ member: CastMember }>(`/api/projects/${id}/cast/${castId}`, body),
@@ -425,9 +422,9 @@ export const api = {
     post<{ cast: CastMember[] }>(`/api/projects/${id}/characters`, body),
 
   // ── Shorts ──────────────────────────────────────────────────
-  suggestShorts: (id: string, body?: { ollama_model?: string; count?: number }) =>
+  suggestShorts: (id: string, body?: { count?: number }) =>
     post<{ suggestions: ShortSuggestion[] }>(`/api/projects/${id}/shorts/suggest`, body || {}),
-  renderShorts: (id: string, body?: { scene_indices?: number[]; count?: number; ollama_model?: string; hooks?: Record<number, string> }) =>
+  renderShorts: (id: string, body?: { scene_indices?: number[]; count?: number; hooks?: Record<number, string> }) =>
     post<{ status: string; count?: number; scene_indices?: number[] }>(`/api/projects/${id}/shorts`, body || {}),
   listShorts: (id: string) =>
     request<{ shorts: ShortItem[]; progress: ShortsProgress }>(`/api/projects/${id}/shorts`),

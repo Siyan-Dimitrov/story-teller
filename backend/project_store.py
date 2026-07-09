@@ -7,7 +7,6 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import config
 from .config import PROJECTS_DIR
 
 log = logging.getLogger(__name__)
@@ -50,8 +49,6 @@ def create_project() -> tuple[str, Path]:
         "source_tale": "",
         "voice_profile_id": None,
         "voice_language": "en",
-        "ollama_model": "kimi-k2.5:cloud",
-        "script_backend": config.SCRIPT_BACKEND,
         "claude_model": None,
         "pipeline_writer_model": None,
         "pipeline_critic_model": None,

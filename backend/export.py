@@ -5,9 +5,7 @@ import re
 import shutil
 from pathlib import Path
 
-import httpx
-
-from . import config
+from . import config, llm
 
 log = logging.getLogger(__name__)
 
@@ -21,9 +19,9 @@ def slugify(text: str, max_len: int = 60) -> str:
     return text[:max_len]
 
 
-YOUTUBE_META_PROMPT = """You are a YouTube SEO expert specializing in storytelling and animation channels.
+YOUTUBE_META_SYSTEM = "You are a YouTube SEO expert specializing in storytelling and animation channels."
 
-Given the following story details, generate optimized YouTube metadata.
+YOUTUBE_META_PROMPT = """Given the following story details, generate optimized YouTube metadata.
 
 Story title: {title}
 Synopsis: {synopsis}
@@ -64,13 +62,10 @@ async def generate_youtube_metadata(
     tone: str,
     themes: list[str],
     scene_count: int,
-    ollama_model: str | None = None,
     book_title: str = "",
+    **_ignored,
 ) -> str:
     """Generate YouTube-optimized metadata using the LLM."""
-    model = ollama_model or config.OLLAMA_MODEL
-    base_url = config.OLLAMA_URL
-
     prompt = YOUTUBE_META_PROMPT.format(
         title=title,
         synopsis=synopsis,
@@ -82,33 +77,14 @@ async def generate_youtube_metadata(
 
     log.info(f"Generating YouTube metadata for: {title}")
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        resp = await client.post(
-            f"{base_url}/api/chat",
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "user", "content": prompt},
-                ],
-                "stream": False,
-                "options": {"temperature": 0.7, "num_predict": 8000},
-            },
-        )
-        if resp.status_code != 200:
-            body = resp.text
-            log.error(f"Ollama error generating metadata: {resp.status_code}: {body}")
-            raise RuntimeError(f"Ollama returned {resp.status_code}: {body}")
+    content = await llm.complete(
+        YOUTUBE_META_SYSTEM,
+        prompt,
+        pass_name="youtube metadata",
+    )
 
-    data = resp.json()
-    content = data["message"]["content"].strip()
-
-    # Strip markdown fences if present
-    if content.startswith("```"):
-        lines = content.split("\n")
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        content = "\n".join(lines)
-
-    return content
+    # Strip markdown fences if present (the response is plain text, not JSON)
+    return llm.strip_code_fences(content)
 
 
 def export_project(

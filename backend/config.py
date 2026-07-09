@@ -38,8 +38,6 @@ MUSIC_DIR.mkdir(exist_ok=True)
 
 # ── External services ────────────────────────────────────────
 VOICEBOX_URL = os.getenv("VOICEBOX_URL", "http://localhost:17493")
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "kimi-k2.5:cloud")
 COMFYUI_URL = os.getenv("COMFYUI_URL", "http://127.0.0.1:8188")
 
 # ── Stock media + music APIs ─────────────────────────────────
@@ -206,28 +204,25 @@ SHORT_REFRAME = os.getenv("SHORT_REFRAME", "fit").strip()
 # music + motion, cheap — just ffmpeg); "stills" re-renders from scene images.
 SHORT_SOURCE = os.getenv("SHORT_SOURCE", "final").strip()
 
-# ── LLM ──────────────────────────────────────────────────────
-LLM_TIMEOUT_SECONDS = 300.0
-LLM_TEMPERATURE = 0.8
-LLM_MAX_TOKENS = 16000
-
-# ── Claude screenwriter backend ──────────────────────────────
-# Default script-generation backend. Per-project value (set at project
-# creation, stored in state.json) overrides this. Values: "ollama" | "claude".
-SCRIPT_BACKEND = os.getenv("SCRIPT_BACKEND", "ollama").strip().lower()
-# Claude Agent SDK reads OAuth credentials from ~/.claude/.credentials.json
-# (created by `claude login`), so no API key is required when the user is
-# signed into Claude Code.
-CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5").strip()
-# Per-role model overrides. Empty = "fall back to CLAUDE_MODEL".
-# Syntax: bare model name (defaults to Claude) OR "provider:model"
-# ("claude:claude-opus-4-7", "ollama:kimi-k2.5:cloud").
+# ── Claude text generation ───────────────────────────────────
+# All text generation (scripts, critic, classification, metadata) runs on
+# Claude via the Agent SDK, which reads OAuth credentials from
+# ~/.claude/.credentials.json (created by `claude login`) — no API key needed
+# when the user is signed into Claude Code.
+# Creative work: script writer/critic/reviser, cast bible, export metadata.
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-opus-4-8").strip()
+# Small/structured calls: image classification, chapter tagging, music
+# suggestions, chapter splitting. Fast and cheap on subscription quota.
+CLAUDE_FAST_MODEL = os.getenv("CLAUDE_FAST_MODEL", "claude-haiku-4-5").strip()
+# Per-role model overrides for the script pipeline. Empty = CLAUDE_MODEL.
 PIPELINE_WRITER_MODEL  = os.getenv("PIPELINE_WRITER_MODEL", "").strip()
 PIPELINE_CRITIC_MODEL  = os.getenv("PIPELINE_CRITIC_MODEL", "").strip()
 PIPELINE_REVISER_MODEL = os.getenv("PIPELINE_REVISER_MODEL", "").strip()
 # 0 = writer only (single pass); 1 = writer + critic + reviser (recommended).
 CLAUDE_MAX_REVISIONS = int(os.getenv("CLAUDE_MAX_REVISIONS", "1"))
 CLAUDE_TIMEOUT_SECONDS = float(os.getenv("CLAUDE_TIMEOUT_SECONDS", "600.0"))
+# Shorter timeout for small/structured calls (classification etc.).
+CLAUDE_FAST_TIMEOUT_SECONDS = float(os.getenv("CLAUDE_FAST_TIMEOUT_SECONDS", "180.0"))
 # Directory containing the writer/critic/reviser markdown system prompts.
 CLAUDE_PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 

@@ -1,16 +1,13 @@
 """Batch chapter analysis and sequential pipeline runner."""
 
-import json
 import logging
 import re
 import uuid
 from typing import Optional
 
-import httpx
-
-from . import config
+from . import config, llm
 from . import project_store as store
-from . import script_gen, cast_gen, voice_gen, image_gen, image_styles
+from . import claude_script_gen, cast_gen, voice_gen, image_gen, image_styles
 from .video_assembly import assemble_video
 from .models import DEFAULT_VOICE_INSTRUCT
 
@@ -283,44 +280,19 @@ async def _classify_chapter(
     heading: str,
     excerpt: str,
     book_title: str,
-    model: str,
-    base_url: str,
 ) -> dict:
     """Stage 2: Send a short excerpt to the LLM to get title, tone, and summary."""
     user_prompt = f"Book: {book_title}\nHeading: {heading}\n\nExcerpt:\n{excerpt}"
 
     try:
-        async with httpx.AsyncClient(timeout=config.LLM_TIMEOUT_SECONDS) as client:
-            resp = await client.post(
-                f"{base_url}/api/chat",
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": CHAPTER_CLASSIFY_PROMPT},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    "stream": False,
-                    "options": {
-                        "temperature": 0.3,
-                        "num_predict": 4000,
-                    },
-                },
-            )
-        if resp.status_code != 200:
-            log.warning(f"LLM classify failed ({resp.status_code}), using defaults")
-            return {}
-
-        data = resp.json()
-        content = script_gen._extract_llm_content(data)
-        if not content.strip():
-            return {}
-
-        if content.startswith("```"):
-            lines = content.split("\n")
-            lines = [l for l in lines if not l.strip().startswith("```")]
-            content = "\n".join(lines)
-
-        return json.loads(content)
+        raw = await llm.complete(
+            CHAPTER_CLASSIFY_PROMPT,
+            user_prompt,
+            model=config.CLAUDE_FAST_MODEL,
+            pass_name="chapter classify",
+            timeout=config.CLAUDE_FAST_TIMEOUT_SECONDS,
+        )
+        return llm.parse_json(raw)
     except Exception as exc:
         log.warning(f"LLM classify error for '{heading[:50]}': {exc}")
         return {}
@@ -329,7 +301,7 @@ async def _classify_chapter(
 async def analyze_chapters(
     text: str,
     book_title: str = "",
-    ollama_model: str | None = None,
+    **_ignored,
 ) -> dict:
     """Two-stage chapter analysis: regex split then LLM classify.
 
@@ -339,12 +311,9 @@ async def analyze_chapters(
               chars to the LLM for title/tone/summary classification.
               Small, fast, reliable calls.
     """
-    model = ollama_model or config.OLLAMA_MODEL
-    base_url = config.OLLAMA_URL
-
     # Normalise line endings once so start/end offsets are consistent
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    log.info(f"Analyzing chapters: title={book_title!r}, model={model}, text_len={len(text)}")
+    log.info(f"Analyzing chapters: title={book_title!r}, text_len={len(text)}")
 
     # Stage 1: regex-based chapter splitting
     raw_chapters = _split_chapters_by_pattern(text)
@@ -367,8 +336,6 @@ async def analyze_chapters(
             heading=ch["heading"],
             excerpt=excerpt,
             book_title=book_title,
-            model=model,
-            base_url=base_url,
         )
 
         char_count = len(chapter_text)
@@ -461,10 +428,10 @@ def _split_text_into_parts(text: str, n: int) -> list[str]:
 def create_batch_projects(
     book_title: str,
     chapters: list[dict],
-    ollama_model: str = "kimi-k2.5:cloud",
     voice_profile_id: str | None = None,
     voice_language: str = "en",
     image_backend: str = "comfyui",
+    **_ignored,
 ) -> tuple[str, list[str]]:
     """Create one project per chapter (or per part), linked by a book_group_id.
 
@@ -503,7 +470,6 @@ def create_batch_projects(
                 book_group_id=book_group_id,
                 book_title=book_title,
                 chapter_index=project_index,
-                ollama_model=ollama_model,
                 target_minutes=part_duration,
                 tone=tone,
                 custom_prompt=part_text,
@@ -665,11 +631,10 @@ async def _run_chapter_pipeline(
     if "script" in steps:
         _update_step("script")
         store.update_state(project_id, step="generating_script", error=None)
-        script = await script_gen.generate_script(
+        script = await claude_script_gen.generate_script(
             source_tale=state.get("source_tale", ""),
             custom_prompt=state.get("custom_prompt", ""),
             target_minutes=state.get("target_minutes", 5.0),
-            ollama_model=state.get("ollama_model"),
             tone=state.get("tone", ""),
         )
         store.save_json(project_id, "script.json", script)
@@ -712,7 +677,7 @@ async def _run_chapter_pipeline(
         # so each scene reuses them as references (mirrors the single-project path).
         cast = script.get("cast") or []
         if image_backend == "nano_banana" and character_consistency:
-            script = await cast_gen.ensure_cast(script, ollama_model=state.get("ollama_model"))
+            script = await cast_gen.ensure_cast(script)
             cast = script.get("cast") or []
             if cast:
                 cast = await image_gen.generate_character_references(
@@ -744,7 +709,6 @@ async def _run_chapter_pipeline(
         scenes = await prepare_animations(
             scenes=script["scenes"],
             project_dir=pdir,
-            ollama_model=state.get("ollama_model"),
             project_id=project_id,
         )
         script["scenes"] = scenes
@@ -776,7 +740,6 @@ async def _run_chapter_pipeline(
                 tone=tone,
                 themes=themes,
                 scene_count=len(script.get("scenes", [])),
-                ollama_model=state.get("ollama_model"),
                 book_title=state.get("book_title", ""),
             )
             out_dir = export_project(
