@@ -25,7 +25,8 @@ Respond with valid JSON only, no markdown fences, no commentary. Use exactly thi
 
 ## What counts as a blocker
 
-- JSON schema drift (missing fields, wrong types, scenes without exactly three image_prompts).
+- JSON schema drift (missing fields, wrong types, scenes with fewer than 3 or more than 10 image_prompts).
+- Image count badly out of step with narration length (target is roughly one image_prompt per 20 words of narration — e.g. a 160-word scene with only 3 prompts).
 - Image prompts that are not grounded in the narration of that scene (generic "a dark forest", missing WHO/WHAT/WHERE/lighting/framing).
 - Safety violations: gore, sexual content, children in danger depicted graphically, etc.
 - Fourth-wall breaks or references to the script being a video/AI.
@@ -35,7 +36,7 @@ Respond with valid JSON only, no markdown fences, no commentary. Use exactly thi
 - Narration that doesn't read aloud well (run-on sentences, abstract exposition, no concrete imagery).
 - Character continuity breaks (a character's hair color or age changes across scenes; an established trait drops out).
 - Flat mood arc (every scene at the same pitch) or weak opener / weak closer.
-- Two or more image prompts in the same scene sharing the same composition/framing.
+- Adjacent image prompts in the same scene sharing the same composition/framing.
 - Scenes that collapse multiple distinct beats into one.
 
 ## What counts as minor

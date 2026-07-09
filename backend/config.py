@@ -182,6 +182,7 @@ VIDEO_WIDTH = 1920
 VIDEO_HEIGHT = 1080
 VIDEO_FPS = 25
 CROSSFADE_DURATION = 0.5  # seconds between scenes
+IMAGE_CROSSFADE_DURATION = 0.4  # seconds between images within a scene
 
 # ── Shorts (vertical 9:16 clips) ─────────────────────────────
 # A short is a self-contained mini-scene reframed to portrait, with burned-in
@@ -258,13 +259,11 @@ I2V_DURATION_SECONDS = int(os.getenv("I2V_DURATION_SECONDS", "5"))  # kling: 5 o
 # resolution param directly.
 I2V_RESOLUTION = os.getenv("I2V_RESOLUTION", "720p")
 I2V_OUTPUT_FPS = int(os.getenv("I2V_OUTPUT_FPS", "16"))  # frames extracted from MP4
-# When an I2V clip is shorter than its scene slot, play it forward and SLOW it
-# down to fill (up to this factor) instead of ping-pong/looping — so motion
-# reads as continuous, not a rewind. e.g. 1.5 lets a 5s clip cover a ~7.5s slot.
-# Only slots longer than clip_len * this factor fall back to a forward loop.
-I2V_MAX_SLOWDOWN = float(os.getenv("I2V_MAX_SLOWDOWN", "1.5"))
 # Budget guard — clip count cap per project to avoid runaway spend.
 I2V_MAX_CLIPS_PER_PROJECT = int(os.getenv("I2V_MAX_CLIPS_PER_PROJECT", "36"))
+# At most this many I2V clips per scene (the most dramatic classification wins);
+# the other images in the scene use the free local depth-parallax motion.
+I2V_MAX_CLIPS_PER_SCENE = int(os.getenv("I2V_MAX_CLIPS_PER_SCENE", "1"))
 I2V_TIMEOUT_SECONDS = float(os.getenv("I2V_TIMEOUT_SECONDS", "600.0"))
 # Wan 2.6 I2V generates an audio track by default (audio_enabled=true), which
 # runs as a post-generation step over HTTP and has been observed to fail with

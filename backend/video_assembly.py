@@ -17,6 +17,7 @@ from moviepy import (
     CompositeAudioClip,
     ImageSequenceClip,
     concatenate_videoclips,
+    vfx,
 )
 from moviepy.audio.fx import MultiplyVolume, AudioFadeIn, AudioFadeOut, AudioLoop
 
@@ -399,6 +400,43 @@ def _depth_parallax_clip(
 
 # ── AnimateDiff clip loading ─────────────────────────────────
 
+def _freeze_zoom_clip(
+    image_path: str,
+    duration: float,
+    target_size: tuple[int, int] = (config.VIDEO_WIDTH, config.VIDEO_HEIGHT),
+) -> VideoClip:
+    """Hold a frame with a slow push-in, starting at exactly 1.0x zoom.
+
+    Used to extend an I2V clip past its native length without looping the
+    motion: the first frame here is pixel-identical to the clip's last frame,
+    so the seam is invisible, then the camera creeps in for the remainder.
+    """
+    w, h = target_size
+    pil_img = PILImage.open(image_path).convert("RGB").resize((w, h), PILImage.LANCZOS)
+    src = np.array(pil_img)
+
+    _cache = {}
+
+    def make_frame(t):
+        p = t / duration if duration > 0 else 0.0
+        zoom = 1.0 + 0.06 * p
+        cw, ch = int(w / zoom), int(h / zoom)
+        key = (cw, ch)
+        if key not in _cache:
+            _cache.clear()  # only keep one entry to limit memory
+            x1 = (w - cw) // 2
+            y1 = (h - ch) // 2
+            cropped = src[y1:y1 + ch, x1:x1 + cw]
+            if (cw, ch) == (w, h):
+                _cache[key] = cropped
+            else:
+                pil = PILImage.fromarray(cropped).resize((w, h), PILImage.BILINEAR)
+                _cache[key] = np.array(pil)
+        return _cache[key]
+
+    return VideoClip(make_frame, duration=duration).with_fps(config.VIDEO_FPS)
+
+
 def _animatediff_clip(
     clip_dir: str,
     duration: float,
@@ -406,11 +444,10 @@ def _animatediff_clip(
 ) -> VideoClip:
     """Load I2V frames and build a clip that fills the required duration.
 
-    Plays the captured motion FORWARD and, when the scene slot is longer than
-    the clip, slows it down (up to ``config.I2V_MAX_SLOWDOWN``) to fill — so the
-    motion reads as one continuous shot rather than a ping-pong rewind. Only
-    slots longer than ``clip_len * I2V_MAX_SLOWDOWN`` fall back to a forward
-    loop for the remainder (a single forward cut, never a reverse).
+    Plays the captured motion FORWARD exactly once at native speed. When the
+    scene slot is longer than the clip, the final frame is held with a slow
+    push-in for the remainder; when it's shorter, the motion is simply cut at
+    the slot boundary. The motion is NEVER slowed, looped, or reversed.
     """
     clip_path = Path(clip_dir)
     frame_files = sorted(clip_path.glob("frame_*.png"))
@@ -421,33 +458,25 @@ def _animatediff_clip(
     frame_paths = [str(f) for f in frame_files]
     ad_fps = config.ANIMATEDIFF_DEFAULT_FPS
     native = len(frame_paths) / ad_fps if ad_fps else duration
+    covered = min(native, duration)  # seconds of real motion shown
 
-    # Slowdown factor: stretch one forward pass up to the cap. If the slot is
-    # shorter than the clip this is < 1 (we speed up to fit). Never reverse.
-    slowdown = min(duration / native, config.I2V_MAX_SLOWDOWN) if native > 0 else 1.0
-    slowdown = max(slowdown, 0.01)
-    playback_fps = ad_fps / slowdown  # lower fps => each frame held longer => slower
-
-    looped = duration > native * config.I2V_MAX_SLOWDOWN + 0.05
+    tail = max(0.0, duration - native)
     log.info(
         f"[I2V clip] {clip_path.name}: {len(frame_paths)} frames, native={native:.1f}s, "
-        f"slot={duration:.1f}s, slowdown={slowdown:.2f}x"
-        f"{', forward-loop tail' if looped else ''}"
+        f"slot={duration:.1f}s"
+        f"{f', freeze-zoom tail {tail:.1f}s' if tail > 0.05 else ''}"
     )
 
-    # Forward-only frames, repeated only if the slot exceeds one capped pass.
-    total_needed = max(1, math.ceil(duration * playback_fps))
-    repeated: list[str] = []
-    while len(repeated) < total_needed:
-        repeated.extend(frame_paths)
-    repeated = repeated[:total_needed]
-
-    clip = ImageSequenceClip(repeated, fps=playback_fps)
+    clip = ImageSequenceClip(frame_paths, fps=ad_fps)
 
     # I2V frames come at the model's own resolution (e.g. 720p); match the canvas
     # so they don't pillarbox against 1920x1080 scenes.
     if tuple(clip.size) != tuple(target_size):
         clip = clip.resized(new_size=target_size)
+
+    if tail > 0.05:
+        tail_clip = _freeze_zoom_clip(frame_paths[-1], duration=tail, target_size=target_size)
+        clip = concatenate_videoclips([clip.with_duration(covered), tail_clip], method="compose")
 
     clip = clip.with_duration(duration).with_fps(config.VIDEO_FPS)
     return clip
@@ -619,9 +648,13 @@ def assemble_video(
                 scene_duration = scene.get("audio_duration", scene.get("duration_hint", 10.0))
                 audio_clip = None
 
-            # Split duration across images
+            # Split duration across images. Adjacent images dissolve into each
+            # other, so each slot is stretched by the overlap to keep the
+            # scene's video length equal to its narration audio.
             num_images = len(abs_images)
-            per_image_duration = scene_duration / num_images
+            xfade = config.IMAGE_CROSSFADE_DURATION if num_images > 1 else 0.0
+            xfade = min(xfade, scene_duration / num_images / 2)
+            per_image_duration = (scene_duration + xfade * (num_images - 1)) / num_images
 
             # Gather animation data
             depth_map_paths = scene.get("depth_map_paths") or []
@@ -681,9 +714,14 @@ def assemble_video(
                     )
                 scene_clips.append(clip)
 
-            # Concatenate sub-clips for this scene
+            # Concatenate sub-clips for this scene with dissolves between images
             if len(scene_clips) == 1:
                 scene_video = scene_clips[0]
+            elif xfade > 0:
+                faded = [scene_clips[0]] + [
+                    c.with_effects([vfx.CrossFadeIn(xfade)]) for c in scene_clips[1:]
+                ]
+                scene_video = concatenate_videoclips(faded, method="compose", padding=-xfade)
             else:
                 scene_video = concatenate_videoclips(scene_clips, method="compose")
 
@@ -723,9 +761,13 @@ def assemble_video(
         if project_id:
             _update_progress(project_id, phase="encoding", progress=0)
 
-        # Concatenate with crossfade
+        # Concatenate with crossfade (CrossFadeIn makes the overlap an actual
+        # dissolve — negative padding alone is just an early hard cut)
         if crossfade > 0 and len(clips) > 1:
-            final = concatenate_videoclips(clips, method="compose", padding=-crossfade)
+            faded_scenes = [clips[0]] + [
+                c.with_effects([vfx.CrossFadeIn(crossfade)]) for c in clips[1:]
+            ]
+            final = concatenate_videoclips(faded_scenes, method="compose", padding=-crossfade)
         else:
             final = concatenate_videoclips(clips, method="compose")
 

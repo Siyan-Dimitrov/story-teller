@@ -10,6 +10,10 @@ from .grimm_tales import get_tale
 
 log = logging.getLogger(__name__)
 
+# Upper bound on images per scene, enforced in code because the prompt-side
+# rule ("one per ~20 words, max 10") is only advisory to the LLM.
+MAX_IMAGE_PROMPTS_PER_SCENE = 10
+
 
 def normalize_scenes(script: dict) -> dict:
     """Backfill indices, default mood/duration, and reconcile image_prompt(s).
@@ -41,6 +45,10 @@ def normalize_scenes(script: dict) -> dict:
         if "image_prompts" not in scene or not scene["image_prompts"]:
             single = scene.get("image_prompt", "")
             scene["image_prompts"] = [single] if single else []
+        # Hard cap regardless of what the LLM emitted — every prompt is a paid
+        # image, and slots shorter than ~5s read as a strobing slideshow.
+        if len(scene["image_prompts"]) > MAX_IMAGE_PROMPTS_PER_SCENE:
+            scene["image_prompts"] = scene["image_prompts"][:MAX_IMAGE_PROMPTS_PER_SCENE]
         if scene["image_prompts"]:
             scene["image_prompt"] = scene["image_prompts"][0]
         # Keep only character ids that exist in the cast; drop hallucinated tags.
@@ -246,8 +254,7 @@ Respond ONLY with valid JSON (no markdown fences). Use this exact structure:
       "image_prompts": [
         "First image prompt — must depict a specific moment from the narration",
         "Second image prompt — must depict a different specific moment from the narration",
-        "Third image prompt — must depict a third specific moment from the narration",
-        "Fourth image prompt — must depict a fourth specific moment from the narration"
+        "... one prompt per ~20 words of narration (minimum 3, maximum 10 per scene)"
       ],
       "mood": "one word mood: dark, tense, whimsical, melancholy, horrifying, peaceful, ominous, triumphant",
       "duration_hint": 15.0
@@ -258,16 +265,16 @@ Respond ONLY with valid JSON (no markdown fences). Use this exact structure:
 Guidelines:
 - Each scene's narration should be 60-120 words for short videos (3-5 min total), 100-200 words for longer ones
 - duration_hint is approximate seconds — will be overridden by actual voice audio length
-- Each scene needs exactly 4 image_prompts
+- Each scene needs one image_prompt per roughly 20 words of narration — minimum 3, maximum 10 (a 100-word scene gets 5, a 200-word scene gets 10). Each image is on screen ~7 seconds, so too few prompts makes the video feel static.
 - CRITICAL — image prompts must be grounded in the narration text:
   1. Read the narration you wrote for the scene
-  2. Identify the four most visually striking moments or images described in it (beginning → middle → end of the scene's beat)
+  2. Identify its most visually striking moments or images — one per prompt, in story order (beginning → middle → end of the scene's beat)
   3. Write each prompt as a literal depiction of that moment: name the specific characters, objects, setting, and action happening
   4. Do NOT write generic prompts like "a dark forest" — instead write "the woodcutter's adult daughter kneeling beside a broken juniper branch, a crimson ribbon in her hands, moonlight through bare trees"
 - Each prompt must include: WHO (specific character/creature), WHAT (specific action), WHERE (specific setting detail), and WHEN/LIGHTING if relevant
 - Include continuity anchors for recurring characters: apparent age, clothing, hair, posture, and one memorable identifying feature
 - Include explicit camera/framing language in every prompt, such as "wide establishing shot", "low-angle medium shot", "over-the-shoulder shot", "close-up", or "silhouette against the doorway"
-- Vary composition across the four prompts — mix at least three distinct framings (e.g. wide establishing shot, medium action shot, close-up emotional/detail shot, alternate angle such as over-the-shoulder or low-angle). Never repeat the same framing twice in one scene.
+- Vary composition across a scene's prompts — mix distinct framings (e.g. wide establishing shot, medium action shot, close-up emotional/detail shot, alternate angle such as over-the-shoulder or low-angle). Never use the same framing twice in a row.
 - Do NOT append generic art-style boilerplate to image_prompts. The selected image backend adds style separately via style_prompt.
 - Do NOT request captions, title cards, typography, subtitles, logos, or text inside the image unless the story explicitly requires a visible sign or written object
 - For image_prompts, adapt disturbing story beats as symbolic, non-graphic folklore imagery. Avoid gore, visible injury, sexual content, intimate contact, restraint, torture, explicit burning, cannibalism, and children in danger.

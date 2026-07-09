@@ -610,6 +610,33 @@ async def estimate_depth(
 # ── Main API ─────────────────────────────────────────────────
 
 
+def _cap_animatediff_per_scene(scenes: list[dict], cap: int) -> None:
+    """Keep at most `cap` animatediff images per scene; downgrade the rest to depthflow.
+
+    I2V clips cost money and one well-chosen motion clip per scene reads better
+    than several — the most dramatic classification wins, ties go to the earlier
+    image.
+    """
+    preset_rank = {"animatediff_dramatic": 0, "animatediff_moderate": 1, "animatediff_subtle": 2}
+    downgraded = 0
+    for scene in scenes:
+        anim_types = scene.get("animation_types") or []
+        motion_presets = scene.get("motion_presets") or []
+        ad_idxs = [i for i, t in enumerate(anim_types) if t == "animatediff"]
+        if len(ad_idxs) <= cap:
+            continue
+        ad_idxs.sort(key=lambda i: (
+            preset_rank.get(motion_presets[i] if i < len(motion_presets) else "", 3), i,
+        ))
+        for i in ad_idxs[cap:]:
+            anim_types[i] = "depthflow"
+            if i < len(motion_presets):
+                motion_presets[i] = "dolly_forward"
+            downgraded += 1
+    if downgraded:
+        log.info(f"[Animation] Capped I2V to {cap}/scene — downgraded {downgraded} images to depthflow")
+
+
 async def prepare_animations(
     scenes: list[dict],
     project_dir: Path,
@@ -643,6 +670,10 @@ async def prepare_animations(
 
         scenes = await classify_scene_animations(scenes, ollama_model)
         log.info("Animation classification complete")
+
+        # One motion clip per scene is the budget/quality sweet spot — the rest
+        # of the scene's images animate with free local depth parallax.
+        _cap_animatediff_per_scene(scenes, config.I2V_MAX_CLIPS_PER_SCENE)
 
         # If I2V is not available, downgrade animatediff → depthflow
         if not ad_available:
