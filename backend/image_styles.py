@@ -46,6 +46,20 @@ IMAGE_STYLES: tuple[ImageStyle, ...] = (
         default_lora_keys=("storybook",),
     ),
     ImageStyle(
+        id="anime",
+        label="Anime (Bold Color)",
+        description="Vivid cel-shaded anime with saturated colors and dramatic light.",
+        prompt=(
+            "cel-shaded 2D anime style, flat color fields, two-tone shading, "
+            "clean bold ink outlines, vivid saturated colors, high contrast, "
+            "hard-edged shadows, single key light with rim lighting, dynamic "
+            "anime composition, dramatic low angle, speed lines, bold graphic "
+            "silhouettes, expressive characters with large emotive eyes, "
+            "non-photorealistic"
+        ),
+        default_lora_keys=(),
+    ),
+    ImageStyle(
         id="manga",
         label="Japanese Manga",
         description="Black-and-white manga with dramatic ink and screentones.",

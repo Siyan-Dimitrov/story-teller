@@ -559,7 +559,7 @@ async def duplicate_project(project_id: str):
         "source_tale", "tone", "target_minutes", "claude_model",
         "pipeline_writer_model", "pipeline_critic_model", "pipeline_reviser_model",
         "voice_language", "image_backend", "suggested_length",
-        "title", "music_track", "music_volume",
+        "title", "music_track", "music_volume", "narration_style",
     ]
     updates = {k: source_state.get(k) for k in copy_fields if source_state.get(k) is not None}
     if updates:
@@ -587,6 +587,8 @@ async def update_settings(project_id: str, req: UpdateSettingsRequest):
         updates["target_minutes"] = req.target_minutes
     if req.suggested_length is not None:
         updates["suggested_length"] = req.suggested_length
+    if req.narration_style is not None:
+        updates["narration_style"] = req.narration_style
     if req.music_track is not None:
         updates["music_track"] = req.music_track
     if req.music_volume is not None:
@@ -611,6 +613,7 @@ async def run_script(project_id: str, req: RunScriptRequest):
             target_minutes=req.target_minutes or state.get("target_minutes", 5.0),
             tone=state.get("tone", ""),
             voice_language=state.get("voice_language", "en"),
+            narration_style=state.get("narration_style", ""),
             claude_model=req.claude_model or state.get("claude_model") or None,
             pipeline_writer_model=req.pipeline_writer_model or state.get("pipeline_writer_model") or None,
             pipeline_critic_model=req.pipeline_critic_model or state.get("pipeline_critic_model") or None,
@@ -676,7 +679,9 @@ async def run_voice(project_id: str, req: RunVoiceRequest):
 
     try:
         pdir = store.project_dir(project_id)
-        script["scenes"] = await localize.localize_scenes(script["scenes"], req.language)
+        script["scenes"] = await localize.localize_scenes(
+            script["scenes"], req.language, state.get("narration_style", "")
+        )
         scenes = await voice_gen.generate_all_scenes(
             scenes=script["scenes"],
             profile_id=req.profile_id,
@@ -686,6 +691,7 @@ async def run_voice(project_id: str, req: RunVoiceRequest):
                 "title": script.get("title", ""),
                 "synopsis": script.get("synopsis", ""),
                 "tone": state.get("tone", ""),
+                "narration_style": state.get("narration_style", ""),
             },
         )
         script["scenes"] = scenes

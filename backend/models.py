@@ -276,6 +276,7 @@ class UpdateSettingsRequest(BaseModel):
     suggested_length: Optional[str] = None
     music_track: Optional[str] = None
     music_volume: Optional[float] = None
+    narration_style: Optional[str] = None  # e.g. "anime", or freeform direction
 
 
 class SplitProjectRequest(BaseModel):

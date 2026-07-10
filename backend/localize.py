@@ -70,7 +70,27 @@ def _build_user_prompt(scenes_sentences: dict[int, list[str]], language: str) ->
     )
 
 
-async def localize_scenes(scenes: list[dict], language: str) -> list[dict]:
+# Extra translator direction per narration style. The anime register is
+# 次回予告 (next-episode preview) narration; onomatopoeia guidance follows the
+# spoken-safe (adverbial gitaigo) vs panel-only (raw katakana SFX) split.
+_STYLE_DIRECTIVES = {
+    "anime": (
+        "\nNARRATION REGISTER: dramatic anime narrator (次回予告 style). "
+        "Plain/literary form (だ/である), never です/ます. Use 体言止め "
+        "(noun-stop sentences) for beats. Frame cliffhangers as 果たして…のか？! "
+        "Render sound-and-motion words as natural SPOKEN gitaigo used "
+        "adverbially (ゆっくりと, ざわざわ, じわじわと, ひたひたと, めらめらと, "
+        "ぐらぐらと, ぴたりと, ゾクゾク…) — NEVER voice panel-only SFX raw "
+        "(no bare ゴゴゴ/ドカン/シーン; paraphrase: 爆音が轟く, 静寂が包む). "
+        "At dramatic dashes/ellipses insert a TTS pause marker like <#0.5#> "
+        "(0.3–0.8s, never two adjacent) instead of ―― or ……."
+    ),
+}
+
+
+async def localize_scenes(
+    scenes: list[dict], language: str, narration_style: str = ""
+) -> list[dict]:
     """Translate narration for all scenes that need it. Mutates and returns scenes.
 
     Scenes already localized to ``language`` are left untouched, so re-runs
@@ -90,7 +110,7 @@ async def localize_scenes(scenes: list[dict], language: str) -> list[dict]:
 
     log.info(f"Localizing {len(todo)} scene(s) to {LANGUAGE_NAMES[language]}")
     raw = await llm.complete(
-        _SYSTEM,
+        _SYSTEM + _STYLE_DIRECTIVES.get(narration_style, ""),
         _build_user_prompt(todo, language),
         model=config.CLAUDE_FAST_MODEL,
         pass_name="localize",

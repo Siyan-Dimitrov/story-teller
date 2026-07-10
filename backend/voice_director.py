@@ -110,10 +110,13 @@ def _build_user_prompt(
         if pick_voice
         else ""
     )
+    style = script_meta.get("narration_style") or ""
+    style_line = f"Narration style: {style}\n" if style else ""
     return (
         f"Story: {script_meta.get('title', '')}\n"
         f"Tone: {script_meta.get('tone', '') or 'unspecified'}\n"
-        f"Synopsis: {script_meta.get('synopsis', '')}\n\n"
+        + style_line
+        + f"Synopsis: {script_meta.get('synopsis', '')}\n\n"
         f"Scenes:\n" + "\n".join(lines) + "\n\n"
         + voice_part
         + "For EACH scene pick one emotion preset from: "

@@ -632,6 +632,7 @@ async def _run_chapter_pipeline(
             target_minutes=state.get("target_minutes", 5.0),
             tone=state.get("tone", ""),
             voice_language=state.get("voice_language") or voice_language,
+            narration_style=state.get("narration_style", ""),
         )
         store.save_json(project_id, "script.json", script)
         store.update_state(project_id, step="scripted", title=script.get("title", state.get("title", "")))
@@ -648,7 +649,9 @@ async def _run_chapter_pipeline(
         _update_step("voice")
         store.update_state(project_id, step="generating_voice", error=None,
                           voice_profile_id=voice_profile_id, voice_language=voice_language)
-        script["scenes"] = await localize.localize_scenes(script["scenes"], voice_language)
+        script["scenes"] = await localize.localize_scenes(
+            script["scenes"], voice_language, state.get("narration_style", "")
+        )
         scenes = await voice_gen.generate_all_scenes(
             scenes=script["scenes"],
             profile_id=voice_profile_id,
@@ -657,7 +660,8 @@ async def _run_chapter_pipeline(
             script_meta={
                 "title": script.get("title", ""),
                 "synopsis": script.get("synopsis", ""),
-                "tone": store.load_state(project_id).get("tone", ""),
+                "tone": state.get("tone", ""),
+                "narration_style": state.get("narration_style", ""),
             },
         )
         script["scenes"] = scenes

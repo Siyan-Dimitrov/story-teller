@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -72,7 +73,8 @@ def build_srt(scenes: list[dict]) -> str | None:
         if len(sents_loc) != len(sents_en):
             sents_loc = sents_en  # fall back to weighting by the English text
 
-        weights = [max(1, len(s)) for s in sents_loc]
+        # TTS pause markers (<#0.5#>) aren't speech — drop them from weighting
+        weights = [max(1, len(re.sub(r"<#[\d.]+#>", "", s))) for s in sents_loc]
         total = sum(weights)
         cursor = start
         for sent_en, w in zip(sents_en, weights):

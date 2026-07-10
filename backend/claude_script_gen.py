@@ -81,6 +81,27 @@ def _validate_script(script: dict[str, Any]) -> list[str]:
     return errors
 
 
+# Named narration styles the writer can be steered with. A narration_style
+# value that isn't a key here is passed through as freeform direction.
+NARRATION_STYLES: dict[str, str] = {
+    "anime": (
+        "ANIME NARRATION STYLE — write like a dramatic anime narrator (the "
+        "next-episode-preview / shonen recap register), NOT literary prose:\n"
+        "- Short, punchy sentences. Many under 8 words. Fragments welcome — "
+        "sentences may end on a bare noun beat: 'The throne room. Midnight.'\n"
+        "- Exclamations and rhetorical cliffhanger questions over description: "
+        "'Can they survive?!' 'And then — catastrophe!' Let single words land "
+        "as beats: 'Silence.' 'Impossible!'\n"
+        "- Use sound-and-motion words where prose would use adjectives "
+        "(flames FLARING, dread creeping closer, the crowd murmuring) — the "
+        "translation renders these as natural spoken Japanese onomatopoeia.\n"
+        "- Escalate! The narrator is astonished by their own story. End scenes "
+        "on cliffhanger phrasing; open the next with a reversal.\n"
+        "- Cut every word that does not punch. Aim UNDER the word budget."
+    ),
+}
+
+
 def _word_budget(target_minutes: float, voice_language: str) -> int:
     """Total English narration words that speak in ~target_minutes of audio."""
     factor = config.NARRATION_LANGUAGE_FACTORS.get(voice_language, 1.0)
@@ -116,6 +137,7 @@ def _build_writer_user_prompt(
     target_minutes: float,
     tone: str,
     voice_language: str = "en",
+    narration_style: str = "",
 ) -> str:
     parts: list[str] = []
     if source_tale:
@@ -129,6 +151,8 @@ def _build_writer_user_prompt(
             parts.append(f"Adapt this story: {source_tale}")
     if tone:
         parts.append(f"\nAdaptation tone: {tone}. Infuse the story with this tone throughout.")
+    if narration_style:
+        parts.append("\n" + NARRATION_STYLES.get(narration_style, narration_style))
     if custom_prompt:
         if len(custom_prompt) > 160_000:
             # Claude's context comfortably exceeds typical chapter length;
@@ -229,6 +253,7 @@ async def generate_script(
     tone: str = "",
     max_revisions: int | None = None,
     voice_language: str = "en",
+    narration_style: str = "",
     **_ignored,  # absorb legacy args (e.g. ollama_model) from old project state
 ) -> dict[str, Any]:
     """Generate a screenplay using the three-pass writer/critic/reviser pipeline.
@@ -255,6 +280,7 @@ async def generate_script(
         target_minutes=target_minutes,
         tone=tone,
         voice_language=voice_language,
+        narration_style=narration_style,
     )
 
     # ── Pass 1: writer ────────────────────────────────────────
