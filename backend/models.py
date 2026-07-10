@@ -341,7 +341,7 @@ class BatchCreateResponse(BaseModel):
 
 
 class BatchRunRequest(BaseModel):
-    steps: list[str] = Field(default_factory=lambda: ["script", "voice", "images", "assemble"])
+    steps: list[str] = Field(default_factory=lambda: ["script", "voice", "images", "animate", "assemble"])
     project_ids: Optional[list[str]] = None  # if set, only run these chapters
     voice_profile_id: str = ""
     voice_language: str = "en"

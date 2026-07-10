@@ -110,7 +110,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
   const [selectedChapters, setSelectedChapters] = useState<Set<number>>(new Set())
   const [manualChapterCount, setManualChapterCount] = useState(0)
   const [viewingChapterText, setViewingChapterText] = useState<number | null>(null)
-  const [batchSteps, setBatchSteps] = useState({ animate: false })
+  const [batchSteps, setBatchSteps] = useState({ animate: true })
   const [showChapterPanel, setShowChapterPanel] = useState(false)
   const [bookTitle, setBookTitle] = useState('')
   const [creatingBatch, setCreatingBatch] = useState(false)

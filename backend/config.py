@@ -42,7 +42,9 @@ COMFYUI_URL = os.getenv("COMFYUI_URL", "http://127.0.0.1:8188")
 # ── Voice backend (MiniMax Speech via Replicate) ─────────────
 MINIMAX_TTS_MODEL = os.getenv("MINIMAX_TTS_MODEL", "minimax/speech-2.8-hd")
 MINIMAX_DEFAULT_VOICE = os.getenv("MINIMAX_DEFAULT_VOICE", "English_Deep-VoicedGentleman")
-MINIMAX_SPEED = float(os.getenv("MINIMAX_SPEED", "1.0"))  # 0.9–0.95 for slower storytelling pace
+# The speed param is nonlinear: 1.0 ≈ 177 wpm (too brisk), 0.96 ≈ 163 wpm
+# (audiobook pace), 0.93 ≈ 144 wpm (slow deliberate storyteller).
+MINIMAX_SPEED = float(os.getenv("MINIMAX_SPEED", "0.96"))
 MINIMAX_SAMPLE_RATE = int(os.getenv("MINIMAX_SAMPLE_RATE", "44100"))
 MINIMAX_MAX_RETRIES = int(os.getenv("MINIMAX_MAX_RETRIES", "3"))
 MINIMAX_DELAY_SECONDS = float(os.getenv("MINIMAX_DELAY_SECONDS", "1.0"))  # between scene requests
