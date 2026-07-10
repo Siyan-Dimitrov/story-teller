@@ -93,6 +93,8 @@ export interface ProjectState {
   target_minutes: number
   suggested_length?: string
   tone?: string
+  variety?: string
+  narration_style?: string
   created_at: string
   script?: Script
   output_dir?: string | null
@@ -354,7 +356,7 @@ export const api = {
   batchResume: (groupId: string) =>
     post<{ status: string }>(`/api/batch/${groupId}/resume`, {}),
 
-  createProject: (body: { source_tale: string; custom_prompt?: string; target_minutes: number; claude_model?: string; pipeline_writer_model?: string; pipeline_critic_model?: string; pipeline_reviser_model?: string; tone?: string }) =>
+  createProject: (body: { source_tale: string; custom_prompt?: string; target_minutes: number; claude_model?: string; pipeline_writer_model?: string; pipeline_critic_model?: string; pipeline_reviser_model?: string; tone?: string; variety?: string }) =>
     post<ProjectState>('/api/projects', body),
   getProject: (id: string) => request<ProjectState>(`/api/projects/${id}`),
   duplicateProject: (id: string) => post<ProjectState>(`/api/projects/${id}/duplicate`),

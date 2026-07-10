@@ -78,6 +78,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
   const [criticModel, setCriticModel] = useState('claude-opus-4-8')
   const [reviserModel, setReviserModel] = useState('claude-opus-4-8')
   const [tone, setTone] = useState('dark')
+  const [variety, setVariety] = useState('classic')
   const [creating, setCreating] = useState(false)
 
   // Custom story state
@@ -581,6 +582,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
         pipeline_critic_model: perPassEnabled ? criticModel : undefined,
         pipeline_reviser_model: perPassEnabled ? reviserModel : undefined,
         tone,
+        variety,
       })
       onSelect(proj.project_id)
     } catch (e) {
@@ -1294,6 +1296,20 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                 {ADAPTATION_TONES.map(t => (
                   <option key={t.value} value={t.value}>{t.label}</option>
                 ))}
+              </select>
+            </div>
+
+            {/* Video style / variety */}
+            <div>
+              <label className="block text-xs text-[var(--text-secondary)] mb-1.5">Video Style</label>
+              <select
+                value={variety}
+                onChange={e => setVariety(e.target.value)}
+                className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
+              >
+                <option value="classic">Classic — narrated, motion highlights picked per scene</option>
+                <option value="full_motion">Full Motion — narrated, every image animated (~$0.10/image)</option>
+                <option value="anime">Anime — voiced character dialogue, anime visuals, Japanese + English subs, full motion</option>
               </select>
             </div>
 

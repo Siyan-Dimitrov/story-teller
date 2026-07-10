@@ -101,6 +101,10 @@ class CreateProjectRequest(BaseModel):
     pipeline_critic_model: Optional[str] = None
     pipeline_reviser_model: Optional[str] = None
     tone: str = ""  # e.g. "dark", "humorous", "gothic noir"
+    # Video variety: "classic" (classifier picks motion highlights),
+    # "full_motion" (every image animated), "anime" (dialogue cast + anime
+    # visuals + Japanese narration + full motion).
+    variety: str = "classic"
 
 
 class RunScriptRequest(BaseModel):
@@ -277,6 +281,7 @@ class UpdateSettingsRequest(BaseModel):
     music_track: Optional[str] = None
     music_volume: Optional[float] = None
     narration_style: Optional[str] = None  # e.g. "anime", or freeform direction
+    variety: Optional[str] = None  # classic | full_motion | anime
 
 
 class SplitProjectRequest(BaseModel):

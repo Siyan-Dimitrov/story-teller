@@ -54,6 +54,7 @@ def create_project() -> tuple[str, Path]:
         "pipeline_critic_model": None,
         "pipeline_reviser_model": None,
         "image_backend": "comfyui",
+        "variety": "classic",  # classic | full_motion | anime
         "project_seed": seed_from_project_id(project_id),
         "target_minutes": 5.0,
         "created_at": datetime.now(timezone.utc).isoformat(),

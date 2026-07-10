@@ -634,6 +634,8 @@ async def _run_chapter_pipeline(
             voice_language=state.get("voice_language") or voice_language,
             narration_style=state.get("narration_style", ""),
         )
+        if state.get("variety") == "anime":
+            script["visual_style"] = image_styles.get_style("anime").prompt
         store.save_json(project_id, "script.json", script)
         store.update_state(project_id, step="scripted", title=script.get("title", state.get("title", "")))
 
@@ -716,6 +718,7 @@ async def _run_chapter_pipeline(
             scenes=script["scenes"],
             project_dir=pdir,
             project_id=project_id,
+            full_motion=state.get("variety") in ("full_motion", "anime"),
         )
         script["scenes"] = scenes
         store.save_json(project_id, "script.json", script)

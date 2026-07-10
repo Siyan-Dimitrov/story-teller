@@ -275,7 +275,9 @@ I2V_ENABLED = os.getenv("I2V_ENABLED", "1").strip() in ("1", "true", "True", "ye
 # "wan-video/wan2.6-i2v-flash" proxies to Alibaba's backend and was failing
 # deterministically with E006 in a post-generation upstream poll (2026-06).
 # The input builder in animatediff_gen.py adapts per model family.
-REPLICATE_I2V_MODEL = os.getenv("REPLICATE_I2V_MODEL", "kwaivgi/kling-v2.1")
+# wan-2.2-i2v-fast chosen 2026-07-10 after a 5-model bake-off: best
+# motion-per-dollar ($0.10/5s @720p vs kling's $0.25), seed support, LoRAs.
+REPLICATE_I2V_MODEL = os.getenv("REPLICATE_I2V_MODEL", "wan-video/wan-2.2-i2v-fast")
 I2V_DURATION_SECONDS = int(os.getenv("I2V_DURATION_SECONDS", "5"))  # kling: 5 or 10
 # "720p"/"1080p" — for kling this maps to mode standard/pro; for wan it is the
 # resolution param directly.

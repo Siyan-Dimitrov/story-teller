@@ -592,6 +592,7 @@ async def prepare_animations(
     model: str | None = None,
     project_id: str | None = None,
     style_prompt: str | None = None,
+    full_motion: bool = False,
 ) -> list[dict]:
     """Classify images and generate depth maps + AnimateDiff clips.
 
@@ -620,7 +621,7 @@ async def prepare_animations(
         scenes = await classify_scene_animations(scenes, model)
         log.info("Animation classification complete")
 
-        if config.ANIME_FULL_MOTION and ad_available:
+        if (full_motion or config.ANIME_FULL_MOTION) and ad_available:
             # Full-motion mode (feature/anime): EVERY image gets an I2V clip.
             # Keep the classifier's presets where it already chose animatediff;
             # upgrade the rest with a mood-mapped preset. No per-scene cap.

@@ -470,6 +470,7 @@ def get_text_stats(project: dict) -> dict:
 @app.post("/api/projects")
 async def create_project(req: CreateProjectRequest):
     pid, pdir = store.create_project()
+    variety = req.variety if req.variety in ("classic", "full_motion", "anime") else "classic"
     store.update_state(
         pid,
         source_tale=req.source_tale,
@@ -480,7 +481,12 @@ async def create_project(req: CreateProjectRequest):
         target_minutes=req.target_minutes,
         tone=req.tone,
         custom_prompt=req.custom_prompt,
+        variety=variety,
     )
+    if variety == "anime":
+        # The anime bundle: acted dialogue scenes, Japanese narration (the
+        # Voice tab language dropdown can still override), anime visuals.
+        store.update_state(pid, narration_style="anime", voice_language="ja")
     if req.source_tale:
         tale = get_tale(req.source_tale)
         if tale:
@@ -559,7 +565,7 @@ async def duplicate_project(project_id: str):
         "source_tale", "tone", "target_minutes", "claude_model",
         "pipeline_writer_model", "pipeline_critic_model", "pipeline_reviser_model",
         "voice_language", "image_backend", "suggested_length",
-        "title", "music_track", "music_volume", "narration_style",
+        "title", "music_track", "music_volume", "narration_style", "variety",
     ]
     updates = {k: source_state.get(k) for k in copy_fields if source_state.get(k) is not None}
     if updates:
@@ -589,6 +595,10 @@ async def update_settings(project_id: str, req: UpdateSettingsRequest):
         updates["suggested_length"] = req.suggested_length
     if req.narration_style is not None:
         updates["narration_style"] = req.narration_style
+    if req.variety is not None:
+        if req.variety not in ("classic", "full_motion", "anime"):
+            raise HTTPException(400, f"Unknown variety: {req.variety}")
+        updates["variety"] = req.variety
     if req.music_track is not None:
         updates["music_track"] = req.music_track
     if req.music_volume is not None:
@@ -619,6 +629,10 @@ async def run_script(project_id: str, req: RunScriptRequest):
             pipeline_critic_model=req.pipeline_critic_model or state.get("pipeline_critic_model") or None,
             pipeline_reviser_model=req.pipeline_reviser_model or state.get("pipeline_reviser_model") or None,
         )
+        if state.get("variety") == "anime":
+            # Pin the anime look — the writer's own visual_style would
+            # otherwise override the preset during image generation.
+            script["visual_style"] = image_styles.get_style("anime").prompt
         store.save_json(project_id, "script.json", script)
         store.update_state(
             project_id,
@@ -920,6 +934,7 @@ async def run_animate(project_id: str):
                     project_dir=pdir,
                     project_id=project_id,
                     style_prompt=story_style,
+                    full_motion=state.get("variety") in ("full_motion", "anime"),
                 )
             )
             script["scenes"] = scenes
