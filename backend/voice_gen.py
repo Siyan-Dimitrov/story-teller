@@ -20,6 +20,9 @@ log = logging.getLogger(__name__)
 
 # Trailing silence appended to each scene's audio (seconds)
 SCENE_TRAILING_SILENCE = 0.70
+# Gap between dialogue lines inside a scene (seconds). subtitles.py uses this
+# to compute exact per-line cue times.
+LINE_GAP_SECONDS = 0.25
 
 # Map the UI's 2-letter language codes to MiniMax language_boost values.
 MINIMAX_LANGUAGE_BOOST = {
@@ -93,6 +96,55 @@ async def _generate_minimax_scene(
     raise RuntimeError(f"MiniMax TTS failed: {last_error}")
 
 
+def _concat_line_audio(chunks: list[bytes]) -> tuple[bytes, list[float]]:
+    """Concatenate per-line WAVs with LINE_GAP_SECONDS gaps.
+
+    Returns (scene_wav_bytes, per-line durations in seconds).
+    """
+    import io
+
+    arrays, durations, sr0 = [], [], None
+    for wav in chunks:
+        data, sr = sf.read(io.BytesIO(wav))
+        if data.ndim > 1:
+            data = data.mean(axis=1)
+        if sr0 is None:
+            sr0 = sr
+        elif sr != sr0:
+            log.warning(f"Line sample rate mismatch: {sr} vs {sr0}")
+        arrays.append(data.astype(np.float32))
+        durations.append(len(data) / sr)
+    gap = np.zeros(int(LINE_GAP_SECONDS * sr0), dtype=np.float32)
+    parts: list[np.ndarray] = []
+    for i, a in enumerate(arrays):
+        parts.append(a)
+        if i < len(arrays) - 1:
+            parts.append(gap)
+    buf = io.BytesIO()
+    sf.write(buf, np.concatenate(parts), sr0, format="WAV")
+    return buf.getvalue(), durations
+
+
+async def _generate_dialogue_scene(
+    scene: dict,
+    voices: dict[str, str],
+    language: str,
+) -> tuple[bytes, list[float]]:
+    """Render a dialogue scene line by line, each speaker in their own voice."""
+    loc = scene.get("localized") or {}
+    lines = loc.get("lines") if loc.get("lang") == language else None
+    lines = lines or scene["lines"]
+    chunks = []
+    for i, ln in enumerate(lines):
+        voice = voices.get(ln.get("speaker"), voices["narrator"])
+        chunks.append(
+            await _generate_minimax_scene(ln["text"], voice, ln.get("emotion", "auto"), language)
+        )
+        if i < len(lines) - 1:
+            await asyncio.sleep(config.MINIMAX_DELAY_SECONDS)
+    return _concat_line_audio(chunks)
+
+
 async def generate_all_scenes(
     scenes: list[dict],
     profile_id: str,
@@ -118,6 +170,16 @@ async def generate_all_scenes(
     emotions = direction["emotions"]
     log.info(f"MiniMax voice: {voice_id} ({len(scenes)} scenes)")
 
+    # Dialogue scenes (anime style) get one voice per cast member.
+    voices: dict[str, str] = {"narrator": voice_id}
+    if any(sc.get("lines") for sc in scenes):
+        voices = await voice_director.cast_voices(
+            script_meta or {},
+            (script_meta or {}).get("cast") or [],
+            language=language,
+            narrator_voice=voice_id,
+        )
+
     for i, scene in enumerate(scenes):
         idx = scene["index"]
         emotion = emotions.get(idx, "auto")
@@ -127,9 +189,16 @@ async def generate_all_scenes(
         loc = scene.get("localized") or {}
         text = loc.get("text") if loc.get("lang") == language else scene["narration"]
         try:
-            wav_bytes = await _generate_minimax_scene(
-                text, voice_id, emotion, language
-            )
+            if scene.get("lines"):
+                wav_bytes, line_durations = await _generate_dialogue_scene(
+                    scene, voices, language
+                )
+                scene["line_durations"] = line_durations
+            else:
+                wav_bytes = await _generate_minimax_scene(
+                    text, voice_id, emotion, language
+                )
+                scene.pop("line_durations", None)
             output_path.write_bytes(wav_bytes)
             duration = _append_trailing_silence(output_path, SCENE_TRAILING_SILENCE)
             scene["audio_path"] = str(output_path.relative_to(project_dir))

@@ -42,6 +42,23 @@ VOICE_CATALOG_JA: dict[str, str] = {
 
 CATALOGS: dict[str, dict[str, str]] = {"en": VOICE_CATALOG, "ja": VOICE_CATALOG_JA}
 
+# Wider rosters for CASTING character dialogue (narrator catalogs above are
+# curated for narration fit; casting needs range: young/old, hero/villain).
+CAST_ROSTER_JA: dict[str, str] = {
+    **VOICE_CATALOG_JA,
+    "Japanese_DecisivePrincess": "young female, commanding and sharp",
+    "Japanese_LoyalKnight": "young adult male, earnest hero",
+    "Japanese_KindLady": "warm adult female",
+    "Japanese_OptimisticYouth": "bright young male",
+    "Japanese_GenerousIzakayaOwner": "hearty middle-aged male, jovial",
+    "Japanese_SportyStudent": "energetic teen male",
+    "Japanese_InnocentBoy": "young boy",
+    "Japanese_GracefulMaiden": "gentle young female",
+    "Japanese_DependableWoman": "steady adult female",
+    "Japanese_DominantMan": "deep authoritative male — villains, tyrants",
+}
+CAST_ROSTERS: dict[str, dict[str, str]] = {"en": VOICE_CATALOG, "ja": CAST_ROSTER_JA}
+
 DEFAULT_VOICES = {"ja": "Japanese_IntellectualSenior"}
 
 
@@ -186,6 +203,76 @@ async def direct(
     except Exception as e:  # noqa: BLE001
         log.warning("Voice director LLM failed (%s) — using fallback", e)
         return _fallback(scenes, voice_id, language)
+
+
+_CAST_SYSTEM = (
+    "You are a voice casting director for an animated story. Given the cast "
+    "of characters and the available voices, assign each character the voice "
+    "that best fits their age, gender and role — plus one narrator voice. "
+    "Prefer distinct voices for characters who share scenes. "
+    "Respond with valid JSON only."
+)
+
+
+async def cast_voices(
+    script_meta: dict,
+    cast: list[dict],
+    language: str = "en",
+    narrator_voice: str | None = None,
+) -> dict[str, str]:
+    """Assign a voice per cast id plus 'narrator'. Falls back to round-robin."""
+    roster = CAST_ROSTERS.get(language, CAST_ROSTERS["en"])
+    narrator_default = narrator_voice or _default_voice(language)
+
+    def _fallback_cast() -> dict[str, str]:
+        voices = {"narrator": narrator_default}
+        pool = [v for v in roster if v != narrator_default]
+        for i, member in enumerate(cast):
+            if member.get("id"):
+                voices[member["id"]] = pool[i % len(pool)]
+        return voices
+
+    if not cast:
+        return {"narrator": narrator_default}
+
+    cast_desc = "\n".join(
+        f"- {c.get('id')}: {c.get('name', '')} — {c.get('role', '')}. {c.get('description', '')}"
+        for c in cast if c.get("id")
+    )
+    roster_desc = "\n".join(f"- {vid}: {desc}" for vid, desc in roster.items())
+    narrator_part = (
+        f'Narrator voice is already fixed: use "{narrator_default}" for "narrator".'
+        if narrator_voice
+        else "Also pick the best narrator voice."
+    )
+    user = (
+        f"Story: {script_meta.get('title', '')}\n"
+        f"Tone: {script_meta.get('tone', '')}\n\n"
+        f"Cast:\n{cast_desc}\n\nAvailable voices:\n{roster_desc}\n\n"
+        f"{narrator_part} Return EXACTLY this JSON:\n"
+        '{"voices": {"narrator": "...", "<cast_id>": "..."}}'
+    )
+    try:
+        raw = await llm.complete(
+            _CAST_SYSTEM, user,
+            model=config.CLAUDE_FAST_MODEL,
+            pass_name="voice casting",
+            timeout=config.CLAUDE_FAST_TIMEOUT_SECONDS,
+        )
+        picked = (llm.parse_json(raw).get("voices") or {})
+        voices = {"narrator": narrator_default}
+        if not narrator_voice and picked.get("narrator") in roster:
+            voices["narrator"] = picked["narrator"]
+        valid_ids = {c.get("id") for c in cast if c.get("id")}
+        fallback = _fallback_cast()
+        for cid in valid_ids:
+            v = picked.get(cid)
+            voices[cid] = v if v in roster else fallback[cid]
+        log.info("Voice casting: %s", voices)
+        return voices
+    except Exception as e:  # noqa: BLE001
+        log.warning("Voice casting LLM failed (%s) — using round-robin", e)
+        return _fallback_cast()
 
 
 def list_profiles() -> list[dict]:

@@ -55,16 +55,34 @@ def split_sentences(text: str) -> list[str]:
     return out or [text.strip()]
 
 
-def _build_user_prompt(scenes_sentences: dict[int, list[str]], language: str) -> str:
+def _build_user_prompt(
+    scenes_sentences: dict[int, list[str]],
+    language: str,
+    speakers: dict[int, list[str]] | None = None,
+) -> str:
     lang_name = LANGUAGE_NAMES.get(language, language)
     blocks = []
     for idx, sents in scenes_sentences.items():
-        numbered = "\n".join(f"  {i}: {s}" for i, s in enumerate(sents))
+        spk = (speakers or {}).get(idx)
+        if spk:
+            numbered = "\n".join(
+                f"  {i} ({s}): {t}" for i, (s, t) in enumerate(zip(spk, sents))
+            )
+        else:
+            numbered = "\n".join(f"  {i}: {s}" for i, s in enumerate(sents))
         blocks.append(f"Scene {idx}:\n{numbered}")
+    dialogue_note = (
+        "Lines marked with a speaker other than (narrator) are CHARACTER "
+        "DIALOGUE — translate them in that character's spoken voice (casual, "
+        "emotional, in-register), not the narrator register. "
+        if speakers
+        else ""
+    )
     return (
         f"Translate this story narration to {lang_name}. One translated "
-        "sentence per numbered source sentence, same order. Return EXACTLY "
-        "this JSON:\n"
+        "sentence per numbered source sentence, same order. "
+        + dialogue_note
+        + "Return EXACTLY this JSON:\n"
         '{"scenes": [{"scene_index": 0, "sentences": ["...", "..."]}]}\n\n'
         + "\n\n".join(blocks)
     )
@@ -100,18 +118,25 @@ async def localize_scenes(
         return scenes
 
     todo: dict[int, list[str]] = {}
+    speakers: dict[int, list[str]] = {}
     for sc in scenes:
         loc = sc.get("localized") or {}
         if loc.get("lang") == language and loc.get("text"):
             continue
-        todo[sc["index"]] = split_sentences(sc.get("narration") or "")
+        # Dialogue scenes translate line-by-line (each line keeps its speaker
+        # and emotion); narration-only scenes translate sentence-by-sentence.
+        if sc.get("lines"):
+            todo[sc["index"]] = [ln["text"] for ln in sc["lines"]]
+            speakers[sc["index"]] = [ln["speaker"] for ln in sc["lines"]]
+        else:
+            todo[sc["index"]] = split_sentences(sc.get("narration") or "")
     if not todo:
         return scenes
 
     log.info(f"Localizing {len(todo)} scene(s) to {LANGUAGE_NAMES[language]}")
     raw = await llm.complete(
         _SYSTEM + _STYLE_DIRECTIVES.get(narration_style, ""),
-        _build_user_prompt(todo, language),
+        _build_user_prompt(todo, language, speakers or None),
         model=config.CLAUDE_FAST_MODEL,
         pass_name="localize",
         timeout=config.CLAUDE_FAST_TIMEOUT_SECONDS,
@@ -142,4 +167,8 @@ async def localize_scenes(
             "sentences": out,
             "sentences_en": src,
         }
+        if sc.get("lines") and len(out) == len(sc["lines"]):
+            sc["localized"]["lines"] = [
+                {**ln, "text": t} for ln, t in zip(sc["lines"], out)
+            ]
     return scenes

@@ -17,7 +17,7 @@ from pathlib import Path
 
 from . import config
 from .shorts import compute_scene_time_ranges
-from .voice_gen import SCENE_TRAILING_SILENCE
+from .voice_gen import LINE_GAP_SECONDS, SCENE_TRAILING_SILENCE
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +69,18 @@ def build_srt(scenes: list[dict]) -> str | None:
         speech_end = max(start + 0.5, end - SCENE_TRAILING_SILENCE)
 
         sents_en = loc.get("sentences_en") or [sc.get("narration") or ""]
+
+        # Dialogue scenes: per-line audio durations are measured exactly.
+        line_durs = sc.get("line_durations")
+        if line_durs and len(line_durs) == len(sents_en):
+            cursor = start
+            for sent_en, dur in zip(sents_en, line_durs):
+                cues.append((cursor, cursor + max(dur, MIN_CUE_SECONDS), sent_en))
+                cursor += dur + LINE_GAP_SECONDS
+            continue
+
+        # Narration scenes: place cue boundaries proportionally by localized
+        # sentence length.
         sents_loc = loc.get("sentences") or []
         if len(sents_loc) != len(sents_en):
             sents_loc = sents_en  # fall back to weighting by the English text

@@ -692,6 +692,7 @@ async def run_voice(project_id: str, req: RunVoiceRequest):
                 "synopsis": script.get("synopsis", ""),
                 "tone": state.get("tone", ""),
                 "narration_style": state.get("narration_style", ""),
+                "cast": script.get("cast") or [],
             },
         )
         script["scenes"] = scenes
