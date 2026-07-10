@@ -56,6 +56,13 @@ NARRATION_LANGUAGE_FACTORS = {"ja": 1.5}
 # Dialogue (acted) scenes run slower again than plain narration: character
 # delivery + between-line beats. Measured 79 vs 114 EN-words/min in ja.
 NARRATION_DIALOGUE_FACTOR = float(os.getenv("NARRATION_DIALOGUE_FACTOR", "1.45"))
+
+# ── Full-motion anime mode (feature/anime branch) ────────────
+# Master gate for PsyopAnime-style episodes: every dialogue line becomes its
+# own shot with an I2V motion clip, cut on line boundaries. OFF by default —
+# when off, the pipeline behaves exactly like master (stills + 1 clip/scene).
+# All full-motion code paths MUST check this flag.
+ANIME_FULL_MOTION = os.getenv("ANIME_FULL_MOTION", "0").strip() in ("1", "true", "True", "yes")
 MINIMAX_SAMPLE_RATE = int(os.getenv("MINIMAX_SAMPLE_RATE", "44100"))
 MINIMAX_MAX_RETRIES = int(os.getenv("MINIMAX_MAX_RETRIES", "3"))
 MINIMAX_DELAY_SECONDS = float(os.getenv("MINIMAX_DELAY_SECONDS", "1.0"))  # between scene requests
