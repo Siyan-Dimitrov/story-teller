@@ -139,7 +139,8 @@ async def localize_scenes(
         _build_user_prompt(todo, language, speakers or None),
         model=config.CLAUDE_FAST_MODEL,
         pass_name="localize",
-        timeout=config.CLAUDE_FAST_TIMEOUT_SECONDS,
+        # Whole-script translation regularly outruns the fast-call timeout.
+        timeout=config.CLAUDE_TIMEOUT_SECONDS,
     )
     data = llm.parse_json(raw)
     translations = {

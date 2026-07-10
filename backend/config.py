@@ -53,6 +53,9 @@ NARRATION_WPM = float(os.getenv("NARRATION_WPM", "170"))
 # translated language (measured: ja spoke 307 EN-words' content in 161s
 # → 1.49x). Languages not listed are assumed 1.0.
 NARRATION_LANGUAGE_FACTORS = {"ja": 1.5}
+# Dialogue (acted) scenes run slower again than plain narration: character
+# delivery + between-line beats. Measured 79 vs 114 EN-words/min in ja.
+NARRATION_DIALOGUE_FACTOR = float(os.getenv("NARRATION_DIALOGUE_FACTOR", "1.45"))
 MINIMAX_SAMPLE_RATE = int(os.getenv("MINIMAX_SAMPLE_RATE", "44100"))
 MINIMAX_MAX_RETRIES = int(os.getenv("MINIMAX_MAX_RETRIES", "3"))
 MINIMAX_DELAY_SECONDS = float(os.getenv("MINIMAX_DELAY_SECONDS", "1.0"))  # between scene requests

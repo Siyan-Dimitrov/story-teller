@@ -97,19 +97,81 @@ NARRATION_STYLES: dict[str, str] = {
         "translation renders these as natural spoken Japanese onomatopoeia.\n"
         "- Escalate! The narrator is astonished by their own story. End scenes "
         "on cliffhanger phrasing; open the next with a reversal.\n"
-        "- Cut every word that does not punch. Aim UNDER the word budget."
+        "- Cut every word that does not punch. Aim UNDER the word budget.\n"
+        "\n"
+        "DIALOGUE MODE (required for this style): scenes are ACTED, not just "
+        "narrated. Every scene MUST carry a \"lines\" array — the scene "
+        "played out as alternating narrator beats and character dialogue:\n"
+        '  "lines": [\n'
+        '    {"speaker": "narrator", "text": "The throne room. Midnight.", "emotion": "calm"},\n'
+        '    {"speaker": "<cast id>", "text": "Impossible... the model has stalled?!", "emotion": "fearful"}\n'
+        "  ]\n"
+        "- speaker is \"narrator\" or the exact id of a cast member; every "
+        "speaking character MUST be in the cast list.\n"
+        "- 50-70% of lines are character dialogue — and dialogue means "
+        "OUTBURSTS, not speeches: a gasp, a shout, a vow, a name cried out. "
+        "NO line may exceed 12 words; most should be 2-6. 'Nani?!' energy. "
+        "The narrator carries transitions and cliffhangers.\n"
+        "- emotion is one of: auto, happy, sad, angry, fearful, disgusted, "
+        "surprised, calm, neutral — per line, matching its delivery.\n"
+        "- The scene's \"narration\" field must be exactly the lines' texts "
+        "joined in order (it drives timing and image count)."
     ),
 }
 
 
-def _word_budget(target_minutes: float, voice_language: str) -> int:
+def _normalize_dialogue_lines(script: dict[str, Any]) -> None:
+    """Soft-validate scene 'lines': fix speakers/emotions, sync narration."""
+    valid_speakers = {"narrator"} | {
+        c.get("id") for c in script.get("cast") or [] if c.get("id")
+    }
+    valid_emotions = {
+        "auto", "happy", "sad", "angry", "fearful",
+        "disgusted", "surprised", "calm", "neutral",
+    }
+    for scene in script.get("scenes") or []:
+        lines = scene.get("lines")
+        if not isinstance(lines, list) or not lines:
+            scene.pop("lines", None)
+            continue
+        cleaned = []
+        for ln in lines:
+            text = (ln.get("text") or "").strip()
+            if not text:
+                continue
+            speaker = ln.get("speaker") or "narrator"
+            if speaker not in valid_speakers:
+                log.warning("Unknown speaker %r — reassigned to narrator", speaker)
+                speaker = "narrator"
+            emotion = (ln.get("emotion") or "auto").strip().lower()
+            if emotion not in valid_emotions:
+                emotion = "auto"
+            cleaned.append({"speaker": speaker, "text": text, "emotion": emotion})
+        if cleaned:
+            scene["lines"] = cleaned
+            scene["narration"] = " ".join(ln["text"] for ln in cleaned)
+        else:
+            scene.pop("lines", None)
+
+
+# Styles whose scenes are acted as dialogue lines (slower delivery).
+DIALOGUE_STYLES = {"anime"}
+
+
+def _word_budget(
+    target_minutes: float, voice_language: str, narration_style: str = ""
+) -> int:
     """Total English narration words that speak in ~target_minutes of audio."""
     factor = config.NARRATION_LANGUAGE_FACTORS.get(voice_language, 1.0)
+    if narration_style in DIALOGUE_STYLES:
+        factor *= config.NARRATION_DIALOGUE_FACTOR
     return int(round(target_minutes * config.NARRATION_WPM / factor / 10) * 10)
 
 
-def _budget_lines(target_minutes: float, voice_language: str) -> list[str]:
-    budget = _word_budget(target_minutes, voice_language)
+def _budget_lines(
+    target_minutes: float, voice_language: str, narration_style: str = ""
+) -> list[str]:
+    budget = _word_budget(target_minutes, voice_language, narration_style)
     scene_count = max(3, round(target_minutes * 1.5))
     lines = [
         f"\nTarget length: {target_minutes} minutes of narrated audio.",
@@ -160,7 +222,7 @@ def _build_writer_user_prompt(
             log.warning("Custom prompt is %d chars — truncating to 160000", len(custom_prompt))
             custom_prompt = custom_prompt[:160_000] + "\n[... truncated ...]"
         parts.append(f"\nSource material / additional direction:\n{custom_prompt}")
-    parts.extend(_budget_lines(target_minutes, voice_language))
+    parts.extend(_budget_lines(target_minutes, voice_language, narration_style))
     parts.append("\nReturn the screenplay JSON object now.")
     return "\n".join(parts)
 
@@ -199,13 +261,15 @@ def _summarize_source(
     tone: str,
     target_minutes: float,
     voice_language: str = "en",
+    narration_style: str = "",
 ) -> str:
     """Compact context for critic/reviser passes. Avoids re-pasting a whole
     chapter twice through the prompt while still anchoring revisions."""
     parts: list[str] = [
         f"Target length: {target_minutes} minutes. HARD narration budget: "
-        f"~{_word_budget(target_minutes, voice_language)} words total (±10%) — "
-        "flag the draft if it exceeds this; revisions must not add net length."
+        f"~{_word_budget(target_minutes, voice_language, narration_style)} words "
+        "total (±10%) — flag the draft if it exceeds this; revisions must not "
+        "add net length."
     ]
     if tone:
         parts.append(f"Tone: {tone}.")
@@ -319,6 +383,7 @@ async def generate_script(
             tone=tone,
             target_minutes=target_minutes,
             voice_language=voice_language,
+            narration_style=narration_style,
         )
         critic_raw, critic_cost = await llm.complete_with_cost(
             _read_prompt("screenplay_critic_system.md"),
@@ -359,6 +424,7 @@ async def generate_script(
             log.info("Critic verdict: ship")
 
     final = normalize_scenes(final)
+    _normalize_dialogue_lines(final)
     final.setdefault("_claude_cost_usd", round(total_cost, 4))
     final.setdefault("_pipeline_models", {
         "writer": writer_model,
