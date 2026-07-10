@@ -45,6 +45,14 @@ MINIMAX_DEFAULT_VOICE = os.getenv("MINIMAX_DEFAULT_VOICE", "English_Deep-VoicedG
 # The speed param is nonlinear: 1.0 ≈ 177 wpm (too brisk), 0.96 ≈ 163 wpm
 # (audiobook pace), 0.93 ≈ 144 wpm (slow deliberate storyteller).
 MINIMAX_SPEED = float(os.getenv("MINIMAX_SPEED", "0.96"))
+# Measured English narration rate at MINIMAX_SPEED=0.96 (638 words / 225s on
+# the Singing Bone run). The screenwriter's word budget derives from this —
+# re-measure if MINIMAX_SPEED changes.
+NARRATION_WPM = float(os.getenv("NARRATION_WPM", "170"))
+# How much longer the same English-source content runs when narrated in a
+# translated language (measured: ja spoke 307 EN-words' content in 161s
+# → 1.49x). Languages not listed are assumed 1.0.
+NARRATION_LANGUAGE_FACTORS = {"ja": 1.5}
 MINIMAX_SAMPLE_RATE = int(os.getenv("MINIMAX_SAMPLE_RATE", "44100"))
 MINIMAX_MAX_RETRIES = int(os.getenv("MINIMAX_MAX_RETRIES", "3"))
 MINIMAX_DELAY_SECONDS = float(os.getenv("MINIMAX_DELAY_SECONDS", "1.0"))  # between scene requests

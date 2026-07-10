@@ -610,6 +610,7 @@ async def run_script(project_id: str, req: RunScriptRequest):
             custom_prompt=req.custom_prompt or state.get("custom_prompt", ""),
             target_minutes=req.target_minutes or state.get("target_minutes", 5.0),
             tone=state.get("tone", ""),
+            voice_language=state.get("voice_language", "en"),
             claude_model=req.claude_model or state.get("claude_model") or None,
             pipeline_writer_model=req.pipeline_writer_model or state.get("pipeline_writer_model") or None,
             pipeline_critic_model=req.pipeline_critic_model or state.get("pipeline_critic_model") or None,

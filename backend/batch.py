@@ -631,6 +631,7 @@ async def _run_chapter_pipeline(
             custom_prompt=state.get("custom_prompt", ""),
             target_minutes=state.get("target_minutes", 5.0),
             tone=state.get("tone", ""),
+            voice_language=state.get("voice_language") or voice_language,
         )
         store.save_json(project_id, "script.json", script)
         store.update_state(project_id, step="scripted", title=script.get("title", state.get("title", "")))

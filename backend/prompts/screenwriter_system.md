@@ -38,8 +38,7 @@ Because the pipeline is automated, you MUST respond with valid JSON only — no 
 ## Scene-craft rules
 
 - Each scene is one self-contained visual moment. Don't pile two beats into one scene; split them.
-- Narration length: 60–120 words for short videos (target ≤ 5 min), 100–200 words for longer pieces. `duration_hint` is approximate seconds and will be overridden by actual audio length.
-- Aim for roughly one scene per 30–60 seconds of target length. The user supplies the target.
+- Narration length: the user prompt supplies a HARD total word budget calibrated to the narrator's speaking rate, plus a scene count. Distribute the budget across scenes (they need not be equal) and stay within ±10% of the total — count your words before returning. `duration_hint` is approximate seconds and will be overridden by actual audio length.
 - Open with a hook — a concrete image or action, not exposition. Close with a final beat that lands: an image, a line of dialogue, or a turn that resonates.
 - Track a mood arc across the whole script. Don't keep every scene at the same emotional pitch.
 - Maintain character voice and physical continuity across scenes. Pick distinctive identifying features for each recurring character (age, clothing, hair, posture, one memorable detail) and carry them through.

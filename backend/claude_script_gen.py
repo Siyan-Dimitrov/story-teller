@@ -81,12 +81,41 @@ def _validate_script(script: dict[str, Any]) -> list[str]:
     return errors
 
 
+def _word_budget(target_minutes: float, voice_language: str) -> int:
+    """Total English narration words that speak in ~target_minutes of audio."""
+    factor = config.NARRATION_LANGUAGE_FACTORS.get(voice_language, 1.0)
+    return int(round(target_minutes * config.NARRATION_WPM / factor / 10) * 10)
+
+
+def _budget_lines(target_minutes: float, voice_language: str) -> list[str]:
+    budget = _word_budget(target_minutes, voice_language)
+    scene_count = max(3, round(target_minutes * 1.5))
+    lines = [
+        f"\nTarget length: {target_minutes} minutes of narrated audio.",
+        f"HARD NARRATION BUDGET: about {budget} words of narration TOTAL across "
+        "all scenes (stay within ±10%). This is calibrated to the narrator's "
+        "measured speaking rate — every extra word pushes the video past its "
+        "target length.",
+    ]
+    if config.NARRATION_LANGUAGE_FACTORS.get(voice_language, 1.0) != 1.0:
+        lines.append(
+            "The budget is already shortened because the narration will be "
+            f"translated to another language ({voice_language}) that takes "
+            "longer to speak — do not compensate."
+        )
+    lines.append(
+        f"Aim for roughly {scene_count} scenes (~{budget // scene_count} words each)."
+    )
+    return lines
+
+
 def _build_writer_user_prompt(
     *,
     source_tale: str,
     custom_prompt: str,
     target_minutes: float,
     tone: str,
+    voice_language: str = "en",
 ) -> str:
     parts: list[str] = []
     if source_tale:
@@ -107,9 +136,7 @@ def _build_writer_user_prompt(
             log.warning("Custom prompt is %d chars — truncating to 160000", len(custom_prompt))
             custom_prompt = custom_prompt[:160_000] + "\n[... truncated ...]"
         parts.append(f"\nSource material / additional direction:\n{custom_prompt}")
-    scene_count = max(5, int(target_minutes * 1.5))
-    parts.append(f"\nTarget length: approximately {target_minutes} minutes when narrated aloud.")
-    parts.append(f"Aim for roughly {scene_count} scenes.")
+    parts.extend(_budget_lines(target_minutes, voice_language))
     parts.append("\nReturn the screenplay JSON object now.")
     return "\n".join(parts)
 
@@ -147,10 +174,15 @@ def _summarize_source(
     custom_prompt: str,
     tone: str,
     target_minutes: float,
+    voice_language: str = "en",
 ) -> str:
     """Compact context for critic/reviser passes. Avoids re-pasting a whole
     chapter twice through the prompt while still anchoring revisions."""
-    parts: list[str] = [f"Target length: {target_minutes} minutes."]
+    parts: list[str] = [
+        f"Target length: {target_minutes} minutes. HARD narration budget: "
+        f"~{_word_budget(target_minutes, voice_language)} words total (±10%) — "
+        "flag the draft if it exceeds this; revisions must not add net length."
+    ]
     if tone:
         parts.append(f"Tone: {tone}.")
     if source_tale:
@@ -196,6 +228,7 @@ async def generate_script(
     pipeline_reviser_model: str | None = None,
     tone: str = "",
     max_revisions: int | None = None,
+    voice_language: str = "en",
     **_ignored,  # absorb legacy args (e.g. ollama_model) from old project state
 ) -> dict[str, Any]:
     """Generate a screenplay using the three-pass writer/critic/reviser pipeline.
@@ -221,6 +254,7 @@ async def generate_script(
         custom_prompt=custom_prompt,
         target_minutes=target_minutes,
         tone=tone,
+        voice_language=voice_language,
     )
 
     # ── Pass 1: writer ────────────────────────────────────────
@@ -258,6 +292,7 @@ async def generate_script(
             custom_prompt=custom_prompt,
             tone=tone,
             target_minutes=target_minutes,
+            voice_language=voice_language,
         )
         critic_raw, critic_cost = await llm.complete_with_cost(
             _read_prompt("screenplay_critic_system.md"),
