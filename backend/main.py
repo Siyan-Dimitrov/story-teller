@@ -20,7 +20,7 @@ import httpx
 from . import config
 from . import project_store as store
 from . import llm
-from . import script_gen, claude_script_gen, cast_gen, voice_gen, image_gen, image_styles, gutenberg, batch, music_search
+from . import script_gen, claude_script_gen, cast_gen, voice_gen, voice_director, image_gen, image_styles, gutenberg, batch, music_search
 from . import url_guard
 from . import shorts as shorts_mod
 from . import shorts_director
@@ -118,11 +118,6 @@ async def health() -> HealthStatus:
     status = HealthStatus()
     status.claude = importlib.util.find_spec("claude_agent_sdk") is not None
     async with httpx.AsyncClient(timeout=5) as client:
-        try:
-            r = await client.get(f"{config.VOICEBOX_URL}/health")
-            status.voicebox = r.status_code == 200
-        except Exception:
-            pass
         try:
             r = await client.get(f"{config.COMFYUI_URL}/system_stats")
             status.comfyui = r.status_code == 200
@@ -282,7 +277,6 @@ async def batch_run(group_id: str, req: BatchRunRequest):
                     steps=req.steps,
                     voice_profile_id=req.voice_profile_id,
                     voice_language=req.voice_language,
-                    voice_instruct=req.voice_instruct,
                     image_backend=req.image_backend,
                     style_prompt=style_prompt,
                     lora_keys=lora_keys,
@@ -335,7 +329,6 @@ async def batch_resume(group_id: str):
                     steps=run_config["steps"],
                     voice_profile_id=run_config["voice_profile_id"],
                     voice_language=run_config["voice_language"],
-                    voice_instruct=run_config["voice_instruct"],
                     image_backend=run_config["image_backend"],
                     style_prompt=run_config["style_prompt"],
                     lora_keys=run_config["lora_keys"],
@@ -352,15 +345,11 @@ async def batch_resume(group_id: str):
     return {"status": "resumed"}
 
 
-# ── Voice profiles (proxy to VoiceBox) ──────────────────────
+# ── Voice profiles ───────────────────────────────────────────
 
 @app.get("/api/profiles")
 async def get_profiles():
-    try:
-        return await voice_gen.list_profiles()
-    except Exception as e:
-        log.error(f"Failed to fetch voice profiles: {e}")
-        return []
+    return voice_director.list_profiles()
 
 
 # ── LoRAs ────────────────────────────────────────────────────
@@ -691,7 +680,11 @@ async def run_voice(project_id: str, req: RunVoiceRequest):
             profile_id=req.profile_id,
             language=req.language,
             project_dir=pdir,
-            instruct=req.instruct,
+            script_meta={
+                "title": script.get("title", ""),
+                "synopsis": script.get("synopsis", ""),
+                "tone": state.get("tone", ""),
+            },
         )
         script["scenes"] = scenes
         store.save_json(project_id, "script.json", script)

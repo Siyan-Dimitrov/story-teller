@@ -105,46 +105,6 @@ if %errorlevel% equ 0 (
     )
 )
 
-:: ── Ensure SoX is in PATH (required by Qwen TTS) ──
-where sox >nul 2>&1
-if %errorlevel% neq 0 (
-    for /d %%D in ("%LOCALAPPDATA%\Microsoft\WinGet\Packages\ChrisBagwell.SoX*") do (
-        if exist "%%D\sox-14.4.2\sox.exe" (
-            set "PATH=%%D\sox-14.4.2;%PATH%"
-            echo [OK] SoX found via winget
-        )
-    )
-    where sox >nul 2>&1
-    if %errorlevel% neq 0 (
-        echo [WARN] SoX not found. Voice generation will fail.
-        echo        Install with: winget install sox
-    )
-) else (
-    echo [OK] SoX found
-)
-
-:: ── Start VoiceBox backend ──────────────────────
-set "VOICEBOX_DIR=C:\Dev\voice_box\voicebox-temp\voicebox"
-curl -s http://localhost:17493/health >nul 2>&1
-if %errorlevel% equ 0 (
-    echo [OK] VoiceBox already running
-) else (
-    if exist "%VOICEBOX_DIR%\backend\venv\Scripts\activate.bat" (
-        echo [START] VoiceBox on port 17493...
-        start "VoiceBox Backend" cmd /k "cd /d %VOICEBOX_DIR% && backend\venv\Scripts\activate.bat && uvicorn backend.main:app --host 127.0.0.1 --port 17493"
-        echo Waiting for VoiceBox...
-        :wait_voicebox
-        curl -s http://localhost:17493/health >nul 2>&1
-        if %errorlevel% neq 0 (
-            timeout /t 1 /nobreak >nul
-            goto :wait_voicebox
-        )
-        echo [OK] VoiceBox ready
-    ) else (
-        echo [WARN] VoiceBox not found at %VOICEBOX_DIR%. Voice generation will not work.
-    )
-)
-
 :: ── Start Backend (with --reload for dev) ──────
 echo [START] Backend on port 8102 (with hot-reload)...
 start "StoryTeller Backend" cmd /k "cd /d %~dp0 && venv\Scripts\activate.bat && python -m uvicorn backend.main:app --host 127.0.0.1 --port 8102 --reload"
@@ -177,7 +137,7 @@ echo  Story Teller is running!
 echo  Frontend:  http://localhost:5191
 echo  Backend:   http://localhost:8102
 echo  ComfyUI:   http://127.0.0.1:8188
-echo  VoiceBox:  http://localhost:17493
+
 echo.
 echo  Close this window to stop all services.
 pause

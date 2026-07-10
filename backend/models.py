@@ -118,17 +118,9 @@ class UpdateScriptRequest(BaseModel):
     scenes: list[Scene]
 
 
-DEFAULT_VOICE_INSTRUCT = (
-    "Speak slowly and deliberately like a storyteller narrating a dark fairy tale. "
-    "Use a calm, measured pace with dramatic pauses between sentences. "
-    "Deep, atmospheric tone."
-)
-
-
 class RunVoiceRequest(BaseModel):
     profile_id: str
     language: str = "en"
-    instruct: str = DEFAULT_VOICE_INSTRUCT
 
 
 class RunImagesRequest(BaseModel):
@@ -253,7 +245,6 @@ class RunAssembleRequest(BaseModel):
 
 class HealthStatus(BaseModel):
     claude: bool = False
-    voicebox: bool = False
     comfyui: bool = False
     replicate: bool = False
     openai: bool = False
@@ -354,7 +345,6 @@ class BatchRunRequest(BaseModel):
     project_ids: Optional[list[str]] = None  # if set, only run these chapters
     voice_profile_id: str = ""
     voice_language: str = "en"
-    voice_instruct: str = DEFAULT_VOICE_INSTRUCT
     image_backend: str = "comfyui"
     style_id: Optional[str] = None
     custom_style_prompt: Optional[str] = None

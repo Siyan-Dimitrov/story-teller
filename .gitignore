@@ -12,3 +12,14 @@ output/
 *.egg-info/
 .env
 *.log
+
+# Local start scripts with API keys
+start_full.bat
+start_kontext.bat
+
+# Test artifacts
+test_output/
+test_voice/
+test_claude_screenwriter_output.json
+*TEMP_MPY*
+storyteller.log

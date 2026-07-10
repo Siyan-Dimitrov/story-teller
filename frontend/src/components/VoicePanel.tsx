@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Mic, Play, Loader2, AlertTriangle } from 'lucide-react'
+import { Mic, Play, Loader2 } from 'lucide-react'
 import type { ProjectState, VoiceProfile } from '../api'
 import { api } from '../api'
 
@@ -9,20 +9,13 @@ interface Props {
   onNext: () => void
 }
 
-const DEFAULT_INSTRUCT =
-  'Speak slowly and deliberately like a storyteller narrating a dark fairy tale. ' +
-  'Use a calm, measured pace with dramatic pauses between sentences. ' +
-  'Deep, atmospheric tone.'
-
 export default function VoicePanel({ project, onRefresh, onNext }: Props) {
   const [profiles, setProfiles] = useState<VoiceProfile[]>([])
   const [selectedProfile, setSelectedProfile] = useState(project.voice_profile_id || '')
   const [language, setLanguage] = useState(project.voice_language || 'en')
-  const [instruct, setInstruct] = useState(DEFAULT_INSTRUCT)
   const [generating, setGenerating] = useState(false)
   const [playingScene, setPlayingScene] = useState<number | null>(null)
   const [loadingProfiles, setLoadingProfiles] = useState(true)
-  const [voiceboxDown, setVoiceboxDown] = useState(false)
 
   const scenes = project.script?.scenes || []
   const hasAudio = scenes.some(s => s.audio_path)
@@ -31,10 +24,9 @@ export default function VoicePanel({ project, onRefresh, onNext }: Props) {
     setLoadingProfiles(true)
     api.profiles().then(p => {
       setProfiles(p)
-      setVoiceboxDown(p.length === 0)
       if (!selectedProfile && p.length > 0) setSelectedProfile(p[0].id)
     }).catch(() => {
-      setVoiceboxDown(true)
+      setProfiles([])
     }).finally(() => {
       setLoadingProfiles(false)
     })
@@ -47,7 +39,6 @@ export default function VoicePanel({ project, onRefresh, onNext }: Props) {
       await api.runVoice(project.project_id, {
         profile_id: selectedProfile,
         language,
-        instruct: instruct || undefined,
       })
       onRefresh()
     } catch (e) {
@@ -77,19 +68,6 @@ export default function VoicePanel({ project, onRefresh, onNext }: Props) {
 
   return (
     <div className="space-y-4">
-      {/* VoiceBox status */}
-      {!loadingProfiles && voiceboxDown && (
-        <div className="flex items-center gap-3 p-4 rounded-xl border border-[var(--warning)]/30 bg-[var(--warning)]/5">
-          <AlertTriangle size={18} className="text-[var(--warning)] shrink-0" />
-          <div>
-            <p className="text-sm font-medium text-[var(--text-primary)]">VoiceBox is not running</p>
-            <p className="text-xs text-[var(--text-secondary)] mt-0.5">
-              Start VoiceBox or check the connection. Voice generation needs VoiceBox at localhost:17493.
-            </p>
-          </div>
-        </div>
-      )}
-
       {/* Loading profiles */}
       {loadingProfiles && (
         <div className="flex items-center justify-center gap-2 py-8 text-[var(--text-secondary)]">
@@ -127,18 +105,6 @@ export default function VoicePanel({ project, onRefresh, onNext }: Props) {
             </select>
           </div>
         </div>
-        <div>
-          <label className="block text-xs text-[var(--text-secondary)] mb-1.5">
-            Voice Direction <span className="text-[var(--text-muted)]">(how the voice should sound)</span>
-          </label>
-          <textarea
-            value={instruct}
-            onChange={e => setInstruct(e.target.value)}
-            rows={2}
-            className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)] resize-none"
-            placeholder="e.g. Speak slowly with dramatic pauses, like a dark fairy tale narrator..."
-          />
-        </div>
         <div className="flex justify-end">
           <button
             onClick={handleGenerate}
@@ -160,6 +126,9 @@ export default function VoicePanel({ project, onRefresh, onNext }: Props) {
           >
             <span className="text-xs font-medium text-[var(--accent)] w-16 shrink-0">Scene {i + 1}</span>
             <p className="flex-1 text-xs text-[var(--text-secondary)] truncate">{(scene.narration || '').slice(0, 100)}...</p>
+            {scene.emotion && (
+              <span className="text-xs px-1.5 py-0.5 rounded bg-[var(--bg-tertiary)] text-[var(--text-muted)] shrink-0">{scene.emotion}</span>
+            )}
             {scene.audio_duration != null && (
               <span className="text-xs text-[var(--text-muted)] shrink-0">{Number(scene.audio_duration).toFixed(1)}s</span>
             )}
@@ -184,6 +153,9 @@ export default function VoicePanel({ project, onRefresh, onNext }: Props) {
         <div className="flex items-center justify-between">
           <span className="text-sm text-[var(--text-secondary)]">
             Total duration: {(scenes.reduce((sum, s) => sum + (s.audio_duration || 0), 0) / 60).toFixed(1)} min
+            {scenes.find(s => s.voice_id) && (
+              <span className="text-[var(--text-muted)]"> · Voice: {scenes.find(s => s.voice_id)!.voice_id!.replace('English_', '')}</span>
+            )}
           </span>
           <button
             onClick={onNext}

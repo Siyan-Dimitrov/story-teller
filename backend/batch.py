@@ -9,7 +9,6 @@ from . import config, llm
 from . import project_store as store
 from . import claude_script_gen, cast_gen, voice_gen, image_gen, image_styles
 from .video_assembly import assemble_video
-from .models import DEFAULT_VOICE_INSTRUCT
 
 log = logging.getLogger(__name__)
 
@@ -500,7 +499,6 @@ async def run_batch_pipeline(
     steps: list[str],
     voice_profile_id: str = "",
     voice_language: str = "en",
-    voice_instruct: str = DEFAULT_VOICE_INSTRUCT,
     image_backend: str = "comfyui",
     style_prompt: str = image_styles.DEFAULT_STYLE_PROMPT,
     lora_keys: list[str] | None = None,
@@ -544,7 +542,6 @@ async def run_batch_pipeline(
         "project_ids": project_ids,
         "voice_profile_id": voice_profile_id,
         "voice_language": voice_language,
-        "voice_instruct": voice_instruct,
         "image_backend": image_backend,
         "style_prompt": style_prompt,
         "lora_keys": lora_keys,
@@ -575,7 +572,6 @@ async def run_batch_pipeline(
                 pid, i, group_id, steps,
                 voice_profile_id=voice_profile_id,
                 voice_language=voice_language,
-                voice_instruct=voice_instruct,
                 image_backend=image_backend,
                 style_prompt=style_prompt,
                 lora_keys=lora_keys,
@@ -612,7 +608,6 @@ async def _run_chapter_pipeline(
     steps: list[str],
     voice_profile_id: str = "",
     voice_language: str = "en",
-    voice_instruct: str = DEFAULT_VOICE_INSTRUCT,
     image_backend: str = "comfyui",
     style_prompt: str = image_styles.DEFAULT_STYLE_PROMPT,
     lora_keys: list[str] | None = None,
@@ -648,7 +643,7 @@ async def _run_chapter_pipeline(
     # Step 2: Voice generation
     if "voice" in steps:
         if not voice_profile_id:
-            raise RuntimeError("Voice profile ID required for voice generation")
+            voice_profile_id = "auto"  # voice director picks per story
         _update_step("voice")
         store.update_state(project_id, step="generating_voice", error=None,
                           voice_profile_id=voice_profile_id, voice_language=voice_language)
@@ -657,7 +652,11 @@ async def _run_chapter_pipeline(
             profile_id=voice_profile_id,
             language=voice_language,
             project_dir=pdir,
-            instruct=voice_instruct,
+            script_meta={
+                "title": script.get("title", ""),
+                "synopsis": script.get("synopsis", ""),
+                "tone": store.load_state(project_id).get("tone", ""),
+            },
         )
         script["scenes"] = scenes
         store.save_json(project_id, "script.json", script)

@@ -37,8 +37,15 @@ TALES_DIR.mkdir(exist_ok=True)
 MUSIC_DIR.mkdir(exist_ok=True)
 
 # ── External services ────────────────────────────────────────
-VOICEBOX_URL = os.getenv("VOICEBOX_URL", "http://localhost:17493")
 COMFYUI_URL = os.getenv("COMFYUI_URL", "http://127.0.0.1:8188")
+
+# ── Voice backend (MiniMax Speech via Replicate) ─────────────
+MINIMAX_TTS_MODEL = os.getenv("MINIMAX_TTS_MODEL", "minimax/speech-2.8-hd")
+MINIMAX_DEFAULT_VOICE = os.getenv("MINIMAX_DEFAULT_VOICE", "English_Deep-VoicedGentleman")
+MINIMAX_SPEED = float(os.getenv("MINIMAX_SPEED", "1.0"))  # 0.9–0.95 for slower storytelling pace
+MINIMAX_SAMPLE_RATE = int(os.getenv("MINIMAX_SAMPLE_RATE", "44100"))
+MINIMAX_MAX_RETRIES = int(os.getenv("MINIMAX_MAX_RETRIES", "3"))
+MINIMAX_DELAY_SECONDS = float(os.getenv("MINIMAX_DELAY_SECONDS", "1.0"))  # between scene requests
 
 # ── Stock media + music APIs ─────────────────────────────────
 # Shared with yt_facts_video_gen — keys live in start_full.bat

@@ -84,7 +84,6 @@ export default function App() {
 function StatusDots({ health }: { health: HealthStatus }) {
   const services = [
     { name: 'Claude', ok: !!health.claude },
-    { name: 'VoiceBox', ok: health.voicebox },
     { name: 'Replicate', ok: health.replicate },
     { name: 'OpenAI', ok: health.openai },
     { name: 'FFmpeg', ok: health.ffmpeg },

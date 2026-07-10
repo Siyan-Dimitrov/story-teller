@@ -2,7 +2,6 @@
 
 export interface HealthStatus {
   claude?: boolean
-  voicebox: boolean
   comfyui: boolean
   replicate: boolean
   openai: boolean
@@ -39,6 +38,8 @@ export interface Scene {
   depth_map_paths?: (string | null)[]
   animatediff_clip_paths?: (string | null)[]
   voice_error?: string
+  voice_id?: string
+  emotion?: string
   image_error?: string
   music_track?: string | null
   music_volume?: number | null
@@ -336,7 +337,6 @@ export const api = {
     project_ids?: string[]
     voice_profile_id: string
     voice_language?: string
-    voice_instruct?: string
     image_backend?: string
     style_id?: string
     custom_style_prompt?: string
@@ -371,7 +371,7 @@ export const api = {
   updateScript: (id: string, body: { title: string; synopsis: string; scenes: Scene[] }) =>
     put<Script>(`/api/projects/${id}/script`, body),
 
-  runVoice: (id: string, body: { profile_id: string; language: string; instruct?: string }) =>
+  runVoice: (id: string, body: { profile_id: string; language: string }) =>
     post<{ scenes: Scene[] }>(`/api/projects/${id}/voice`, body),
 
   runImages: (id: string, body: { backend: string; style_id?: string; custom_style_prompt?: string; style_prompt?: string; lora_keys?: string[]; character_consistency?: boolean }) =>
