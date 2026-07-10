@@ -620,9 +620,35 @@ async def prepare_animations(
         scenes = await classify_scene_animations(scenes, model)
         log.info("Animation classification complete")
 
-        # One motion clip per scene is the budget/quality sweet spot — the rest
-        # of the scene's images animate with free local depth parallax.
-        _cap_animatediff_per_scene(scenes, config.I2V_MAX_CLIPS_PER_SCENE)
+        if config.ANIME_FULL_MOTION and ad_available:
+            # Full-motion mode (feature/anime): EVERY image gets an I2V clip.
+            # Keep the classifier's presets where it already chose animatediff;
+            # upgrade the rest with a mood-mapped preset. No per-scene cap.
+            mood_preset = {
+                "horrifying": "animatediff_dramatic", "tense": "animatediff_dramatic",
+                "triumphant": "animatediff_moderate", "dark": "animatediff_moderate",
+                "ominous": "animatediff_moderate",
+            }
+            upgraded = 0
+            for scene in scenes:
+                preset = mood_preset.get(
+                    (scene.get("mood") or "").lower(), "animatediff_subtle"
+                )
+                types = scene.get("animation_types") or []
+                presets = scene.get("motion_presets") or []
+                for i, t in enumerate(types):
+                    if t != "animatediff":
+                        types[i] = "animatediff"
+                        if i < len(presets):
+                            presets[i] = preset
+                        upgraded += 1
+                scene["animation_types"] = types
+                scene["motion_presets"] = presets
+            log.info(f"[Animation] ANIME_FULL_MOTION: upgraded {upgraded} images to I2V (no cap)")
+        else:
+            # One motion clip per scene is the budget/quality sweet spot — the
+            # rest of the scene's images animate with free local depth parallax.
+            _cap_animatediff_per_scene(scenes, config.I2V_MAX_CLIPS_PER_SCENE)
 
         # If I2V is not available, downgrade animatediff → depthflow
         if not ad_available:

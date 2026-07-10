@@ -225,6 +225,22 @@ def _build_i2v_input(model: str, image_data_url: str, prompt: str, seed: int) ->
     m = model.lower()
     duration = config.I2V_DURATION_SECONDS
 
+    if "i2v-fast" in m:
+        # wan-video/wan-2.2-i2v-fast: distilled open-source Wan. Takes
+        # num_frames (81-121) + frames_per_second instead of duration, no
+        # negative_prompt / audio params. Supports seed for reproducibility.
+        fps = config.I2V_OUTPUT_FPS
+        frames = max(81, min(121, int(duration * fps) + 1))
+        return {
+            "image": image_data_url,
+            "prompt": prompt,
+            "num_frames": frames,
+            "frames_per_second": fps,
+            "resolution": "480p" if config.I2V_RESOLUTION == "480p" else "720p",
+            "go_fast": True,
+            "seed": seed,
+        }
+
     if "kling" in m:
         # kwaivgi/kling-v2.1: requires `start_image` + `prompt`. There is NO
         # seed / cfg_scale / aspect_ratio / resolution param — quality is set
