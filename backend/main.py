@@ -20,7 +20,7 @@ import httpx
 from . import config
 from . import project_store as store
 from . import llm
-from . import script_gen, claude_script_gen, cast_gen, voice_gen, voice_director, image_gen, image_styles, gutenberg, batch, music_search
+from . import script_gen, claude_script_gen, cast_gen, voice_gen, voice_director, localize, image_gen, image_styles, gutenberg, batch, music_search
 from . import url_guard
 from . import shorts as shorts_mod
 from . import shorts_director
@@ -675,6 +675,7 @@ async def run_voice(project_id: str, req: RunVoiceRequest):
 
     try:
         pdir = store.project_dir(project_id)
+        script["scenes"] = await localize.localize_scenes(script["scenes"], req.language)
         scenes = await voice_gen.generate_all_scenes(
             scenes=script["scenes"],
             profile_id=req.profile_id,

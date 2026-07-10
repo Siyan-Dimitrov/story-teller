@@ -16,8 +16,8 @@ from . import config, llm
 
 log = logging.getLogger(__name__)
 
-# Curated MiniMax system voices the director may pick from. Full list:
-# https://platform.minimax.io/docs/faq/system-voice-id
+# Curated MiniMax system voices the director may pick from, per language.
+# Full list: https://platform.minimax.io/docs/faq/system-voice-id
 VOICE_CATALOG: dict[str, str] = {
     "English_Deep-VoicedGentleman": "deep male, dark gravitas — grim/gothic tales",
     "English_CaptivatingStoryteller": "classic male storyteller, warm but dramatic",
@@ -30,6 +30,29 @@ VOICE_CATALOG: dict[str, str] = {
     "English_SereneWoman": "calm serene female — dreamlike or peaceful stories",
     "English_Graceful_Lady": "elegant female, refined — romantic or courtly tales",
 }
+
+VOICE_CATALOG_JA: dict[str, str] = {
+    "Japanese_IntellectualSenior": "older male, measured and scholarly — classic kataribe narrator",
+    "Japanese_DominantMan": "deep authoritative male — heavy, menacing register",
+    "Japanese_SeriousCommander": "stern mature male — clipped dramatic delivery",
+    "Japanese_GentleButler": "refined older male — quiet dread, understated",
+    "Japanese_ColdQueen": "mature female, cold and imperious — dark fairy tales",
+    "Japanese_CalmLady": "mature female, even and low-key — neutral dramatic narrator",
+}
+
+CATALOGS: dict[str, dict[str, str]] = {"en": VOICE_CATALOG, "ja": VOICE_CATALOG_JA}
+
+DEFAULT_VOICES = {"ja": "Japanese_IntellectualSenior"}
+
+
+def _catalog(language: str) -> dict[str, str]:
+    # Languages without a dedicated catalog use the English voices — MiniMax
+    # system voices are multilingual and language_boost steers pronunciation.
+    return CATALOGS.get(language, VOICE_CATALOG)
+
+
+def _default_voice(language: str) -> str:
+    return DEFAULT_VOICES.get(language, config.MINIMAX_DEFAULT_VOICE)
 
 # MiniMax speech-2.8-hd emotion presets.
 EMOTIONS = {
@@ -58,26 +81,28 @@ _SYSTEM = (
 )
 
 
-def _fallback(scenes: list[dict], voice_id: str | None) -> dict:
+def _fallback(scenes: list[dict], voice_id: str | None, language: str = "en") -> dict:
     emotions = {
         sc.get("index", i): _MOOD_EMOTION.get((sc.get("mood") or "").lower(), "auto")
         for i, sc in enumerate(scenes)
     }
     return {
-        "voice_id": voice_id or config.MINIMAX_DEFAULT_VOICE,
+        "voice_id": voice_id or _default_voice(language),
         "reason": "fallback: default voice + mood-based emotions",
         "emotions": emotions,
     }
 
 
-def _build_user_prompt(script_meta: dict, scenes: list[dict], pick_voice: bool) -> str:
+def _build_user_prompt(
+    script_meta: dict, scenes: list[dict], pick_voice: bool, language: str = "en"
+) -> str:
     lines = []
     for sc in scenes:
         lines.append(
             f"[{sc.get('index')}] mood={sc.get('mood')}: "
             f"{(sc.get('narration') or '').strip()[:220]}"
         )
-    catalog = "\n".join(f"- {vid}: {desc}" for vid, desc in VOICE_CATALOG.items())
+    catalog = "\n".join(f"- {vid}: {desc}" for vid, desc in _catalog(language).items())
     voice_part = (
         f"Voices to choose from:\n{catalog}\n\n"
         "Pick the ONE voice whose character best fits this story's nature "
@@ -105,19 +130,23 @@ async def direct(
     script_meta: dict,
     scenes: list[dict],
     voice_id: str | None = None,
+    language: str = "en",
 ) -> dict:
     """Return {"voice_id", "reason", "emotions": {scene_index: emotion}}.
 
     If ``voice_id`` is given (user pinned a voice) the LLM only assigns
-    per-scene emotions and the pinned voice is kept.
+    per-scene emotions and the pinned voice is kept. ``language`` selects
+    which voice catalog the director picks from.
     """
     if not scenes:
-        return _fallback(scenes, voice_id)
+        return _fallback(scenes, voice_id, language)
 
     try:
         raw = await llm.complete(
             _SYSTEM,
-            _build_user_prompt(script_meta, scenes, pick_voice=voice_id is None),
+            _build_user_prompt(
+                script_meta, scenes, pick_voice=voice_id is None, language=language
+            ),
             model=config.CLAUDE_FAST_MODEL,
             pass_name="voice director",
             timeout=config.CLAUDE_FAST_TIMEOUT_SECONDS,
@@ -125,9 +154,9 @@ async def direct(
         data = llm.parse_json(raw)
 
         chosen = voice_id or (data.get("voice_id") or "").strip()
-        if chosen not in VOICE_CATALOG and chosen != voice_id:
+        if chosen not in _catalog(language) and chosen != voice_id:
             log.warning("Voice director picked unknown voice %r — using default", chosen)
-            chosen = config.MINIMAX_DEFAULT_VOICE
+            chosen = _default_voice(language)
 
         valid_idx = {sc.get("index") for sc in scenes}
         emotions: dict[int, str] = {}
@@ -153,17 +182,21 @@ async def direct(
         return result
     except Exception as e:  # noqa: BLE001
         log.warning("Voice director LLM failed (%s) — using fallback", e)
-        return _fallback(scenes, voice_id)
+        return _fallback(scenes, voice_id, language)
 
 
 def list_profiles() -> list[dict]:
-    """Voice catalog as profile entries for the UI dropdown."""
+    """Voice catalogs as profile entries for the UI dropdown."""
     auto = {
         "id": "auto",
         "name": "Auto — director picks per story",
-        "language": "en",
+        "language": "*",
     }
-    return [auto] + [
-        {"id": vid, "name": f"{vid.removeprefix('English_')} — {desc}", "language": "en"}
-        for vid, desc in VOICE_CATALOG.items()
-    ]
+    entries = [auto]
+    for lang, catalog in CATALOGS.items():
+        prefix = "English_" if lang == "en" else "Japanese_"
+        entries += [
+            {"id": vid, "name": f"{vid.removeprefix(prefix)} — {desc}", "language": lang}
+            for vid, desc in catalog.items()
+        ]
+    return entries

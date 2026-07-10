@@ -812,6 +812,11 @@ def assemble_video(
 
         log.info(f"Video assembled: {output_path} ({total_duration}s)")
 
+        # Non-English narration gets English subtitles burned in.
+        from .subtitles import burn_subtitles
+        if burn_subtitles(output_path, scenes):
+            log.info("English subtitles burned into %s", output_path.name)
+
         if project_id:
             _finish_progress(project_id)
 

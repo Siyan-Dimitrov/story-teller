@@ -7,7 +7,7 @@ from typing import Optional
 
 from . import config, llm
 from . import project_store as store
-from . import claude_script_gen, cast_gen, voice_gen, image_gen, image_styles
+from . import claude_script_gen, cast_gen, voice_gen, localize, image_gen, image_styles
 from .video_assembly import assemble_video
 
 log = logging.getLogger(__name__)
@@ -647,6 +647,7 @@ async def _run_chapter_pipeline(
         _update_step("voice")
         store.update_state(project_id, step="generating_voice", error=None,
                           voice_profile_id=voice_profile_id, voice_language=voice_language)
+        script["scenes"] = await localize.localize_scenes(script["scenes"], voice_language)
         scenes = await voice_gen.generate_all_scenes(
             scenes=script["scenes"],
             profile_id=voice_profile_id,

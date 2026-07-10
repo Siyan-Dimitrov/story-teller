@@ -111,7 +111,9 @@ async def generate_all_scenes(
     audio_dir.mkdir(exist_ok=True)
 
     pinned = profile_id if profile_id and profile_id != "auto" else None
-    direction = await voice_director.direct(script_meta or {}, scenes, voice_id=pinned)
+    direction = await voice_director.direct(
+        script_meta or {}, scenes, voice_id=pinned, language=language
+    )
     voice_id = direction["voice_id"]
     emotions = direction["emotions"]
     log.info(f"MiniMax voice: {voice_id} ({len(scenes)} scenes)")
@@ -120,9 +122,13 @@ async def generate_all_scenes(
         idx = scene["index"]
         emotion = emotions.get(idx, "auto")
         output_path = audio_dir / f"scene_{idx:04d}.wav"
+        # Localized narration (set by localize.localize_scenes) takes over
+        # when it matches the requested language; English subs come later.
+        loc = scene.get("localized") or {}
+        text = loc.get("text") if loc.get("lang") == language else scene["narration"]
         try:
             wav_bytes = await _generate_minimax_scene(
-                scene["narration"], voice_id, emotion, language
+                text, voice_id, emotion, language
             )
             output_path.write_bytes(wav_bytes)
             duration = _append_trailing_silence(output_path, SCENE_TRAILING_SILENCE)

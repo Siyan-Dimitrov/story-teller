@@ -46,6 +46,19 @@ IMAGE_STYLES: tuple[ImageStyle, ...] = (
         default_lora_keys=("storybook",),
     ),
     ImageStyle(
+        id="manga",
+        label="Japanese Manga",
+        description="Black-and-white manga with dramatic ink and screentones.",
+        prompt=(
+            "black and white Japanese manga illustration, dramatic ink work, "
+            "screentone shading, bold high-contrast composition, expressive "
+            "characters with emotive eyes, dynamic panel-worthy framing, speed "
+            "lines and atmospheric hatching, seinen dark folklore aesthetic, "
+            "non-photorealistic"
+        ),
+        default_lora_keys=(),
+    ),
+    ImageStyle(
         id="gothic_folklore",
         label="Gothic Folklore",
         description="Moody gothic folklore with theatrical shadows.",
