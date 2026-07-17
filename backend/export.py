@@ -122,6 +122,7 @@ def export_project(
     title: str,
     project_id: str,
     metadata_text: str | None = None,
+    shorts: list[dict] | None = None,
 ) -> Path:
     """Copy final video, images, script, and metadata to output folder."""
     slug = slugify(title) if title else project_id
@@ -158,6 +159,16 @@ def export_project(
     script_file = project_dir / "script.json"
     if script_file.exists():
         shutil.copy2(script_file, output_dir / "script.json")
+
+    # Copy rendered shorts so the named export folder is complete even when
+    # the shorts were rendered before assembly.
+    if shorts:
+        shorts_dst = output_dir / "shorts"
+        shorts_dst.mkdir(exist_ok=True)
+        for sh in shorts:
+            src = project_dir / (sh.get("path") or "")
+            if src.exists():
+                shutil.copy2(src, shorts_dst / src.name)
 
     # Write YouTube metadata
     if metadata_text:

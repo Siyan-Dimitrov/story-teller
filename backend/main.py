@@ -1001,8 +1001,9 @@ async def run_assemble(project_id: str, req: RunAssembleRequest):
                 # Publishing companion: Related-video-link reminder + pinned
                 # comment for the Shorts (fresh state — shorts may have been
                 # rendered after this request was accepted).
+                fresh_shorts = store.load_state(project_id).get("shorts")
                 metadata = (metadata or "") + "\n" + shorts_promo_section(
-                    title, store.load_state(project_id).get("shorts"),
+                    title, fresh_shorts,
                 )
 
                 out_dir = export_project(
@@ -1010,6 +1011,7 @@ async def run_assemble(project_id: str, req: RunAssembleRequest):
                     title=title,
                     project_id=project_id,
                     metadata_text=metadata,
+                    shorts=fresh_shorts,
                 )
                 store.update_state(project_id, output_dir=str(out_dir))
                 log.info(f"Export complete: {out_dir}")
@@ -1110,7 +1112,10 @@ async def render_shorts_endpoint(project_id: str, req: RenderShortsRequest):
         raise HTTPException(400, "No scenes selected for shorts")
 
     pdir = store.project_dir(project_id)
-    out_dir = config.OUTPUT_DIR / project_id / "shorts"
+    # Prefer the named export folder (output/<story-slug>/) once it exists;
+    # before the first assembly there is only the project-id folder.
+    export_root = (state.get("output_dir") or "").strip()
+    out_dir = (Path(export_root) if export_root else config.OUTPUT_DIR / project_id) / "shorts"
     want_source = (req.source or config.SHORT_SOURCE).strip()
     story_title = (script.get("title") or state.get("title") or "").strip()
     pinned_comment = (
