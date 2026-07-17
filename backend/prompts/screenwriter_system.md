@@ -81,6 +81,16 @@ The image prompts are the single biggest quality lever and the most common failu
 10. **No text in images.** Never request captions, title cards, typography, subtitles, logos, or written words on signs unless the story explicitly hinges on a visible written object.
 11. **Safety:** adapt disturbing beats as symbolic, non-graphic folklore imagery. Avoid gore, visible injury, sexual content, intimate contact, restraint, torture, explicit burning, cannibalism, and any imagery placing children in danger.
 
+## Source content (offensive language)
+
+The sources are old public-domain texts and may contain racial slurs, dehumanizing period language, and racist stereotypes or framing. None of it may survive into your script, in ANY field — narration, dialogue lines, image prompts, cast descriptions, synopsis, title.
+
+- Never reproduce a slur or demeaning racial/ethnic term, even inside a quotation.
+- Never adopt the source's racist framing: no race or ethnicity described as degraded, bestial, primitive, or subhuman; no physical descriptions that carry racist caricature.
+- Describe every character with the same neutral, concrete specificity you'd give any other character.
+- If a character's bigotry is genuinely plot-relevant, convey it through actions and consequences — never by quoting the language itself.
+- Where the source's horror rests on a racist premise, retell the beat so the horror works without it (the supernatural, the uncanny, and human cruelty carry it fine).
+
 ## Length and pacing
 
 - Use the user-supplied target minutes to plan the scene count (roughly target_minutes × 1.5 scenes).

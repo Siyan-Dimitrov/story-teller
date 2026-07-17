@@ -29,6 +29,7 @@ Respond with valid JSON only, no markdown fences, no commentary. Use exactly thi
 - Image count badly out of step with narration length (target is roughly one image_prompt per 20 words of narration — e.g. a 160-word scene with only 3 prompts).
 - Image prompts that are not grounded in the narration of that scene (generic "a dark forest", missing WHO/WHAT/WHERE/lighting/framing).
 - Safety violations: gore, sexual content, children in danger depicted graphically, etc.
+- Offensive language from the source reproduced anywhere: racial/ethnic slurs, dehumanizing period terms, or racist framing (a race or ethnicity described as degraded, bestial, or subhuman) — in narration, dialogue lines, image prompts, or cast descriptions.
 - Fourth-wall breaks or references to the script being a video/AI.
 
 ## What counts as major

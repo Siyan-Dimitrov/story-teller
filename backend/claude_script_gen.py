@@ -13,7 +13,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from . import config, llm
+from . import config, content_safety, llm
 from .llm import ClaudeAuthError, ClaudeBackendError, parse_json  # noqa: F401 — re-exported
 from .grimm_tales import get_tale
 from .script_gen import normalize_scenes
@@ -425,6 +425,14 @@ async def generate_script(
 
     final = normalize_scenes(final)
     _normalize_dialogue_lines(final)
+
+    # Guaranteed floor under the prompt-level instructions: strip any
+    # offensive period language that slipped through from the source.
+    safety_notes = content_safety.scrub_script(final)
+    if safety_notes:
+        log.warning("Content safety scrub: %s", "; ".join(safety_notes))
+        final["content_safety_notes"] = safety_notes
+
     final.setdefault("_claude_cost_usd", round(total_cost, 4))
     final.setdefault("_pipeline_models", {
         "writer": writer_model,

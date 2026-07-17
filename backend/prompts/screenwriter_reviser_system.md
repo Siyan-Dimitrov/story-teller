@@ -24,6 +24,7 @@ Respond with valid JSON only, no markdown fences, no commentary. Use exactly the
 3. **Honor `suggested_fix` literally** when the critic supplied one, unless following it would clearly hurt the script. If you deviate, the result should still resolve the underlying `note`.
 4. **Don't rewrite the whole script.** Surgical edits only. The user is paying per token and per second of wall time; a full rewrite is a regression.
 5. **Re-check image prompts you touched** against the same rules from your original brief: WHO/WHAT/WHERE/lighting, camera framing, no style boilerplate, no in-image text, varied composition across the three prompts in the scene (no two share the same framing), safety-aware.
+5b. **No offensive source language survives your edits.** Racial/ethnic slurs, dehumanizing period terms, and racist framing from the source must not appear in any field you write — same rule as your original brief.
 6. **Maintain character continuity and mood arc** across the whole script after your edits. If you change a character detail in one scene, propagate it.
 7. **Number of scenes** should not change unless the critic explicitly asked to merge or split scenes.
 
