@@ -180,10 +180,13 @@ class RenderShortsRequest(BaseModel):
 
     ``scene_indices`` None means auto-pick via the director.
     ``hooks`` optionally overrides the on-screen headline per scene index.
+    ``source`` overrides config.SHORT_SOURCE: "final" cuts from final.mp4,
+    "portrait" recomposes the stills as native 9:16 frames via Nano Banana.
     """
     scene_indices: Optional[list[int]] = None
     count: Optional[int] = None
     hooks: Optional[dict[int, str]] = None
+    source: Optional[str] = None
 
 
 class SearchStoriesRequest(BaseModel):

@@ -715,6 +715,75 @@ def _scene_reference_images(
     return refs
 
 
+_NANO_PORTRAIT_DIRECTIVE = (
+    " The first reference image is this exact scene in landscape. Recompose it "
+    "as a vertical 9:16 portrait composition for a phone screen: keep the same "
+    "characters, moment, lighting and art style, and extend the environment "
+    "above and below rather than zooming in or cropping."
+)
+
+
+async def generate_portrait_variants(
+    scene: dict,
+    project_dir: Path,
+    style_prompt: str = image_styles.DEFAULT_STYLE_PROMPT,
+    cast: list[dict] | None = None,
+) -> list[str]:
+    """Recompose a scene's landscape stills as native 9:16 portraits (for Shorts).
+
+    One Nano Banana call per still: the landscape frame plus the tagged cast
+    portraits anchor the look while ``aspect_ratio="9:16"`` reframes the
+    composition. Works whatever backend made the originals (reference-driven).
+    Outputs that already exist are reused, so re-renders cost nothing. Sets and
+    returns ``scene["portrait_image_paths"]`` (relative to ``project_dir``).
+    """
+    import asyncio
+
+    cast_ref_map: dict[str, Path] = {}
+    for _m in (cast or []):
+        _rp = _m.get("reference_image_path")
+        if _rp:
+            _ap = project_dir / _rp
+            if _ap.exists():
+                cast_ref_map[_m.get("id")] = _ap
+
+    idx = scene["index"]
+    prompts = scene.get("image_prompts") or []
+    if not prompts:
+        single = scene.get("image_prompt", "")
+        prompts = [single] if single else []
+
+    out_dir = project_dir / "images_portrait"
+    rels: list[str] = []
+    generated = 0
+    for img_idx, img_rel in enumerate(scene.get("image_paths") or []):
+        src = project_dir / img_rel
+        if not src.exists():
+            continue
+        out_path = out_dir / f"scene_{idx:04d}_img_{img_idx}.png"
+        if not out_path.exists():
+            prompt = prompts[img_idx] if img_idx < len(prompts) else (prompts[-1] if prompts else "")
+            refs = [src] + _scene_reference_images(scene, cast_ref_map, None, False)
+            if generated > 0:
+                await asyncio.sleep(config.REPLICATE_DELAY_SECONDS)
+            try:
+                await generate_image_nano_banana(
+                    prompt=prompt + _NANO_PORTRAIT_DIRECTIVE,
+                    style_prompt=style_prompt,
+                    output_path=out_path,
+                    reference_images=refs,
+                    aspect_ratio="9:16",
+                )
+                generated += 1
+            except Exception as e:  # noqa: BLE001
+                log.error(f"Portrait variant failed for scene {idx} img {img_idx}: {e}")
+                continue
+        rels.append(str(out_path.relative_to(project_dir)))
+
+    scene["portrait_image_paths"] = rels
+    return rels
+
+
 GPT_IMAGE_STYLE_BOILERPLATE = [
     "dark fairy tale illustration",
     "gothic storybook art",

@@ -15,6 +15,7 @@ export default function ShortsPanel({ project }: Props) {
   const [suggestions, setSuggestions] = useState<ShortSuggestion[]>([])
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [hooks, setHooks] = useState<Record<number, string>>({})
+  const [source, setSource] = useState<'final' | 'portrait'>('final')
   const [suggesting, setSuggesting] = useState(false)
   const [rendering, setRendering] = useState(false)
   const [progress, setProgress] = useState<ShortsProgress | null>(null)
@@ -79,8 +80,8 @@ export default function ShortsPanel({ project }: Props) {
     setRendering(true)
     try {
       const body = auto
-        ? {}
-        : { scene_indices: Array.from(selected).sort((a, b) => a - b), hooks }
+        ? { source }
+        : { scene_indices: Array.from(selected).sort((a, b) => a - b), hooks, source }
       await api.renderShorts(project.project_id, body)
       startPolling()
     } catch (e) {
@@ -145,9 +146,32 @@ export default function ShortsPanel({ project }: Props) {
           </div>
         </div>
 
+        <div className="flex items-center gap-2 text-xs">
+          <span className="text-[var(--text-muted)]">Frames:</span>
+          {([
+            ['final', 'Cut from final video'],
+            ['portrait', 'Native portrait (Nano Banana ≈$0.04/image)'],
+          ] as const).map(([value, label]) => (
+            <button
+              key={value}
+              onClick={() => setSource(value)}
+              disabled={isBusy}
+              className={`px-2.5 py-1 rounded-lg border ${
+                source === value
+                  ? 'border-[var(--accent)] text-[var(--accent)] bg-[var(--bg-tertiary)]'
+                  : 'border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
+              } disabled:opacity-50`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
         {isBusy && progress && (
           <div className="text-xs text-[var(--accent)]">
-            Rendering shorts… {progress.done}/{progress.total || '?'}
+            {progress.stage === 'portrait_images'
+              ? 'Composing portrait frames…'
+              : <>Rendering shorts… {progress.done}/{progress.total || '?'}</>}
           </div>
         )}
         {progress?.error && (

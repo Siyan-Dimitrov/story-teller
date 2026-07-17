@@ -75,6 +75,7 @@ export interface ShortsProgress {
   total: number
   error: string | null
   shorts: ShortItem[]
+  stage?: string
 }
 
 export interface ProjectState {
@@ -424,7 +425,7 @@ export const api = {
   // ── Shorts ──────────────────────────────────────────────────
   suggestShorts: (id: string, body?: { count?: number }) =>
     post<{ suggestions: ShortSuggestion[] }>(`/api/projects/${id}/shorts/suggest`, body || {}),
-  renderShorts: (id: string, body?: { scene_indices?: number[]; count?: number; hooks?: Record<number, string> }) =>
+  renderShorts: (id: string, body?: { scene_indices?: number[]; count?: number; hooks?: Record<number, string>; source?: string }) =>
     post<{ status: string; count?: number; scene_indices?: number[] }>(`/api/projects/${id}/shorts`, body || {}),
   listShorts: (id: string) =>
     request<{ shorts: ShortItem[]; progress: ShortsProgress }>(`/api/projects/${id}/shorts`),

@@ -1104,11 +1104,12 @@ async def render_shorts_endpoint(project_id: str, req: RenderShortsRequest):
 
     pdir = store.project_dir(project_id)
     out_dir = config.OUTPUT_DIR / project_id / "shorts"
+    want_source = (req.source or config.SHORT_SOURCE).strip()
 
     with _shorts_lock:
         _shorts_tasks[project_id] = {
             "active": True, "done": 0, "total": len(indices),
-            "error": None, "shorts": [],
+            "error": None, "shorts": [], "stage": "render",
         }
 
     def _run():
@@ -1117,6 +1118,37 @@ async def render_shorts_endpoint(project_id: str, req: RenderShortsRequest):
             shorts_dir = pdir / "shorts"
             shorts_dir.mkdir(parents=True, exist_ok=True)
             out_dir.mkdir(parents=True, exist_ok=True)
+
+            # Portrait mode: recompose each selected scene's stills as native
+            # 9:16 frames first (cached — already-generated frames are free).
+            if want_source == "portrait":
+                with _shorts_lock:
+                    st = _shorts_tasks.get(project_id)
+                    if st:
+                        st["stage"] = "portrait_images"
+                style_prompt = (script.get("visual_style") or "").strip() \
+                    or image_styles.DEFAULT_STYLE_PROMPT
+                cast = script.get("cast") or []
+
+                async def _gen_portraits():
+                    for i in indices:
+                        try:
+                            await image_gen.generate_portrait_variants(
+                                scene=scenes[i],
+                                project_dir=pdir,
+                                style_prompt=style_prompt,
+                                cast=cast,
+                            )
+                        except Exception as pe:  # noqa: BLE001
+                            log.error(f"Portrait variants failed for scene {i}: {pe}")
+
+                asyncio.run(_gen_portraits())
+                store.save_json(project_id, "script.json", script)
+                with _shorts_lock:
+                    st = _shorts_tasks.get(project_id)
+                    if st:
+                        st["stage"] = "render"
+
             for rank, idx in enumerate(indices, start=1):
                 scene = scenes[idx]
                 output_path = shorts_dir / f"short_{rank}_{idx:04d}.mp4"
@@ -1127,6 +1159,7 @@ async def render_shorts_endpoint(project_id: str, req: RenderShortsRequest):
                         output_path=output_path,
                         hook=hooks.get(idx) or None,
                         scenes=scenes,
+                        source=want_source,
                     )
                     rel = str(path.relative_to(pdir))
                     try:
