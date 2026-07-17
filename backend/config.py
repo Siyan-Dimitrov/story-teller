@@ -210,7 +210,9 @@ SHORT_HEIGHT = int(os.getenv("SHORT_HEIGHT", "1920"))
 SHORT_FPS = int(os.getenv("SHORT_FPS", "30"))
 SHORT_MIN_DURATION = float(os.getenv("SHORT_MIN_DURATION", "8.0"))
 SHORT_MAX_DURATION = float(os.getenv("SHORT_MAX_DURATION", "58.0"))   # YT cap 60s
-SHORT_TAIL_DURATION = float(os.getenv("SHORT_TAIL_DURATION", "2.5"))  # end card
+SHORT_TAIL_DURATION = float(os.getenv("SHORT_TAIL_DURATION", "2.5"))  # silent tail after narration
+# The "Watch the full story" card fades in this many seconds before the end.
+SHORT_CTA_LEAD = float(os.getenv("SHORT_CTA_LEAD", "10.0"))
 # How many shorts the director picks per project by default.
 SHORTS_PER_PROJECT = int(os.getenv("SHORTS_PER_PROJECT", "3"))
 # Video/audio codecs for short encodes (match the long-form pipeline).

@@ -429,11 +429,9 @@ def render_short_from_final(
         if headline:
             layers.append(_headline_clip(headline, min(dur, max(2.5, dur * 0.4))))
         layers.extend(_build_caption_layers(scene.get("narration", ""), dur))
-        if cta_text and dur > config.SHORT_TAIL_DURATION:
-            layers.append(
-                _cta_clip(cta_text, config.SHORT_TAIL_DURATION)
-                .with_start(dur - config.SHORT_TAIL_DURATION)
-            )
+        if cta_text:
+            cta_start = max(0.0, dur - config.SHORT_CTA_LEAD)
+            layers.append(_cta_clip(cta_text, dur - cta_start).with_start(cta_start))
 
         composite = CompositeVideoClip(layers, size=(SW, SH)).with_duration(dur)
         if base.audio is not None:
@@ -556,9 +554,10 @@ def render_short_from_stills(
         # Captions across the body.
         layers.extend(_build_caption_layers(scene.get("narration", ""), body_dur))
 
-        # End CTA card during the tail.
+        # CTA card over the closing seconds (through the silent tail).
         if cta_text:
-            layers.append(_cta_clip(cta_text, config.SHORT_TAIL_DURATION).with_start(body_dur))
+            cta_start = max(0.0, clip_dur - config.SHORT_CTA_LEAD)
+            layers.append(_cta_clip(cta_text, clip_dur - cta_start).with_start(cta_start))
 
         composite = CompositeVideoClip(layers, size=(SW, SH)).with_duration(clip_dur)
         composite = composite.with_audio(audio)
