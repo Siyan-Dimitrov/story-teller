@@ -58,7 +58,7 @@ Guidelines:
 
 YOUTUBE_TAGS_CHAR_LIMIT = 500  # YouTube rejects tag lists over 500 characters
 
-_TAGS_BLOCK_RE = re.compile(r"(TAGS:\s*\n?)(.*?)(?=\n\s*\n|\nHASHTAGS:|\Z)", re.S)
+_TAGS_BLOCK_RE = re.compile(r"(^TAGS:\s*\n?)(.*?)(?=\n\s*\n|\nHASHTAGS:|\Z)", re.S | re.M)
 
 
 def _cap_tags(metadata: str, limit: int = YOUTUBE_TAGS_CHAR_LIMIT) -> str:
