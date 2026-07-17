@@ -38,7 +38,7 @@ DESCRIPTION:
 [A 3-5 paragraph YouTube description. First paragraph should hook viewers in 2 sentences. Include the story summary, mention the dark/gothic style, and add a call to action. End with relevant keywords naturally woven into sentences.]
 
 TAGS:
-[Comma-separated list of 20-30 YouTube tags, mixing broad and specific. Include: story name, genre tags, mood tags, related stories, style tags like "dark fairy tale", "gothic animation", "storytelling", "narrated story"]
+[Comma-separated YouTube tags, mixing broad and specific — the whole list MUST total under 500 characters (YouTube's tag limit). Include: story name, genre tags, mood tags, related stories, style tags like "dark fairy tale", "gothic animation", "storytelling", "narrated story"]
 
 HASHTAGS:
 [5-8 hashtags for the YouTube description, e.g. #DarkFairyTales #GothicStorytelling]
@@ -50,10 +50,31 @@ Guidelines:
 - If the story is part of a book or series, reference the book name in the title and description
 - Include the book/series name as a tag if applicable
 - Description first 2 lines appear in search results — make them count
-- Tags should include long-tail keywords for discoverability
+- Tags should include long-tail keywords for discoverability, within the 500-character total
 - Include tags for related/similar stories viewers might search for
 - Add seasonal or trending tags if the story themes align
 """
+
+
+YOUTUBE_TAGS_CHAR_LIMIT = 500  # YouTube rejects tag lists over 500 characters
+
+_TAGS_BLOCK_RE = re.compile(r"(TAGS:\s*\n?)(.*?)(?=\n\s*\n|\nHASHTAGS:|\Z)", re.S)
+
+
+def _cap_tags(metadata: str, limit: int = YOUTUBE_TAGS_CHAR_LIMIT) -> str:
+    """Trim the TAGS block to the limit at a tag boundary — the model aims for
+    it in the prompt, but character counts need enforcing deterministically."""
+    m = _TAGS_BLOCK_RE.search(metadata)
+    if not m:
+        return metadata
+    tags = m.group(2).strip()
+    if len(tags) <= limit:
+        return metadata
+    cut = tags[:limit]
+    if "," in cut:
+        cut = cut[: cut.rfind(",")]
+    log.info(f"Tags trimmed from {len(tags)} to {len(cut)} chars (limit {limit})")
+    return metadata[: m.start(2)] + cut.rstrip() + metadata[m.end(2):]
 
 
 async def generate_youtube_metadata(
@@ -84,7 +105,7 @@ async def generate_youtube_metadata(
     )
 
     # Strip markdown fences if present (the response is plain text, not JSON)
-    return llm.strip_code_fences(content)
+    return _cap_tags(llm.strip_code_fences(content))
 
 
 def shorts_promo_section(title: str, shorts: list[dict] | None) -> str:
