@@ -87,6 +87,36 @@ async def generate_youtube_metadata(
     return llm.strip_code_fences(content)
 
 
+def shorts_promo_section(title: str, shorts: list[dict] | None) -> str:
+    """Publishing companion for the Shorts: the Related-video-link reminder and
+    the pinned-comment text. Links in Shorts comments/descriptions are not
+    clickable on YouTube, so the Related video link is the only tap-through."""
+    pinned = f'Full story on my channel: "{title}"' if title else "Full story on my channel."
+    lines = [
+        "",
+        "=" * 60,
+        "SHORTS PROMOTION",
+        "",
+        "After publishing each Short, open it in YouTube Studio (desktop)",
+        "and set this video as its RELATED VIDEO — that is the only",
+        "clickable path from a Short. Links in Shorts comments and",
+        "descriptions are NOT clickable.",
+        "",
+        f"Pinned comment for every Short: {pinned}",
+    ]
+    if shorts:
+        lines.append("")
+        lines.append("Rendered shorts (stagger over the first week, evenings):")
+        for i, sh in enumerate(shorts, start=1):
+            name = Path(sh.get("path") or "").name
+            hook = (sh.get("hook") or "").strip()
+            entry = f"  {i}. scene {sh.get('scene_index', 0) + 1} — {name}"
+            if hook:
+                entry += f'  (hook: "{hook}")'
+            lines.append(entry)
+    return "\n".join(lines) + "\n"
+
+
 def export_project(
     project_dir: Path,
     title: str,

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Scissors, Loader2, Wand2, Download, Film, Check } from 'lucide-react'
+import { Scissors, Loader2, Wand2, Download, Film, Check, MessageSquareQuote } from 'lucide-react'
 import type { ProjectState, ShortSuggestion, ShortItem, ShortsProgress } from '../api'
 import { api } from '../api'
 
@@ -20,6 +20,7 @@ export default function ShortsPanel({ project }: Props) {
   const [rendering, setRendering] = useState(false)
   const [progress, setProgress] = useState<ShortsProgress | null>(null)
   const [shorts, setShorts] = useState<ShortItem[]>([])
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
   const pollRef = useRef<number | null>(null)
 
   const refreshList = useCallback(async () => {
@@ -219,7 +220,10 @@ export default function ShortsPanel({ project }: Props) {
 
       {shorts.length > 0 && (
         <div>
-          <h3 className="text-sm font-medium text-[var(--text-primary)] mb-2">Rendered shorts</h3>
+          <h3 className="text-sm font-medium text-[var(--text-primary)]">Rendered shorts</h3>
+          <p className="text-[11px] text-[var(--text-muted)] mb-2 mt-0.5">
+            After publishing a Short, set the full video as its <span className="text-[var(--text-secondary)]">Related video</span> in YouTube Studio (desktop) and pin the comment (copy it below) — links in Shorts comments aren't clickable.
+          </p>
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
             {shorts.map((sh, i) => (
               <div key={i} className="rounded-xl border border-[var(--border)] bg-[var(--bg-secondary)] overflow-hidden">
@@ -233,14 +237,25 @@ export default function ShortsPanel({ project }: Props) {
                     <div className="text-[11px] text-[var(--text-primary)]">Scene {sh.scene_index + 1}</div>
                     <div className="text-[9px] text-[var(--text-muted)]">{sh.duration}s</div>
                   </div>
-                  <a
-                    href={api.artifactUrl(project.project_id, sh.path)}
-                    download
-                    className="p-1.5 rounded text-[var(--text-muted)] hover:text-[var(--accent)]"
-                    title="Download"
-                  >
-                    <Download size={14} />
-                  </a>
+                  <div className="flex items-center">
+                    {sh.pinned_comment && (
+                      <button
+                        onClick={() => { navigator.clipboard.writeText(sh.pinned_comment!); setCopiedIdx(i); window.setTimeout(() => setCopiedIdx(v => v === i ? null : v), 1500) }}
+                        className="p-1.5 rounded text-[var(--text-muted)] hover:text-[var(--accent)]"
+                        title={`Copy pinned comment: ${sh.pinned_comment}`}
+                      >
+                        {copiedIdx === i ? <Check size={14} className="text-[var(--accent)]" /> : <MessageSquareQuote size={14} />}
+                      </button>
+                    )}
+                    <a
+                      href={api.artifactUrl(project.project_id, sh.path)}
+                      download
+                      className="p-1.5 rounded text-[var(--text-muted)] hover:text-[var(--accent)]"
+                      title="Download"
+                    >
+                      <Download size={14} />
+                    </a>
+                  </div>
                 </div>
               </div>
             ))}

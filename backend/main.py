@@ -27,7 +27,7 @@ from . import shorts_director
 from .video_assembly import assemble_video, get_assembly_progress, cancel_assembly
 from .animation import prepare_animations, get_animation_progress
 from .grimm_tales import list_tales, get_tale
-from .export import export_project, generate_youtube_metadata
+from .export import export_project, generate_youtube_metadata, shorts_promo_section
 from .models import (
     CreateProjectRequest,
     RunScriptRequest,
@@ -998,6 +998,13 @@ async def run_assemble(project_id: str, req: RunAssembleRequest):
                 )
                 loop.close()
 
+                # Publishing companion: Related-video-link reminder + pinned
+                # comment for the Shorts (fresh state — shorts may have been
+                # rendered after this request was accepted).
+                metadata = (metadata or "") + "\n" + shorts_promo_section(
+                    title, store.load_state(project_id).get("shorts"),
+                )
+
                 out_dir = export_project(
                     project_dir=pdir,
                     title=title,
@@ -1105,6 +1112,11 @@ async def render_shorts_endpoint(project_id: str, req: RenderShortsRequest):
     pdir = store.project_dir(project_id)
     out_dir = config.OUTPUT_DIR / project_id / "shorts"
     want_source = (req.source or config.SHORT_SOURCE).strip()
+    story_title = (script.get("title") or state.get("title") or "").strip()
+    pinned_comment = (
+        f'Full story on my channel: "{story_title}"' if story_title
+        else "Full story on my channel."
+    )
 
     with _shorts_lock:
         _shorts_tasks[project_id] = {
@@ -1169,6 +1181,7 @@ async def render_shorts_endpoint(project_id: str, req: RenderShortsRequest):
                     produced.append({
                         "scene_index": idx, "path": rel,
                         "duration": duration, "hook": hooks.get(idx, ""),
+                        "pinned_comment": pinned_comment,
                     })
                 except Exception as se:  # noqa: BLE001
                     log.error(f"Short for scene {idx} failed: {se}")
@@ -1178,6 +1191,14 @@ async def render_shorts_endpoint(project_id: str, req: RenderShortsRequest):
                         st["done"] = rank
                         st["shorts"] = produced
             store.update_state(project_id, shorts=produced)
+            if produced:
+                try:
+                    (out_dir / "shorts_promo.txt").write_text(
+                        shorts_promo_section(story_title, produced),
+                        encoding="utf-8",
+                    )
+                except Exception as pe:  # noqa: BLE001
+                    log.warning(f"shorts_promo.txt write failed: {pe}")
         except Exception as e:
             tb = traceback.format_exc()
             log.error(f"Shorts render failed: {tb}")

@@ -67,6 +67,7 @@ export interface ShortItem {
   path: string
   duration: number
   hook: string
+  pinned_comment?: string
 }
 
 export interface ShortsProgress {
