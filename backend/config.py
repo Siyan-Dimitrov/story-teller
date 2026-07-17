@@ -221,12 +221,12 @@ SHORT_AUDIO_CODEC = os.getenv("SHORT_AUDIO_CODEC", "aac")
 #   "crop" — cover-crop to full-bleed vertical (loses the sides)
 SHORT_REFRAME = os.getenv("SHORT_REFRAME", "fit").strip()
 # Source for shorts:
-#   "final"    — cut the segment straight out of final.mp4 (keeps music +
-#                motion, cheap — just ffmpeg), reframed per SHORT_REFRAME.
 #   "portrait" — recompose the scene's stills as native 9:16 frames with Nano
 #                Banana (~$0.04/image, cached) and render from those.
+#   "final"    — cut the segment straight out of final.mp4 (keeps music +
+#                motion, cheap — just ffmpeg), reframed per SHORT_REFRAME.
 #   "stills"   — re-render from the landscape scene images (cover-crop).
-SHORT_SOURCE = os.getenv("SHORT_SOURCE", "final").strip()
+SHORT_SOURCE = os.getenv("SHORT_SOURCE", "portrait").strip()
 
 # ── Claude text generation ───────────────────────────────────
 # All text generation (scripts, critic, classification, metadata) runs on

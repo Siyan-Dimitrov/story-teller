@@ -15,7 +15,7 @@ export default function ShortsPanel({ project }: Props) {
   const [suggestions, setSuggestions] = useState<ShortSuggestion[]>([])
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [hooks, setHooks] = useState<Record<number, string>>({})
-  const [source, setSource] = useState<'final' | 'portrait'>('final')
+  const [source, setSource] = useState<'final' | 'portrait'>('portrait')
   const [suggesting, setSuggesting] = useState(false)
   const [rendering, setRendering] = useState(false)
   const [progress, setProgress] = useState<ShortsProgress | null>(null)
@@ -150,8 +150,8 @@ export default function ShortsPanel({ project }: Props) {
         <div className="flex items-center gap-2 text-xs">
           <span className="text-[var(--text-muted)]">Frames:</span>
           {([
-            ['final', 'Cut from final video'],
             ['portrait', 'Native portrait (Nano Banana ≈$0.04/image)'],
+            ['final', 'Cut from final video'],
           ] as const).map(([value, label]) => (
             <button
               key={value}
