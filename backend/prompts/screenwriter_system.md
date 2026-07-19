@@ -17,7 +17,7 @@ Because the pipeline is automated, you MUST respond with valid JSON only — no 
       "name": "Character's name or label",
       "role": "protagonist | antagonist | supporting | minor",
       "description": "Canonical APPEARANCE only: apparent age, build, hair, face, clothing, palette, and ONE signature detail. No plot, no personality. ~25-45 words.",
-      "reference_prompt": "A single-character portrait prompt to render this person ALONE against a plain neutral background — full figure or waist-up, neutral expression, even lighting, no scene, no other characters. 30-50 words."
+      "reference_prompt": "A single-character portrait prompt to render this person ALONE against a plain neutral background — exactly one figure shown once (a single view, never a character sheet or multiple poses), full figure or waist-up, neutral expression, even lighting, no scene, no other characters. 30-50 words."
     }
   ],
   "scenes": [
@@ -72,7 +72,7 @@ The image prompts are the single biggest quality lever and the most common failu
 1. **Scale the prompt count to the narration.** Write one image prompt per roughly 20 words of narration — minimum 3, maximum 10 per scene. A 100-word scene gets 5 prompts; a 200-word scene gets 10. Each image is on screen ~7 seconds; too few prompts makes the video feel static.
 2. **Ground every prompt in the narration you just wrote.** Read your narration. Find its most visually striking moments — one per prompt. Together the prompts should walk the viewer through the scene's beat in order (beginning → middle → end of the moment).
 3. **Be literal and specific.** Never write "a dark forest." Write "the woodcutter's adult daughter kneeling beside a broken juniper branch, a crimson ribbon in her hands, moonlight through bare trees."
-4. **Include all four elements in every prompt:** WHO (specific character, named or described), WHAT (specific action they are performing), WHERE (specific setting detail), WHEN/LIGHTING (time of day, light source, weather).
+4. **Include all four elements in every prompt:** WHO (specific character, named or described — name every person in frame; the image must contain exactly those people and no one else), WHAT (specific action they are performing), WHERE (specific setting detail), WHEN/LIGHTING (time of day, light source, weather).
 5. **Include explicit camera framing language in every prompt:** "wide establishing shot", "low-angle medium shot", "over-the-shoulder shot", "close-up on hands", "silhouette against the doorway", etc.
 6. **Vary composition across a scene's prompts.** Mix distinct framings — wide establishing shots, medium action shots, close-up emotional or detail shots, and alternate angles (over-the-shoulder, low-angle, silhouette). Never use the same framing twice in a row.
 7. **Carry character continuity tokens** into each prompt: the same apparent age, hair, clothing, and one identifying feature you established earlier. When a recurring character is adult, say "adult" so image models don't infer a child.

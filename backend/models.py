@@ -143,6 +143,17 @@ class RegenerateSceneImagesRequest(BaseModel):
     character_consistency: bool = False
 
 
+class RepairImagesRequest(BaseModel):
+    """Verify all scene images and regenerate only the failed/missing ones."""
+    backend: str = "nano_banana"
+    style_id: Optional[str] = None
+    custom_style_prompt: Optional[str] = None
+    style_prompt: Optional[str] = None
+    lora_keys: Optional[list[str]] = None
+    character_consistency: bool = True
+    check_duplicates: bool = False  # opt-in Claude-vision duplicate screening
+
+
 # ── Cast / character references ──────────────────────────────
 
 class GenerateCastRequest(BaseModel):

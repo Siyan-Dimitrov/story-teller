@@ -1,6 +1,8 @@
 """File-based project storage for Story Teller."""
 
 import json
+import os
+import time
 import uuid
 import zlib
 import logging
@@ -109,7 +111,26 @@ def list_projects() -> list[dict]:
 
 
 def _write_json(path: Path, data):
-    path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+    """Atomic write: dump to a sibling temp file, then replace. Readers can
+    never see a half-written JSON (script.json is saved incrementally during
+    image runs while the UI polls). On Windows the replace can transiently
+    fail while a reader holds the file open — retry briefly, then fall back
+    to a direct write."""
+    payload = json.dumps(data, indent=2, default=str)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(payload, encoding="utf-8")
+    for _ in range(5):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            time.sleep(0.05)
+    log.warning(f"Atomic replace failed for {path.name}; writing directly")
+    path.write_text(payload, encoding="utf-8")
+    try:
+        tmp.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _read_json(path: Path):

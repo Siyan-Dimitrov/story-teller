@@ -35,6 +35,7 @@ from .models import (
     RunVoiceRequest,
     RunImagesRequest,
     RegenerateSceneImagesRequest,
+    RepairImagesRequest,
     RunAssembleRequest,
     SearchStoriesRequest,
     GutenbergSearchRequest,
@@ -101,14 +102,14 @@ def _resolve_image_style_request(req, script: dict | None = None) -> tuple[str, 
         request_lora_keys=getattr(req, "lora_keys", None),
     )
 
-    # Prefer the per-story "feel" the screenwriter derived from the story itself,
-    # so each story gets its own look. A custom style the user typed always
-    # wins; the selected style's LoRAs are kept so the model-level style is
-    # preserved either way.
+    # The user's selection always wins. The screenwriter's per-story
+    # `visual_style` line is appended as supplementary mood, so each story
+    # keeps its own flavor without overriding the chosen style. A custom
+    # prompt the user typed replaces everything.
     if not custom and script:
         story_style = (script.get("visual_style") or "").strip()
         if story_style:
-            style_prompt = story_style
+            style_prompt = f"{style_prompt}. Story-specific mood: {story_style}"
 
     return style_prompt, lora_keys
 
@@ -708,41 +709,62 @@ async def run_voice(project_id: str, req: RunVoiceRequest):
 
 # ── Stage 3: Image generation ────────────────────────────────
 
-@app.post("/api/projects/{project_id}/images")
-async def run_images(project_id: str, req: RunImagesRequest):
-    state = store.load_state(project_id)
-    script = store.load_json(project_id, "script.json")
-    if not script:
-        raise HTTPException(400, "No script found")
+def _spawn_images_thread(coro_factory):
+    """Run an images coroutine on a fresh event loop in a daemon thread."""
+    def _run():
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(coro_factory())
+        finally:
+            loop.close()
 
-    store.update_state(
-        project_id,
-        step="generating_images",
-        error=None,
-        image_backend=req.backend,
-    )
+    threading.Thread(target=_run, daemon=True).start()
+
+
+async def _images_pipeline(project_id: str, req: RunImagesRequest, script: dict,
+                           style_prompt: str, lora_keys):
+    """Full images run: cast bible → portraits → scenes → repair sweep.
+
+    Runs in a background thread; progress is polled via /images-progress and
+    script.json is saved incrementally so the UI previews images as they land
+    and a crashed run loses nothing."""
+    pdir = store.project_dir(project_id)
+    seed = store.get_project_seed(project_id)
+
+    def _save():
+        store.save_json(project_id, "script.json", script)
 
     try:
-        style_prompt, lora_keys = _resolve_image_style_request(req, script)
-        pdir = store.project_dir(project_id)
-        seed = store.get_project_seed(project_id)
-
-        # Character consistency on Nano Banana: ensure a cast bible exists and
-        # render the canonical portraits that get fed back as references.
         cast = script.get("cast") or []
         if req.backend == "nano_banana" and req.character_consistency:
-            script = await cast_gen.ensure_cast(script)
+            image_gen.update_images_progress(project_id, phase="building cast bible")
+            script_upd = await cast_gen.ensure_cast(script)
+            script.clear()
+            script.update(script_upd)
+            _save()
             cast = script.get("cast") or []
             if cast:
+                image_gen.update_images_progress(project_id, phase="rendering portraits")
                 cast = await image_gen.generate_character_references(
-                    cast=cast,
-                    project_dir=pdir,
-                    backend="nano_banana",
-                    style_prompt=style_prompt,
-                    project_seed=seed,
+                    cast=cast, project_dir=pdir, backend="nano_banana",
+                    style_prompt=style_prompt, project_seed=seed,
+                    progress_cb=lambda done, total: image_gen.update_images_progress(
+                        project_id, phase=f"portraits {done}/{total}"),
                 )
                 script["cast"] = cast
-                store.save_json(project_id, "script.json", script)
+                _save()
+
+        total = sum(
+            len(s.get("image_prompts") or []) or (1 if s.get("image_prompt") else 0)
+            for s in script.get("scenes", [])
+        )
+        image_gen.update_images_progress(project_id, phase="generating scenes", total=total)
+
+        def _cb(generated: int, total: int, scene_index: int, scene_done: bool):
+            image_gen.update_images_progress(
+                project_id, generated=generated, total=total, scene_index=scene_index)
+            if scene_done:
+                _save()
 
         scenes = await image_gen.generate_all_scenes(
             scenes=script["scenes"],
@@ -753,19 +775,111 @@ async def run_images(project_id: str, req: RunImagesRequest):
             character_consistency=req.character_consistency,
             project_seed=seed,
             cast=cast,
+            progress_cb=_cb,
         )
         script["scenes"] = scenes
-        store.save_json(project_id, "script.json", script)
-        store.update_state(project_id, step="illustrated")
-        return {"scenes": scenes}
-    except image_gen.OpenAIImageSafetyError as e:
-        store.update_state(project_id, step="voiced", error=str(e))
-        raise HTTPException(422, str(e))
+        _save()
+
+        # Automatic verify-and-repair sweep. Duplicate screening stays opt-in
+        # via the repair endpoint.
+        image_gen.update_images_progress(project_id, phase="verifying & repairing")
+        summary = await image_gen.repair_project_images(
+            script, pdir, backend=req.backend, style_prompt=style_prompt,
+            lora_keys=lora_keys, character_consistency=req.character_consistency,
+            project_seed=seed, check_duplicates=False,
+            progress_cb=lambda phase: image_gen.update_images_progress(project_id, phase=phase),
+            save_cb=_save,
+        )
+        log.info(f"Images repair sweep for {project_id}: {summary}")
+
+        _save()
+        store.update_state(project_id, step="illustrated", error=None)
+        image_gen.finish_images_progress(project_id)
     except Exception as e:
         tb = traceback.format_exc()
         log.error(f"Image generation failed: {tb}")
         store.update_state(project_id, step="voiced", error=f"{e}\n{tb}")
-        raise HTTPException(500, str(e))
+        image_gen.finish_images_progress(project_id, error=str(e))
+
+
+@app.post("/api/projects/{project_id}/images")
+async def run_images(project_id: str, req: RunImagesRequest):
+    state = store.load_state(project_id)
+    script = store.load_json(project_id, "script.json")
+    if not script:
+        raise HTTPException(400, "No script found")
+    if image_gen.get_images_progress(project_id)["active"]:
+        return {"status": "already_running"}
+
+    style_prompt, lora_keys = _resolve_image_style_request(req, script)
+    store.update_state(project_id, step="generating_images", error=None,
+                       image_backend=req.backend)
+    image_gen.init_images_progress(project_id)
+    _spawn_images_thread(
+        lambda: _images_pipeline(project_id, req, script, style_prompt, lora_keys)
+    )
+    return {"status": "generating"}
+
+
+@app.get("/api/projects/{project_id}/images-progress")
+async def images_progress(project_id: str):
+    return image_gen.get_images_progress(project_id)
+
+
+# NOTE: declared before /images/{scene_index} so "repair" isn't swallowed by
+# the int path param.
+@app.post("/api/projects/{project_id}/images/repair")
+async def repair_images(project_id: str, req: RepairImagesRequest):
+    """Scan all scenes and regenerate only failed/missing images (plus opt-in
+    duplicated-figure screening). Runs in the background like /images."""
+    state = store.load_state(project_id)
+    script = store.load_json(project_id, "script.json")
+    if not script:
+        raise HTTPException(400, "No script found")
+    if image_gen.get_images_progress(project_id)["active"]:
+        return {"status": "already_running"}
+
+    style_prompt, lora_keys = _resolve_image_style_request(req, script)
+    pdir = store.project_dir(project_id)
+    seed = store.get_project_seed(project_id)
+    image_gen.init_images_progress(project_id, phase="scanning for failed images")
+
+    async def _repair():
+        def _save():
+            store.save_json(project_id, "script.json", script)
+        try:
+            summary = await image_gen.repair_project_images(
+                script, pdir, backend=req.backend, style_prompt=style_prompt,
+                lora_keys=lora_keys, character_consistency=req.character_consistency,
+                project_seed=seed, check_duplicates=req.check_duplicates,
+                progress_cb=lambda phase: image_gen.update_images_progress(project_id, phase=phase),
+                save_cb=_save,
+            )
+            log.info(f"Images repair for {project_id}: {summary}")
+            _save()
+            if any(s.get("image_paths") for s in script.get("scenes", [])):
+                store.update_state(project_id, step="illustrated", error=None)
+            image_gen.finish_images_progress(project_id)
+        except Exception as e:
+            tb = traceback.format_exc()
+            log.error(f"Images repair failed: {tb}")
+            store.update_state(project_id, error=f"{e}\n{tb}")
+            image_gen.finish_images_progress(project_id, error=str(e))
+
+    _spawn_images_thread(_repair)
+    return {"status": "repairing"}
+
+
+def _first_scene_image(scenes: list, pdir, skip_scene: dict | None = None):
+    """First existing scene still — used as a style anchor for regeneration."""
+    for sc in scenes:
+        if skip_scene is not None and sc is skip_scene:
+            continue
+        for rel in sc.get("image_paths") or []:
+            p = pdir / rel
+            if p.exists():
+                return p
+    return None
 
 
 @app.post("/api/projects/{project_id}/images/{scene_index}")
@@ -774,6 +888,8 @@ async def regenerate_scene_images(project_id: str, scene_index: int, req: Regene
     script = store.load_json(project_id, "script.json")
     if not script:
         raise HTTPException(400, "No script found")
+    if image_gen.get_images_progress(project_id)["active"]:
+        raise HTTPException(409, "An image generation run is already active for this project")
 
     scenes = script["scenes"]
     if scene_index < 0 or scene_index >= len(scenes):
@@ -782,14 +898,12 @@ async def regenerate_scene_images(project_id: str, scene_index: int, req: Regene
     scene = scenes[scene_index]
     pdir = store.project_dir(project_id)
 
-    # Determine reference image for character consistency
+    # Determine reference image for character consistency: for replicate it is
+    # an img2img source; for nano_banana it acts as a style anchor for scenes
+    # with no tagged cast.
     reference_image = None
-    if req.character_consistency and req.backend == "replicate":
-        # Use first image of first scene as reference if available
-        if scenes and scenes[0].get("image_paths"):
-            ref_path = pdir / scenes[0]["image_paths"][0]
-            if ref_path.exists():
-                reference_image = ref_path
+    if req.character_consistency and req.backend in ("replicate", "nano_banana"):
+        reference_image = _first_scene_image(scenes, pdir, skip_scene=scene)
 
     try:
         style_prompt, lora_keys = _resolve_image_style_request(req, script)
@@ -814,6 +928,40 @@ async def regenerate_scene_images(project_id: str, scene_index: int, req: Regene
         tb = traceback.format_exc()
         log.error(f"Scene image regeneration failed: {tb}")
         raise HTTPException(500, str(e))
+
+
+@app.post("/api/projects/{project_id}/images/{scene_index}/{image_index}")
+async def regenerate_single_image(project_id: str, scene_index: int, image_index: int,
+                                  req: RegenerateSceneImagesRequest):
+    """Regenerate exactly one image slot of a scene (cheaper than redoing the
+    whole scene when a single image failed or looks wrong)."""
+    state = store.load_state(project_id)
+    script = store.load_json(project_id, "script.json")
+    if not script:
+        raise HTTPException(400, "No script found")
+    if image_gen.get_images_progress(project_id)["active"]:
+        raise HTTPException(409, "An image generation run is already active for this project")
+
+    scenes = script["scenes"]
+    if scene_index < 0 or scene_index >= len(scenes):
+        raise HTTPException(400, f"Invalid scene index {scene_index}")
+    scene = scenes[scene_index]
+    pdir = store.project_dir(project_id)
+
+    style_anchor = None
+    if req.character_consistency and req.backend == "nano_banana":
+        style_anchor = _first_scene_image(scenes, pdir)
+
+    style_prompt, lora_keys = _resolve_image_style_request(req, script)
+    ok, err = await image_gen.generate_one_image(
+        scene, image_index, pdir, req.backend, style_prompt, lora_keys,
+        store.get_project_seed(project_id), script.get("cast") or [],
+        req.character_consistency, style_anchor, seed_bump=1,
+    )
+    store.save_json(project_id, "script.json", script)
+    if not ok:
+        raise HTTPException(500, err or "Image generation failed")
+    return {"scene": scene}
 
 
 # ── Cast bible & character references ─────────────────────────

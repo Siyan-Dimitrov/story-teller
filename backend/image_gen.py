@@ -2,13 +2,14 @@
 
 import base64
 import re
+import threading
 import time
 import uuid
 import logging
 from pathlib import Path
 import httpx
 
-from . import config, image_styles
+from . import config, image_styles, llm
 from . import project_store as store
 
 log = logging.getLogger(__name__)
@@ -24,6 +25,48 @@ class OpenAIImageSafetyError(RuntimeError):
     def __init__(self, message: str, request_id: str | None = None):
         super().__init__(message)
         self.request_id = request_id
+
+
+# ── Images progress tracking (background runs poll this) ────────
+_img_lock = threading.Lock()
+_img_tasks: dict[str, dict] = {}
+
+
+def get_images_progress(project_id: str) -> dict:
+    with _img_lock:
+        state = _img_tasks.get(project_id)
+        if not state:
+            return {
+                "active": False, "phase": "idle", "generated": 0,
+                "total": 0, "scene_index": None, "error": None,
+            }
+        return dict(state)
+
+
+def init_images_progress(project_id: str, phase: str = "starting"):
+    with _img_lock:
+        _img_tasks[project_id] = {
+            "active": True, "phase": phase, "generated": 0,
+            "total": 0, "scene_index": None, "error": None,
+        }
+
+
+def update_images_progress(project_id: str, **kw):
+    with _img_lock:
+        state = _img_tasks.get(project_id)
+        if state:
+            state.update(kw)
+
+
+def finish_images_progress(project_id: str, error: str | None = None):
+    with _img_lock:
+        state = _img_tasks.get(project_id)
+        if state:
+            state["active"] = False
+            state["phase"] = "error" if error else "done"
+            if error:
+                state["error"] = error
+
 
 # ── Available LoRAs ─────────────────────────────────────────────
 # Each entry: filename, trigger words to prepend, strength_model, strength_clip
@@ -516,23 +559,81 @@ async def generate_image_replicate(
 # flux-dev-lora "image" param (which is img2img denoising), Nano Banana treats
 # `image_input` as true subject/style references and keeps them consistent.
 
+# Fallback directive when references are present but unlabeled (portrait
+# variants, legacy calls). The labeled variant below is preferred for scenes.
 _NANO_REF_DIRECTIVE = (
     " Use the provided reference image(s) to keep the recurring characters' "
     "faces, hair, clothing, colours and body proportions identical; only the "
-    "pose, action, framing and setting should change to match this scene."
+    "pose, action, framing and setting should change to match this scene. "
+    "Render each character exactly once — never duplicate, mirror or repeat "
+    "any person or group."
+)
+
+# Directive when the only reference is a previous frame used as a style
+# anchor: copy the LOOK, never the content.
+_STYLE_ANCHOR_DIRECTIVE = (
+    " The reference image is an earlier frame from the same story. Match its "
+    "art style, colour palette, lighting mood and rendering technique ONLY. "
+    "Do NOT copy its people, creatures, objects or composition — depict "
+    "exactly and only what this scene describes."
 )
 
 
-def _build_nano_banana_prompt(prompt: str, style_prompt: str, has_refs: bool) -> str:
-    """Compose the Nano Banana prompt: style art-direction + scene + (if refs)
-    an explicit consistency directive."""
+def _labeled_ref_directive(labels: list[str]) -> str:
+    numbered = "; ".join(
+        f"reference image {i + 1} shows {label}" for i, label in enumerate(labels)
+    )
+    return (
+        f" For character consistency: {numbered}. These references depict the "
+        "SAME individuals described in this scene — identity guides only, not "
+        "additional people. Keep each one's face, hair, clothing, colours and "
+        "body proportions exactly as shown, and render each listed character "
+        "EXACTLY ONCE. The frame must contain only the people this scene "
+        "describes — never duplicate, mirror or repeat any person or group. "
+        "Choose pose, action, camera framing, composition and setting freely "
+        "from the scene description."
+    )
+
+
+def _build_nano_banana_prompt(
+    prompt: str,
+    style_prompt: str,
+    has_refs: bool,
+    ref_labels: list[str] | None = None,
+    style_reference_only: bool = False,
+) -> str:
+    """Compose the Nano Banana prompt: style art-direction + scene + an
+    explicit reference directive (identity-bound when labels are known)."""
     if style_prompt and prompt:
         full = f"{style_prompt}. {prompt}"
     else:
         full = style_prompt or prompt
-    if has_refs:
-        full = full + _NANO_REF_DIRECTIVE
-    return full
+    if not has_refs:
+        return full
+    if style_reference_only:
+        return full + _STYLE_ANCHOR_DIRECTIVE
+    if ref_labels:
+        return full + _labeled_ref_directive(ref_labels)
+    return full + _NANO_REF_DIRECTIVE
+
+
+# Error text fragments that look like a content refusal rather than a
+# transient failure. Gemini via Replicate surfaces these in many shapes
+# ("flagged as sensitive", "PROHIBITED_CONTENT", "blocked", E005 …).
+_CONTENT_REFUSAL_MARKERS = (
+    "sensitive", "safety", "flagged", "prohibited", "blocked",
+    "violat", "moderat", "refus", "e005", "no image", "policy",
+)
+
+_TRANSIENT_MARKERS = (
+    "throttl", "rate", "429", "too many", "overloaded",
+    "503", "502", "timeout", "timed out",
+)
+
+
+def _looks_like_content_refusal(err: Exception) -> bool:
+    text = str(err).lower()
+    return any(m in text for m in _CONTENT_REFUSAL_MARKERS)
 
 
 async def generate_image_nano_banana(
@@ -543,44 +644,65 @@ async def generate_image_nano_banana(
     reference_images: list[Path] | None = None,
     aspect_ratio: str | None = None,
     lora_keys: list[str] | None = None,  # accepted+ignored for call-site uniformity
+    reference_labels: list[str] | None = None,
+    style_reference_only: bool = False,
 ) -> Path:
     """Generate an image with Google's Nano Banana model on Replicate.
 
     Passes up to ``config.NANO_BANANA_MAX_REFS`` reference images via
-    ``image_input`` so recurring characters stay consistent. Mirrors the retry/
-    backoff and download behaviour of ``generate_image_replicate``.
+    ``image_input`` so recurring characters stay consistent. When
+    ``reference_labels`` is given (one per reference) the prompt names each
+    reference, so the model treats them as identities rather than extra people
+    to insert; ``style_reference_only`` anchors style without copying content.
+    Retries transient errors with backoff, and retries a content refusal once
+    with a softened prompt before giving up.
     """
     import asyncio
     import replicate as _replicate
 
     refs = [p for p in (reference_images or []) if p and Path(p).exists()]
     refs = refs[: config.NANO_BANANA_MAX_REFS]
+    labels = None
+    if reference_labels and len(reference_labels) >= len(refs):
+        labels = reference_labels[: len(refs)]
+
+    def _make_input(scene_text: str) -> dict:
+        inp: dict = {
+            "prompt": _build_nano_banana_prompt(
+                scene_text, style_prompt, bool(refs),
+                ref_labels=labels, style_reference_only=style_reference_only,
+            ),
+            "output_format": config.NANO_BANANA_OUTPUT_FORMAT,
+            "aspect_ratio": aspect_ratio or _flux_aspect_ratio(),
+        }
+        if refs:
+            # Replicate's client accepts pathlib.Path inputs and uploads them.
+            inp[config.NANO_BANANA_IMAGE_PARAM] = [Path(p) for p in refs]
+        return inp
 
     model = config.REPLICATE_NANO_BANANA_MODEL
-    inp: dict = {
-        "prompt": _build_nano_banana_prompt(prompt, style_prompt, bool(refs)),
-        "output_format": config.NANO_BANANA_OUTPUT_FORMAT,
-        "aspect_ratio": aspect_ratio or _flux_aspect_ratio(),
-    }
-    if refs:
-        # Replicate's client accepts pathlib.Path inputs and uploads them.
-        inp[config.NANO_BANANA_IMAGE_PARAM] = [Path(p) for p in refs]
-
+    inp = _make_input(prompt)
     max_retries = config.REPLICATE_MAX_RETRIES
-    last_error = None
+    attempt = 0
+    softened = False
 
-    for attempt in range(max_retries + 1):
+    while True:
         try:
             log.info(
                 f"Nano Banana [{model}]: generating with {len(refs)} ref(s) "
-                f"(attempt {attempt + 1}/{max_retries + 1})"
+                f"(attempt {attempt + 1}, softened={softened})"
             )
             loop = asyncio.get_event_loop()
             output = await loop.run_in_executor(None, lambda: _replicate.run(model, input=inp))
 
-            # Output may be a single FileOutput or a list of them.
+            # Output may be a single FileOutput or a list of them. A refusal
+            # sometimes comes back as an empty output instead of an error.
             if isinstance(output, list):
+                if not output:
+                    raise RuntimeError("Nano Banana returned no image output")
                 image_url = str(output[0])
+            elif output is None:
+                raise RuntimeError("Nano Banana returned no image output")
             else:
                 image_url = str(output)
 
@@ -594,20 +716,27 @@ async def generate_image_nano_banana(
             return output_path
 
         except Exception as e:
-            last_error = e
             err_str = str(e).lower()
-            is_retryable = any(kw in err_str for kw in [
-                "throttl", "rate", "429", "too many", "overloaded",
-                "503", "502", "timeout", "timed out",
-            ])
-            if not is_retryable or attempt >= max_retries:
-                log.error(f"Nano Banana generation failed: {e}")
-                raise
-            wait = 3.0 * (2 ** attempt)
-            log.warning(f"Nano Banana rate-limited/transient error, retrying in {wait:.0f}s: {e}")
-            await asyncio.sleep(wait)
+            is_transient = any(kw in err_str for kw in _TRANSIENT_MARKERS)
 
-    raise last_error
+            if is_transient and attempt < max_retries:
+                wait = 3.0 * (2 ** attempt)
+                attempt += 1
+                log.warning(f"Nano Banana rate-limited/transient error, retrying in {wait:.0f}s: {e}")
+                await asyncio.sleep(wait)
+                continue
+
+            # One softened retry when the model refused the content.
+            if not softened and not is_transient and _looks_like_content_refusal(e):
+                softened = True
+                soft = _make_gpt_image_safe_text(prompt)
+                if soft and soft != prompt:
+                    log.warning(f"Nano Banana content refusal — retrying with softened prompt: {e}")
+                    inp = _make_input(soft)
+                    continue
+
+            log.error(f"Nano Banana generation failed: {e}")
+            raise
 
 
 async def generate_character_references(
@@ -617,6 +746,7 @@ async def generate_character_references(
     style_prompt: str = image_styles.DEFAULT_STYLE_PROMPT,
     project_seed: int | None = None,
     only_ids: list[str] | None = None,
+    progress_cb=None,
 ) -> list[dict]:
     """Render one canonical portrait per cast member and record its path.
 
@@ -650,6 +780,14 @@ async def generate_character_references(
         if not prompt:
             log.warning(f"Cast member {cid!r} has no prompt/description — skipping portrait")
             continue
+        # Nano Banana sometimes returns a multi-view character sheet, and a
+        # duplicated portrait then multiplies the character in every scene
+        # that references it — pin it to a single figure explicitly.
+        prompt = (
+            f"{prompt}. Exactly one figure shown once, a single full view on a "
+            "plain neutral background — not a character sheet, no multiple "
+            "poses, angles, panels or duplicates, no other people."
+        )
 
         output_path = chars_dir / f"{cid}.png"
         seed = store.derive_image_seed(project_seed, 9000, i)
@@ -687,32 +825,76 @@ async def generate_character_references(
             else:
                 raise ValueError(f"Backend {backend!r} cannot render character references")
             member["reference_image_path"] = str(output_path.relative_to(project_dir))
+            member.pop("reference_image_error", None)
             generated += 1
             log.info(f"Character reference for {cid!r} saved ({generated} rendered)")
         except Exception as e:
             log.error(f"Character reference generation failed for {cid!r}: {e}")
             member["reference_image_error"] = str(e)
+        if progress_cb:
+            progress_cb(generated, len(targets))
 
     return cast
 
 
+def _member_ref_label(member: dict) -> str:
+    name = (member.get("name") or member.get("id") or "a recurring character").strip()
+    desc = (member.get("description") or "").strip()
+    if desc:
+        short = desc if len(desc) <= 90 else desc[:90].rsplit(" ", 1)[0] + "…"
+        return f"{name} ({short})"
+    return name
+
+
+def _members_in_prompt(prompt_text: str, members: list[dict]) -> list[dict]:
+    """Members whose name/id tokens appear in this specific image prompt.
+    Falls back to all supplied members when nothing matches, so epithet-style
+    prompts ('the huntsman' vs the name 'Hans') never drop a needed ref."""
+    text = (prompt_text or "").lower()
+    matched = []
+    for m in members:
+        tokens = set()
+        for src in (m.get("name") or "", m.get("id") or ""):
+            for t in re.split(r"[^a-z0-9]+", src.lower()):
+                if len(t) >= 3:
+                    tokens.add(t)
+        if any(re.search(rf"\b{re.escape(t)}\b", text) for t in tokens):
+            matched.append(m)
+    return matched or members
+
+
 def _scene_reference_images(
     scene: dict,
+    cast: list[dict],
     cast_ref_map: dict[str, Path],
     style_anchor: Path | None,
     character_consistency: bool,
-) -> list[Path]:
-    """Resolve the reference images for one scene: the portraits of the cast
-    members tagged on the scene, falling back to a style anchor when the scene
-    has no tagged characters but consistency is requested."""
+    prompt_text: str | None = None,
+) -> tuple[list[Path], list[str] | None, bool]:
+    """Resolve reference images for one scene image.
+
+    Returns ``(paths, labels, style_only)``: the portraits of the cast members
+    tagged on the scene (narrowed to those actually mentioned in this specific
+    prompt, so a close-up doesn't carry portraits of absent characters), or the
+    style anchor with ``style_only=True`` when the scene has no usable
+    character refs but consistency is requested.
+    """
+    tagged_ids = set(scene.get("characters") or [])
+    tagged = [m for m in (cast or []) if m.get("id") in tagged_ids]
+    if prompt_text and len(tagged) > 1:
+        tagged = _members_in_prompt(prompt_text, tagged)
     refs: list[Path] = []
-    for cid in scene.get("characters") or []:
-        p = cast_ref_map.get(cid)
+    labels: list[str] = []
+    for m in tagged:
+        p = cast_ref_map.get(m.get("id"))
         if p and p.exists():
             refs.append(p)
-    if not refs and character_consistency and style_anchor and style_anchor.exists():
-        refs.append(style_anchor)
-    return refs
+            labels.append(_member_ref_label(m))
+    if refs:
+        return refs, labels, False
+    if character_consistency and style_anchor and style_anchor.exists():
+        return [style_anchor], None, True
+    return [], None, False
 
 
 _NANO_PORTRAIT_DIRECTIVE = (
@@ -763,7 +945,11 @@ async def generate_portrait_variants(
         out_path = out_dir / f"scene_{idx:04d}_img_{img_idx}.png"
         if not out_path.exists():
             prompt = prompts[img_idx] if img_idx < len(prompts) else (prompts[-1] if prompts else "")
-            refs = [src] + _scene_reference_images(scene, cast_ref_map, None, False)
+            char_refs = [
+                cast_ref_map[cid] for cid in (scene.get("characters") or [])
+                if cid in cast_ref_map
+            ]
+            refs = [src] + char_refs
             if generated > 0:
                 await asyncio.sleep(config.REPLICATE_DELAY_SECONDS)
             try:
@@ -1137,6 +1323,148 @@ def _finalize_scene_image_errors(scene: dict) -> None:
         scene.pop("image_safety_error", None)
 
 
+def _scene_prompts(scene: dict) -> list[str]:
+    prompts = scene.get("image_prompts") or []
+    if not prompts:
+        single = scene.get("image_prompt", "")
+        prompts = [single] if single else []
+    return prompts
+
+
+def _image_rel_path(scene_index: int, img_idx: int) -> str:
+    return str(Path("images") / f"scene_{scene_index:04d}_img_{img_idx}.png")
+
+
+def _rebuild_scene_image_paths(scene: dict, project_dir: Path) -> None:
+    """Recompute image_paths from the deterministic filenames on disk so slot
+    order always matches prompt order (a failed or safety-skipped slot in the
+    middle can no longer shift the later images)."""
+    idx = scene["index"]
+    paths = []
+    for i in range(len(_scene_prompts(scene))):
+        p = project_dir / "images" / f"scene_{idx:04d}_img_{i}.png"
+        if p.exists():
+            paths.append(str(p.relative_to(project_dir)))
+    scene["image_paths"] = paths
+    scene["image_path"] = paths[0] if paths else None
+
+
+def find_failed_images(scenes: list[dict], project_dir: Path) -> list[dict]:
+    """Scan every scene for image slots that need attention.
+
+    A slot needs REGENERATION when it has a recorded error (safety block or
+    placeholder marker) or its expected file is missing; it is ADOPTED when
+    the file exists on disk but was never recorded in the script (a crashed
+    run). Returns [{scene_pos, scene_index, img_idx, prompt, reason, kind}].
+    """
+    out = []
+    for pos, scene in enumerate(scenes):
+        idx = scene.get("index", pos)
+        errors = scene.get("image_errors") or []
+        recorded = {str(Path(p)) for p in (scene.get("image_paths") or [])}
+        for i, prompt in enumerate(_scene_prompts(scene)):
+            err = errors[i] if i < len(errors) else None
+            rel = _image_rel_path(idx, i)
+            on_disk = (project_dir / rel).exists()
+            if err:
+                out.append({"scene_pos": pos, "scene_index": idx, "img_idx": i,
+                            "prompt": prompt, "reason": str(err), "kind": "regen"})
+            elif not on_disk:
+                out.append({"scene_pos": pos, "scene_index": idx, "img_idx": i,
+                            "prompt": prompt, "reason": "file missing", "kind": "regen"})
+            elif str(Path(rel)) not in recorded:
+                out.append({"scene_pos": pos, "scene_index": idx, "img_idx": i,
+                            "prompt": prompt, "reason": "generated but unrecorded",
+                            "kind": "adopt"})
+    return out
+
+
+async def generate_one_image(
+    scene: dict,
+    img_idx: int,
+    project_dir: Path,
+    backend: str,
+    style_prompt: str,
+    lora_keys: list[str] | None = None,
+    project_seed: int | None = None,
+    cast: list[dict] | None = None,
+    character_consistency: bool = False,
+    style_anchor: Path | None = None,
+    prompt_override: str | None = None,
+    seed_bump: int = 0,
+) -> tuple[bool, str | None]:
+    """(Re)generate exactly one image slot of a scene.
+
+    No placeholder fallback: on failure the previous file (if any) stays in
+    place and the error is recorded on the scene. Returns (ok, error)."""
+    idx = scene["index"]
+    prompts = _scene_prompts(scene)
+    if img_idx < 0 or img_idx >= len(prompts):
+        return False, f"Scene {idx} has no image slot {img_idx}"
+    prompt = (prompt_override or prompts[img_idx]).strip()
+    output_path = project_dir / "images" / f"scene_{idx:04d}_img_{img_idx}.png"
+    seed = store.derive_image_seed(project_seed, idx, img_idx)
+    if seed_bump:
+        seed = (seed + seed_bump * 7919) % (2 ** 32)
+
+    cast_ref_map: dict[str, Path] = {}
+    for _m in (cast or []):
+        _rp = _m.get("reference_image_path")
+        if _rp:
+            _ap = project_dir / _rp
+            if _ap.exists():
+                cast_ref_map[_m.get("id")] = _ap
+
+    try:
+        if backend == "nano_banana":
+            refs, labels, style_only = _scene_reference_images(
+                scene, cast or [], cast_ref_map, style_anchor,
+                character_consistency, prompt,
+            )
+            await generate_image_nano_banana(
+                prompt=prompt, style_prompt=style_prompt, output_path=output_path,
+                seed=seed, reference_images=refs, reference_labels=labels,
+                style_reference_only=style_only,
+            )
+        elif backend == "gpt_image":
+            await generate_image_gpt_image(
+                prompt=prompt, style_prompt=style_prompt, output_path=output_path,
+                seed=seed, lora_keys=lora_keys,
+            )
+        elif backend == "replicate":
+            await generate_image_replicate(
+                prompt=prompt, style_prompt=style_prompt, output_path=output_path,
+                seed=seed, lora_keys=lora_keys,
+            )
+        elif backend == "comfyui":
+            await generate_image_comfyui(
+                prompt=prompt, style_prompt=style_prompt, output_path=output_path,
+                seed=seed, lora_keys=lora_keys,
+            )
+        else:
+            await generate_image_ollama(
+                prompt=prompt, style_prompt=style_prompt, output_path=output_path,
+            )
+    except Exception as e:  # noqa: BLE001
+        _record_scene_image_error(scene, img_idx, str(e),
+                                  safety=isinstance(e, OpenAIImageSafetyError))
+        _rebuild_scene_image_paths(scene, project_dir)
+        return False, str(e)
+
+    # Success: persist the prompt that actually rendered, clear the slot error.
+    if prompt_override and prompt_override != prompts[img_idx]:
+        if scene.get("image_prompts"):
+            scene["image_prompts"][img_idx] = prompt_override
+        else:
+            scene["image_prompt"] = prompt_override
+    errors = scene.get("image_errors")
+    if errors and img_idx < len(errors):
+        errors[img_idx] = None
+    _rebuild_scene_image_paths(scene, project_dir)
+    _finalize_scene_image_errors(scene)
+    return True, None
+
+
 async def generate_scene_images(
     scene: dict,
     project_dir: Path,
@@ -1199,8 +1527,9 @@ async def generate_scene_images(
                     reference_image=reference_image,
                 )
             elif backend == "nano_banana":
-                scene_refs = _scene_reference_images(
-                    scene, cast_ref_map, reference_image, character_consistency
+                scene_refs, ref_labels, style_only = _scene_reference_images(
+                    scene, cast or [], cast_ref_map, reference_image,
+                    character_consistency, prompt,
                 )
                 await generate_image_nano_banana(
                     prompt=prompt,
@@ -1208,6 +1537,8 @@ async def generate_scene_images(
                     output_path=output_path,
                     seed=image_seed,
                     reference_images=scene_refs,
+                    reference_labels=ref_labels,
+                    style_reference_only=style_only,
                 )
             elif backend == "gpt_image":
                 await generate_image_gpt_image(
@@ -1252,7 +1583,7 @@ async def generate_scene_images(
                 log.error(f"Placeholder also failed for scene {idx} img {img_idx}: {e2}")
                 _record_scene_image_error(scene, img_idx, str(e))
 
-    scene["image_path"] = scene["image_paths"][0] if scene["image_paths"] else None
+    _rebuild_scene_image_paths(scene, project_dir)
     _finalize_scene_image_errors(scene)
     return scene
 
@@ -1266,12 +1597,16 @@ async def generate_all_scenes(
     character_consistency: bool = False,
     project_seed: int | None = None,
     cast: list[dict] | None = None,
+    progress_cb=None,
 ) -> list[dict]:
     """Generate images for all scenes. Returns updated scenes with image_paths.
 
     When ``backend == "nano_banana"`` and ``cast`` is supplied, each scene's
     images are generated with the tagged characters' canonical portraits as
     reference images, keeping recurring characters visually consistent.
+    ``progress_cb`` (if given) is called as
+    ``progress_cb(generated=int, total=int, scene_index=int, scene_done=bool)``
+    after every image and after every finished scene.
     """
     images_dir = project_dir / "images"
     images_dir.mkdir(exist_ok=True)
@@ -1341,8 +1676,9 @@ async def generate_all_scenes(
                         reference_image=reference_image_path,
                     )
                 elif backend == "nano_banana":
-                    scene_refs = _scene_reference_images(
-                        scene, cast_ref_map, style_anchor, character_consistency
+                    scene_refs, ref_labels, style_only = _scene_reference_images(
+                        scene, cast or [], cast_ref_map, style_anchor,
+                        character_consistency, prompt,
                     )
                     await generate_image_nano_banana(
                         prompt=prompt,
@@ -1350,6 +1686,8 @@ async def generate_all_scenes(
                         output_path=output_path,
                         seed=image_seed,
                         reference_images=scene_refs,
+                        reference_labels=ref_labels,
+                        style_reference_only=style_only,
                     )
                 elif backend == "gpt_image":
                     await generate_image_gpt_image(
@@ -1406,11 +1744,228 @@ async def generate_all_scenes(
                     _record_scene_image_error(scene, img_idx, str(e))
                 generated += 1
 
-        # Backward compat: set image_path to first image
-        scene["image_path"] = scene["image_paths"][0] if scene["image_paths"] else None
+            if progress_cb:
+                progress_cb(generated=generated, total=total_prompts,
+                            scene_index=idx, scene_done=False)
+
+        _rebuild_scene_image_paths(scene, project_dir)
         _finalize_scene_image_errors(scene)
+        if progress_cb:
+            progress_cb(generated=generated, total=total_prompts,
+                        scene_index=idx, scene_done=True)
 
     return scenes
+
+
+# ── Verify & repair ─────────────────────────────────────────────
+
+_PROMPT_REWRITE_SYSTEM = (
+    "You rewrite image-generation prompts that an image model failed or refused "
+    "to render. Keep the same story moment, the same characters with the same "
+    "appearance descriptors, the same setting and camera framing — but rephrase "
+    "the wording and soften anything that could trigger content filters "
+    "(violence, gore, injury, restraint, intimacy, children in danger) into "
+    "symbolic, non-graphic folklore imagery. Respond with the rewritten prompt "
+    "text only — no commentary, no quotes."
+)
+
+
+async def _rewrite_prompt_via_llm(prompt: str, reason: str) -> str | None:
+    try:
+        text = await llm.complete(
+            _PROMPT_REWRITE_SYSTEM,
+            f"Failure/refusal reason: {reason}\n\nOriginal prompt:\n{prompt}",
+            pass_name="image prompt rewrite",
+        )
+        text = text.strip().strip('"')
+        return text or None
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"Prompt rewrite failed: {e}")
+        return None
+
+
+_DUP_CHECK_SYSTEM = (
+    "You are a meticulous QA reviewer of AI-generated story illustrations. "
+    "Respond with valid JSON only — no markdown, no commentary."
+)
+
+
+async def check_duplicated_figures(image_path: Path, prompt: str) -> bool:
+    """Ask Claude (vision via the Read tool) whether the image erroneously
+    repeats the same person/group. Returns False on any checker failure so a
+    flaky check can never destroy a good image."""
+    user = (
+        f"Use the Read tool to view the image file at {image_path}, then answer.\n\n"
+        f"The image was generated from this prompt:\n{prompt}\n\n"
+        "Question: does the image erroneously contain multiple copies of the "
+        "same person or the same group — identical or near-identical figures "
+        "repeated (e.g. the same couple appearing two or three times, or a "
+        "person standing next to their own duplicate)? Distinct characters "
+        "standing together are NOT duplicates.\n"
+        'Respond EXACTLY: {"duplicated": true|false, "reason": "one short sentence"}'
+    )
+    try:
+        raw = await llm.complete_vision(_DUP_CHECK_SYSTEM, user, pass_name="duplicate check")
+        return bool(llm.parse_json(raw).get("duplicated"))
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"Duplicate-figure check failed for {image_path}: {e}")
+        return False
+
+
+async def repair_project_images(
+    script: dict,
+    project_dir: Path,
+    *,
+    backend: str,
+    style_prompt: str,
+    lora_keys: list[str] | None = None,
+    character_consistency: bool = False,
+    project_seed: int | None = None,
+    check_duplicates: bool = False,
+    progress_cb=None,
+    save_cb=None,
+) -> dict:
+    """Verify every scene image and repair only what's broken.
+
+    Pass 1 — failed/missing character portraits are re-rendered (they feed the
+    scene references). Pass 2 — failed or missing slots are regenerated with an
+    escalation ladder: unchanged retry → softened prompt → LLM rewrite; files
+    from a crashed run that exist on disk but were never recorded are adopted
+    for free. Pass 3 (opt-in) — existing images are screened for duplicated
+    figures via Claude vision and regenerated once when flagged.
+
+    ``progress_cb(phase_text)`` reports human-readable progress; ``save_cb()``
+    persists the script after every mutation. Returns a summary dict.
+    """
+    import asyncio
+
+    scenes = script.get("scenes") or []
+    cast = script.get("cast") or []
+    summary = {"adopted": 0, "repaired": 0, "still_failed": 0, "duplicates_regenerated": 0}
+
+    def _tick(phase: str):
+        if progress_cb:
+            progress_cb(phase)
+
+    # Pass 1: portraits (only meaningful for the reference-driven backend).
+    if backend == "nano_banana" and character_consistency and cast:
+        broken = [
+            m.get("id") for m in cast
+            if m.get("id") and (
+                m.get("reference_image_error")
+                or not m.get("reference_image_path")
+                or not (project_dir / m["reference_image_path"]).exists()
+            )
+        ]
+        if broken:
+            _tick(f"repairing {len(broken)} portrait(s)")
+            await generate_character_references(
+                cast=cast, project_dir=project_dir, backend=backend,
+                style_prompt=style_prompt, project_seed=project_seed, only_ids=broken,
+            )
+            if save_cb:
+                save_cb()
+
+    style_anchor: Path | None = None
+    for sc in scenes:
+        for rel in sc.get("image_paths") or []:
+            p = project_dir / rel
+            if p.exists():
+                style_anchor = p
+                break
+        if style_anchor:
+            break
+
+    # Pass 2: failed / missing / orphaned slots.
+    failures = find_failed_images(scenes, project_dir)
+    throttle = backend in ("replicate", "nano_banana")
+    done = 0
+    for item in failures:
+        scene = scenes[item["scene_pos"]]
+        i = item["img_idx"]
+        done += 1
+        if item["kind"] == "adopt":
+            _rebuild_scene_image_paths(scene, project_dir)
+            _finalize_scene_image_errors(scene)
+            summary["adopted"] += 1
+            if save_cb:
+                save_cb()
+            continue
+
+        _tick(f"repairing image {done}/{len(failures)} (scene {item['scene_index'] + 1})")
+        prompt = item["prompt"]
+        candidates: list[str] = [prompt]
+        softened = _make_gpt_image_safe_text(prompt)
+        if softened and softened != prompt:
+            candidates.append(softened)
+
+        ok = False
+        last_err: str | None = item["reason"]
+        for attempt_no, candidate in enumerate(candidates):
+            if throttle:
+                await asyncio.sleep(config.REPLICATE_DELAY_SECONDS)
+            ok, err = await generate_one_image(
+                scene, i, project_dir, backend, style_prompt, lora_keys,
+                project_seed, cast, character_consistency, style_anchor,
+                prompt_override=candidate if candidate != prompt else None,
+                seed_bump=attempt_no + 1,
+            )
+            if ok:
+                break
+            last_err = err
+
+        if not ok:
+            rewritten = await _rewrite_prompt_via_llm(prompt, last_err or "unknown failure")
+            if rewritten:
+                if throttle:
+                    await asyncio.sleep(config.REPLICATE_DELAY_SECONDS)
+                ok, err = await generate_one_image(
+                    scene, i, project_dir, backend, style_prompt, lora_keys,
+                    project_seed, cast, character_consistency, style_anchor,
+                    prompt_override=rewritten, seed_bump=len(candidates) + 1,
+                )
+                if not ok:
+                    last_err = err
+
+        summary["repaired" if ok else "still_failed"] += 1
+        if not ok and last_err:
+            _record_scene_image_error(scene, i, f"Repair failed after retries: {last_err}")
+        if save_cb:
+            save_cb()
+
+    # Pass 3 (opt-in): duplicated-figure screening of existing images.
+    if check_duplicates:
+        slots = []
+        for pos, scene in enumerate(scenes):
+            idx = scene.get("index", pos)
+            errors = scene.get("image_errors") or []
+            for i, prompt in enumerate(_scene_prompts(scene)):
+                if i < len(errors) and errors[i]:
+                    continue  # known-bad slot; pass 2 already handled it
+                p = project_dir / _image_rel_path(idx, i)
+                if p.exists():
+                    slots.append((pos, i, prompt, p))
+        for n, (pos, i, prompt, p) in enumerate(slots):
+            scene = scenes[pos]
+            _tick(f"screening for duplicated figures {n + 1}/{len(slots)}")
+            if not await check_duplicated_figures(p, prompt):
+                continue
+            log.info(f"Duplicated figures flagged in {p.name} — regenerating once")
+            if throttle:
+                await asyncio.sleep(config.REPLICATE_DELAY_SECONDS)
+            ok, err = await generate_one_image(
+                scene, i, project_dir, backend, style_prompt, lora_keys,
+                project_seed, cast, character_consistency, style_anchor,
+                seed_bump=17,
+            )
+            if ok:
+                summary["duplicates_regenerated"] += 1
+            elif err:
+                _record_scene_image_error(scene, i, f"Duplicate-fix regeneration failed: {err}")
+            if save_cb:
+                save_cb()
+
+    return summary
 
 
 async def _async_sleep(seconds: float):

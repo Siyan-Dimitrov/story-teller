@@ -126,7 +126,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
   const [imageStyles, setImageStyles] = useState<ImageStyle[]>([])
   const [batchStyleId, setBatchStyleId] = useState('')
   const [batchCustomStylePrompt, setBatchCustomStylePrompt] = useState('')
-  const [batchCharacterConsistency, setBatchCharacterConsistency] = useState(false)
+  const [batchCharacterConsistency, setBatchCharacterConsistency] = useState(true)
 
   // Collapsible book groups
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())

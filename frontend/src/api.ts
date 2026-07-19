@@ -70,6 +70,15 @@ export interface ShortItem {
   pinned_comment?: string
 }
 
+export interface ImagesProgress {
+  active: boolean
+  phase: string
+  generated: number
+  total: number
+  scene_index?: number | null
+  error: string | null
+}
+
 export interface ShortsProgress {
   active: boolean
   done: number
@@ -377,10 +386,19 @@ export const api = {
     post<{ scenes: Scene[] }>(`/api/projects/${id}/voice`, body),
 
   runImages: (id: string, body: { backend: string; style_id?: string; custom_style_prompt?: string; style_prompt?: string; lora_keys?: string[]; character_consistency?: boolean }) =>
-    post<{ scenes: Scene[] }>(`/api/projects/${id}/images`, body),
+    post<{ status: string }>(`/api/projects/${id}/images`, body),
+
+  imagesProgress: (id: string) =>
+    request<ImagesProgress>(`/api/projects/${id}/images-progress`),
+
+  repairImages: (id: string, body: { backend: string; style_id?: string; custom_style_prompt?: string; style_prompt?: string; lora_keys?: string[]; character_consistency?: boolean; check_duplicates?: boolean }) =>
+    post<{ status: string }>(`/api/projects/${id}/images/repair`, body),
 
   regenerateSceneImages: (id: string, sceneIndex: number, body: { backend: string; style_id?: string; custom_style_prompt?: string; style_prompt?: string; lora_keys?: string[]; character_consistency?: boolean }) =>
     post<{ scene: Scene }>(`/api/projects/${id}/images/${sceneIndex}`, body),
+
+  regenerateSingleImage: (id: string, sceneIndex: number, imageIndex: number, body: { backend: string; style_id?: string; custom_style_prompt?: string; style_prompt?: string; lora_keys?: string[]; character_consistency?: boolean }) =>
+    post<{ scene: Scene }>(`/api/projects/${id}/images/${sceneIndex}/${imageIndex}`, body),
 
   runAnimate: (id: string) =>
     post<{ status: string }>(`/api/projects/${id}/animate`, {}),

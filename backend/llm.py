@@ -144,6 +144,92 @@ async def complete_with_cost(
     return text, cost_usd
 
 
+async def complete_vision(
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    model: str | None = None,
+    pass_name: str = "vision",
+    timeout: float | None = None,
+) -> str:
+    """One Claude completion that may Read local image files.
+
+    Same SDK plumbing as :func:`complete_with_cost`, but the Read tool is
+    allowed (and a few agent turns) so the model can view images referenced
+    by absolute path in the prompt.
+    """
+    try:
+        from claude_agent_sdk import (
+            ClaudeAgentOptions,
+            query,
+            AssistantMessage,
+            TextBlock,
+        )
+    except ImportError as e:
+        raise ClaudeBackendError(
+            "claude-agent-sdk is not installed. Run `pip install -r requirements.txt`."
+        ) from e
+
+    resolved_model = (model or config.CLAUDE_MODEL).strip()
+    resolved_timeout = timeout or config.CLAUDE_TIMEOUT_SECONDS
+
+    options = ClaudeAgentOptions(
+        system_prompt=system_prompt,
+        model=resolved_model,
+        max_turns=4,
+        allowed_tools=["Read"],
+        disallowed_tools=[
+            "Write", "Edit", "Bash", "Glob", "Grep",
+            "WebFetch", "WebSearch", "TaskCreate", "TaskUpdate", "TaskList",
+            "NotebookEdit",
+        ],
+        permission_mode="bypassPermissions",
+        setting_sources=[],
+    )
+
+    async def _do_call() -> str:
+        chunks: list[str] = []
+        async for message in query(prompt=user_prompt, options=options):
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock):
+                        chunks.append(block.text)
+        return "".join(chunks).strip()
+
+    def _thread_run() -> str:
+        if sys.platform == "win32":
+            loop = asyncio.ProactorEventLoop()
+        else:
+            loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(
+                asyncio.wait_for(_do_call(), timeout=resolved_timeout)
+            )
+        finally:
+            loop.close()
+
+    try:
+        text = await asyncio.to_thread(_thread_run)
+    except asyncio.TimeoutError as e:
+        raise ClaudeBackendError(
+            f"Claude {pass_name} pass timed out after {resolved_timeout:.0f}s"
+        ) from e
+    except Exception as e:
+        msg = str(e).lower()
+        if "credential" in msg or "unauthorized" in msg or "auth" in msg or "login" in msg:
+            raise ClaudeAuthError(
+                "Claude Agent SDK could not authenticate. Run `claude login` once "
+                "to sign in with your Claude Code subscription, then retry."
+            ) from e
+        raise ClaudeBackendError(f"Claude {pass_name} pass failed: {e}") from e
+
+    # The final text turn is the answer; tool-use turns produce no TextBlocks.
+    if not text:
+        raise ClaudeBackendError(f"Claude {pass_name} pass returned no text content")
+    return text
+
+
 # ── JSON extraction helpers ──────────────────────────────────
 
 def strip_code_fences(text: str) -> str:
