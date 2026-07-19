@@ -33,13 +33,18 @@ from moviepy import (
     concatenate_videoclips,
 )
 
-from . import config
+from . import captions, config
 
 log = logging.getLogger(__name__)
 
 SW = config.SHORT_WIDTH
 SH = config.SHORT_HEIGHT
 FPS = config.SHORT_FPS
+
+try:
+    from .voice_gen import SCENE_TRAILING_SILENCE as _TRAILING_SILENCE
+except Exception:  # noqa: BLE001
+    _TRAILING_SILENCE = 0.7
 
 # Cinematic default palette (story tone, not the punchy facts-yellow).
 ACCENT = "#E8C26A"      # warm candlelight gold
@@ -82,17 +87,6 @@ def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> li
 
 def _ease_out_cubic(t: float) -> float:
     return 1.0 - (1.0 - t) ** 3
-
-
-def _split_sentences(text: str) -> list[str]:
-    """Sentence splitter for caption chunks. Reuses voice_gen's splitter so
-    captions line up with how the narration was actually chunked for TTS."""
-    try:
-        from .voice_gen import _split_into_sentences
-        return [s.strip() for s in _split_into_sentences(text) if s and s.strip()]
-    except Exception:  # noqa: BLE001
-        import re
-        return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text.strip()) if s.strip()]
 
 
 # ── vignette overlay ────────────────────────────────────────────
@@ -241,64 +235,82 @@ def _headline_clip(text: str, duration: float) -> VideoClip:
     return _static_overlay_clip(np.array(img), duration)
 
 
-def _caption_clip(text: str, duration: float) -> VideoClip:
-    img = Image.new("RGBA", (SW, SH), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    font_size = 60
-    font = _load_font(font_size, bold=True)
-    lines = _wrap_text(draw, text, font, int(SW * 0.86))[:4]
-    line_h = int(font_size * 1.2)
-    block_h = line_h * len(lines)
-    cur_y = int(SH * 0.66) - block_h // 2
-
-    accent = ImageColor.getrgb(ACCENT) + (255,)
-    for i, ln in enumerate(lines):
-        bbox = draw.textbbox((0, 0), ln, font=font)
-        x = (SW - (bbox[2] - bbox[0])) // 2
-        stroke = 6
-        for dx in (-stroke, 0, stroke):
-            for dy in (-stroke, 0, stroke):
-                if dx or dy:
-                    draw.text((x + dx, cur_y + dy), ln, font=font, fill=(0, 0, 0, 240))
-        draw.text((x, cur_y), ln, font=font, fill=(accent if i == 0 else (255, 255, 255, 255)))
-        cur_y += line_h
-
-    base = np.array(img)
-    rgb = base[:, :, :3].copy()
-    alpha = (base[:, :, 3] / 255.0).astype(np.float64)
-
-    def make_mask(t):
-        if t < 0.18:
-            return alpha * (t / 0.18)
-        if t > duration - 0.18:
-            return alpha * max(0.0, (duration - t) / 0.18)
-        return alpha
-
-    clip = VideoClip(lambda _t: rgb, duration=duration).with_fps(FPS)
-    mask = VideoClip(make_mask, duration=duration, is_mask=True).with_fps(FPS)
-    return clip.with_mask(mask)
+def _load_caption_font(size: int) -> ImageFont.FreeTypeFont:
+    """Heavy condensed sans for karaoke captions (Impact-style). The serif
+    Georgia stays on the hook/CTA cards; captions need punch and legibility."""
+    for c in ("impact.ttf", "ariblk.ttf", "arialbd.ttf",
+              "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"):
+        try:
+            return ImageFont.truetype(c, size)
+        except Exception:  # noqa: BLE001
+            continue
+    return ImageFont.load_default()
 
 
-def _build_caption_layers(narration: str, body_dur: float) -> list[VideoClip]:
+def _karaoke_chunk_layers(chunk: dict) -> list[VideoClip]:
+    """One overlay clip per word-state of a caption chunk: the whole chunk text
+    is visible for the chunk's interval, with the currently spoken word in the
+    accent color. Word states tile the interval exactly (no gaps/overlap)."""
+    display = [w.upper() for w in chunk["words"]] if config.SHORT_CAPTION_UPPERCASE \
+        else list(chunk["words"])
+    stroke = config.SHORT_CAPTION_STROKE
+    size = config.SHORT_CAPTION_FONT_SIZE
+    max_w = int(SW * 0.90)
+
+    probe = ImageDraw.Draw(Image.new("RGBA", (8, 8)))
+    text_line = " ".join(display)
+    font = _load_caption_font(size)
+    while size > 30 and probe.textbbox((0, 0), text_line, font=font,
+                                       stroke_width=stroke)[2] > max_w:
+        size -= 4
+        font = _load_caption_font(size)
+
+    space_w = probe.textlength(" ", font=font)
+    widths = [probe.textlength(d, font=font) for d in display]
+    total_w = sum(widths) + space_w * (len(display) - 1)
+    x0 = (SW - total_w) / 2
+    y = int(SH * config.SHORT_CAPTION_Y) - size // 2
+    active = ImageColor.getrgb(config.SHORT_CAPTION_ACTIVE_COLOR) + (255,)
+
+    bounds = list(chunk["starts"]) + [chunk["end"]]
+    clips: list[VideoClip] = []
+    for ai in range(len(display)):
+        img = Image.new("RGBA", (SW, SH), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        x = x0
+        for wi, txt in enumerate(display):
+            fill = active if wi == ai else (255, 255, 255, 255)
+            d.text((x, y), txt, font=font, fill=fill,
+                   stroke_width=stroke, stroke_fill=(0, 0, 0, 235))
+            x += widths[wi] + space_w
+        start, end = bounds[ai], bounds[ai + 1]
+        dur = max(0.06, end - start)
+        clips.append(_static_overlay_clip(np.array(img), dur).with_start(start))
+    return clips
+
+
+def _build_caption_layers(scene: dict, project_dir: Path, body_dur: float) -> list[VideoClip]:
+    """Karaoke captions for a scene: word timings (whisper-aligned when
+    available, estimated otherwise) grouped into few-word chunks with the
+    spoken word highlighted."""
+    narration = (scene.get("narration") or "").strip()
     if not narration or body_dur <= 0:
         return []
-    sentences = _split_sentences(narration)
-    if not sentences:
+    audio_rel = scene.get("audio_path")
+    audio_path = (project_dir / audio_rel) if audio_rel else None
+    speech_dur = max(1.0, body_dur - _TRAILING_SILENCE)
+
+    words = captions.get_word_timings(narration, audio_path, speech_dur)
+    if not words:
         return []
-    total_chars = sum(len(s) for s in sentences)
     layers: list[VideoClip] = []
-    cursor = 0.0
-    for s in sentences:
-        if cursor >= body_dur - 0.05:
+    for chunk in captions.build_chunks(words):
+        if chunk["start"] >= body_dur - 0.1:
             break
-        share = (len(s) / total_chars) if total_chars else (1.0 / len(sentences))
-        dur = max(1.4, body_dur * share)
-        if dur > body_dur - cursor:
-            dur = body_dur - cursor
-            if dur < 0.4:
-                break
-        layers.append(_caption_clip(s, dur).with_start(cursor))
-        cursor += dur
+        if chunk["end"] > body_dur:
+            chunk["end"] = body_dur
+            chunk["starts"] = [min(s, body_dur - 0.06) for s in chunk["starts"]]
+        layers.extend(_karaoke_chunk_layers(chunk))
     return layers
 
 
@@ -428,7 +440,7 @@ def render_short_from_final(
         headline = (hook or "").strip()
         if headline:
             layers.append(_headline_clip(headline, min(dur, max(2.5, dur * 0.4))))
-        layers.extend(_build_caption_layers(scene.get("narration", ""), dur))
+        layers.extend(_build_caption_layers(scene, project_dir, dur))
         if cta_text:
             cta_start = max(0.0, dur - config.SHORT_CTA_LEAD)
             layers.append(_cta_clip(cta_text, dur - cta_start).with_start(cta_start))
@@ -552,7 +564,7 @@ def render_short_from_stills(
             layers.append(_headline_clip(headline, head_dur))
 
         # Captions across the body.
-        layers.extend(_build_caption_layers(scene.get("narration", ""), body_dur))
+        layers.extend(_build_caption_layers(scene, project_dir, body_dur))
 
         # CTA card over the closing seconds (through the silent tail).
         if cta_text:

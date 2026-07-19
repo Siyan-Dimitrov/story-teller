@@ -230,6 +230,25 @@ SHORT_REFRAME = os.getenv("SHORT_REFRAME", "fit").strip()
 #   "stills"   — re-render from the landscape scene images (cover-crop).
 SHORT_SOURCE = os.getenv("SHORT_SOURCE", "portrait").strip()
 
+# ── Shorts captions (karaoke word-highlight) ─────────────────
+# Timing engine: "whisper" force-aligns the narration WAV with faster-whisper
+# (exact word timings, cached in a sidecar JSON beside the WAV); "estimate"
+# allocates timings by word length with sentence-pause weighting. Whisper
+# silently falls back to estimate when the package/model is unavailable or
+# the alignment doesn't match the caption text (e.g. localized narration).
+SHORT_CAPTION_ALIGNMENT = os.getenv("SHORT_CAPTION_ALIGNMENT", "whisper").strip()
+SHORT_CAPTION_WHISPER_MODEL = os.getenv("SHORT_CAPTION_WHISPER_MODEL", "base").strip()
+# Chunking: captions show a few words at a time, highlighting the spoken word.
+SHORT_CAPTION_MAX_WORDS = int(os.getenv("SHORT_CAPTION_MAX_WORDS", "4"))
+SHORT_CAPTION_MAX_CHARS = int(os.getenv("SHORT_CAPTION_MAX_CHARS", "20"))
+SHORT_CAPTION_FONT_SIZE = int(os.getenv("SHORT_CAPTION_FONT_SIZE", "68"))
+SHORT_CAPTION_STROKE = int(os.getenv("SHORT_CAPTION_STROKE", "8"))
+SHORT_CAPTION_UPPERCASE = os.getenv("SHORT_CAPTION_UPPERCASE", "true").strip().lower() == "true"
+# Active-word color — brand gold by default (set "yellow" for the classic look).
+SHORT_CAPTION_ACTIVE_COLOR = os.getenv("SHORT_CAPTION_ACTIVE_COLOR", "#E8C26A").strip()
+# Vertical anchor of the caption row as a fraction of frame height.
+SHORT_CAPTION_Y = float(os.getenv("SHORT_CAPTION_Y", "0.66"))
+
 # ── Claude text generation ───────────────────────────────────
 # All text generation (scripts, critic, classification, metadata) runs on
 # Claude via the Agent SDK, which reads OAuth credentials from
