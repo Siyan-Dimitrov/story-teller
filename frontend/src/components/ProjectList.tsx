@@ -60,7 +60,7 @@ const STEP_LABELS: Record<string, string> = {
   assembling: 'Assembling...',
 }
 
-type SourceMode = 'grimm' | 'search' | 'online' | 'custom'
+type SourceMode = 'grimm' | 'search' | 'online' | 'custom' | 'reel'
 
 export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id: string) => void; onBatchStart?: (groupId: string) => void }) {
   const [projects, setProjects] = useState<ProjectSummary[]>([])
@@ -82,6 +82,8 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
 
   // Custom story state
   const [customPrompt, setCustomPrompt] = useState('')
+  const [recipeText, setRecipeText] = useState('')
+  const [reelSeconds, setReelSeconds] = useState(25)
 
   // Story search state
   const [searchQuery, setSearchQuery] = useState('')
@@ -570,11 +572,15 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
         custom_prompt = `Adapt this public domain story from Project Gutenberg: "${selectedOnline.title}" by ${authorStr}.\n\nSubjects: ${selectedOnline.subjects.join(', ')}\n\nText preview:\n${onlinePreview}`
       } else if (sourceMode === 'custom') {
         custom_prompt = customPrompt
+      } else if (sourceMode === 'reel') {
+        custom_prompt = recipeText
       }
 
       const proj = await api.createProject({
         source_tale,
         custom_prompt,
+        kind: sourceMode === 'reel' ? 'reel' : 'story',
+        target_seconds: sourceMode === 'reel' ? reelSeconds : undefined,
         target_minutes: targetMinutes,
         claude_model: claudeModel,
         pipeline_writer_model: perPassEnabled ? writerModel : undefined,
@@ -688,6 +694,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                 ['search', 'AI Suggestions'],
                 ['online', 'Search Online'],
                 ['custom', 'Custom / Original'],
+                ['reel', 'Recipe Reel'],
               ] as [SourceMode, string][]).map(([mode, label]) => (
                 <button
                   key={mode}
@@ -1283,7 +1290,39 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
               </div>
             )}
 
+            {/* Recipe reel */}
+            {sourceMode === 'reel' && (
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-xs text-[var(--text-secondary)] mb-1.5">Recipe</label>
+                  <p className="text-xs text-[var(--text-muted)] mb-2">
+                    Paste a known recipe — ingredients and steps. The script uses only what's here (no invented quantities or claims); the reel is a vertical 9:16 video with photoreal AI food shots, voiceover and captions.
+                  </p>
+                  <textarea
+                    value={recipeText}
+                    onChange={e => setRecipeText(e.target.value)}
+                    placeholder={'Flourless potato buns\n\nIngredients:\n- 1 medium potato, grated\n- 2 eggs\n- 2 tbsp Greek yogurt\n...\n\nSteps:\n1. ...'}
+                    rows={10}
+                    className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)] resize-y leading-relaxed"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-[var(--text-secondary)] mb-1.5">Target Length (seconds)</label>
+                  <input
+                    type="number"
+                    min={10}
+                    max={60}
+                    step={5}
+                    value={reelSeconds}
+                    onChange={e => setReelSeconds(Number(e.target.value))}
+                    className="w-28 bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
+                  />
+                </div>
+              </div>
+            )}
+
             {/* Adaptation tone */}
+            {sourceMode !== 'reel' && (
             <div>
               <label className="block text-xs text-[var(--text-secondary)] mb-1.5">Adaptation Tone</label>
               <select
@@ -1296,6 +1335,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                 ))}
               </select>
             </div>
+            )}
 
             <div className="grid grid-cols-2 gap-4">
               <div>
@@ -1361,7 +1401,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
 
             <button
               onClick={handleCreate}
-              disabled={creating || (sourceMode === 'search' && !selectedSearch) || (sourceMode === 'online' && !selectedOnline)}
+              disabled={creating || (sourceMode === 'search' && !selectedSearch) || (sourceMode === 'online' && !selectedOnline) || (sourceMode === 'reel' && !recipeText.trim())}
               className="px-4 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-sm font-medium transition-colors disabled:opacity-50"
             >
               {creating ? 'Creating...' : 'Create Project'}
@@ -1418,7 +1458,7 @@ export default function ProjectList({ onSelect, onBatchStart }: { onSelect: (id:
                     {p.title || 'Untitled'}
                   </div>
                   <div className="flex items-center gap-3 mt-0.5 text-xs text-[var(--text-muted)]">
-                    <span>{p.source_tale || 'custom'}</span>
+                    <span>{p.kind === 'reel' ? 'recipe reel' : (p.source_tale || 'custom')}</span>
                     <span className="flex items-center gap-1">
                       <Clock size={10} />
                       {new Date(p.created_at).toLocaleDateString()}

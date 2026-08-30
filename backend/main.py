@@ -24,6 +24,7 @@ from . import script_gen, claude_script_gen, cast_gen, voice_gen, voice_director
 from . import url_guard
 from . import shorts as shorts_mod
 from . import shorts_director
+from . import reel
 from .video_assembly import assemble_video, get_assembly_progress, cancel_assembly
 from .animation import prepare_animations, get_animation_progress
 from .grimm_tales import list_tales, get_tale
@@ -435,6 +436,7 @@ async def list_projects():
             tone=p.get("tone", ""),
             target_minutes=p.get("target_minutes", 5.0),
             suggested_length=p.get("suggested_length"),
+            kind=p.get("kind", "story"),
             **get_text_stats(p),
         )
         for p in projects
@@ -481,7 +483,16 @@ async def create_project(req: CreateProjectRequest):
         target_minutes=req.target_minutes,
         tone=req.tone,
         custom_prompt=req.custom_prompt,
+        kind=req.kind,
     )
+    if req.kind == "reel":
+        store.update_state(
+            pid,
+            title="Recipe reel",
+            target_seconds=req.target_seconds or config.REEL_TARGET_SECONDS,
+            tone="bright, upbeat, appetizing",
+            narration_style="warm, upbeat food-creator voice — quick, friendly, enthusiastic",
+        )
     if req.source_tale:
         tale = get_tale(req.source_tale)
         if tale:
@@ -608,18 +619,25 @@ async def run_script(project_id: str, req: RunScriptRequest):
     store.update_state(project_id, step="generating_script", error=None)
 
     try:
-        script = await claude_script_gen.generate_script(
-            source_tale=state.get("source_tale", ""),
-            custom_prompt=req.custom_prompt or state.get("custom_prompt", ""),
-            target_minutes=req.target_minutes or state.get("target_minutes", 5.0),
-            tone=state.get("tone", ""),
-            voice_language=state.get("voice_language", "en"),
-            narration_style=state.get("narration_style", ""),
-            claude_model=req.claude_model or state.get("claude_model") or None,
-            pipeline_writer_model=req.pipeline_writer_model or state.get("pipeline_writer_model") or None,
-            pipeline_critic_model=req.pipeline_critic_model or state.get("pipeline_critic_model") or None,
-            pipeline_reviser_model=req.pipeline_reviser_model or state.get("pipeline_reviser_model") or None,
-        )
+        if state.get("kind") == "reel":
+            script = await reel.generate_script(
+                recipe_text=state.get("custom_prompt", ""),
+                target_seconds=state.get("target_seconds") or config.REEL_TARGET_SECONDS,
+                claude_model=req.claude_model or state.get("claude_model") or None,
+            )
+        else:
+            script = await claude_script_gen.generate_script(
+                source_tale=state.get("source_tale", ""),
+                custom_prompt=req.custom_prompt or state.get("custom_prompt", ""),
+                target_minutes=req.target_minutes or state.get("target_minutes", 5.0),
+                tone=state.get("tone", ""),
+                voice_language=state.get("voice_language", "en"),
+                narration_style=state.get("narration_style", ""),
+                claude_model=req.claude_model or state.get("claude_model") or None,
+                pipeline_writer_model=req.pipeline_writer_model or state.get("pipeline_writer_model") or None,
+                pipeline_critic_model=req.pipeline_critic_model or state.get("pipeline_critic_model") or None,
+                pipeline_reviser_model=req.pipeline_reviser_model or state.get("pipeline_reviser_model") or None,
+            )
         store.save_json(project_id, "script.json", script)
         store.update_state(
             project_id,
@@ -651,7 +669,11 @@ async def update_script(project_id: str, req: UpdateScriptRequest):
         if d.get("image_prompts"):
             d["image_prompt"] = d["image_prompts"][0]
         scenes.append(d)
+    # Keep top-level fields the editor doesn't send (visual_style, cast, reel
+    # hook/cta) instead of dropping them.
+    existing = store.load_json(project_id, "script.json") or {}
     script = {
+        **existing,
         "title": req.title,
         "synopsis": req.synopsis,
         "scenes": scenes,
@@ -1367,6 +1389,39 @@ async def render_shorts_endpoint(project_id: str, req: RenderShortsRequest):
 
     threading.Thread(target=_run, daemon=True).start()
     return {"status": "rendering", "count": len(indices), "scene_indices": indices}
+
+
+# ── Recipe reels ────────────────────────────────────────────
+
+@app.post("/api/projects/{project_id}/reel")
+async def build_reel(project_id: str):
+    """Stills → Seedance clips → render, cut to the already-generated narration."""
+    store.load_state(project_id)
+    script = store.load_json(project_id, "script.json")
+    if not script:
+        raise HTTPException(400, "No script found")
+    scenes = script.get("scenes") or []
+    if not scenes or not all(sc.get("audio_path") for sc in scenes):
+        raise HTTPException(400, "Generate the voice first — the reel is cut to the narration")
+    if reel.get_progress(project_id)["active"]:
+        return {"status": "already_building"}
+
+    def _done(updated: dict, result: dict | None, error: str | None):
+        store.save_json(project_id, "script.json", updated)
+        if error:
+            store.update_state(project_id, step="voiced", error=error)
+        else:
+            store.update_state(project_id, step="reel_assembled", error=None, reel=result)
+
+    store.update_state(project_id, step="building_reel", error=None)
+    reel.start_build(project_id, script, store.project_dir(project_id), _done)
+    return {"status": "building"}
+
+
+@app.get("/api/projects/{project_id}/reel/progress")
+async def reel_progress(project_id: str):
+    state = store.load_state(project_id)
+    return {**reel.get_progress(project_id), "reel": state.get("reel")}
 
 
 # ── Per-scene music suggestion ─────────────────────────────

@@ -215,7 +215,14 @@ def _describe_exception(e: Exception) -> str:
 
 # ── Core generation function ────────────────────────────────
 
-def _build_i2v_input(model: str, image_data_url: str, prompt: str, seed: int) -> dict:
+def _build_i2v_input(
+    model: str,
+    image_data_url: str,
+    prompt: str,
+    seed: int,
+    resolution: str | None = None,
+    aspect_ratio: str | None = None,
+) -> dict:
     """Build the model-specific Replicate input dict for the configured I2V model.
 
     Different I2V models use different parameter names and enums, so the shape
@@ -224,6 +231,20 @@ def _build_i2v_input(model: str, image_data_url: str, prompt: str, seed: int) ->
     """
     m = model.lower()
     duration = config.I2V_DURATION_SECONDS
+    resolution = resolution or config.I2V_RESOLUTION
+
+    if "seedance" in m:
+        # bytedance/seedance-2.x: `image` is the first frame. Native audio is
+        # off — narration/music are overlaid downstream.
+        return {
+            "image": image_data_url,
+            "prompt": prompt,
+            "duration": duration,
+            "resolution": resolution,
+            "aspect_ratio": aspect_ratio or "adaptive",
+            "generate_audio": False,
+            "seed": seed,
+        }
 
     if "kling" in m:
         # kwaivgi/kling-v2.1: requires `start_image` + `prompt`. There is NO
@@ -234,7 +255,7 @@ def _build_i2v_input(model: str, image_data_url: str, prompt: str, seed: int) ->
             "prompt": prompt,
             "negative_prompt": NEGATIVE_PROMPT,
             "duration": 10 if duration >= 10 else 5,
-            "mode": "pro" if config.I2V_RESOLUTION == "1080p" else "standard",
+            "mode": "pro" if resolution == "1080p" else "standard",
         }
 
     # Default: wan-video/wan2.x family.
@@ -243,7 +264,7 @@ def _build_i2v_input(model: str, image_data_url: str, prompt: str, seed: int) ->
         "prompt": prompt,
         "negative_prompt": NEGATIVE_PROMPT,
         "duration": duration,
-        "resolution": config.I2V_RESOLUTION,
+        "resolution": resolution,
         "seed": seed,
         # The model defaults audio_enabled=true, whose post-generation audio
         # step has been observed to fail (E006). We add our own audio later.
@@ -252,10 +273,15 @@ def _build_i2v_input(model: str, image_data_url: str, prompt: str, seed: int) ->
     }
 
 
-def _build_motion_prompt(scene_prompt: str, motion_preset: str, style_prompt: str) -> str:
-    """Build the I2V text prompt: style + scene + motion description."""
-    preset = I2V_PRESETS.get(motion_preset, I2V_PRESETS["animatediff_subtle"])
-    motion_desc = preset["motion"]
+def _build_motion_prompt(scene_prompt: str, motion_preset: str | None, style_prompt: str) -> str:
+    """Build the I2V text prompt: style + scene + motion description.
+
+    ``motion_preset=None`` means the scene prompt already describes the motion
+    (recipe reels), so no preset text is appended.
+    """
+    preset = None if motion_preset is None else \
+        I2V_PRESETS.get(motion_preset, I2V_PRESETS["animatediff_subtle"])
+    motion_desc = preset["motion"] if preset else ""
     parts = [p.strip() for p in (style_prompt, scene_prompt, motion_desc) if p and p.strip()]
     return ", ".join(parts)
 
@@ -266,30 +292,39 @@ async def generate_animatediff_clip(
     output_dir: Path,
     scene_index: int,
     img_index: int,
-    motion_preset: str = "animatediff_subtle",
+    motion_preset: str | None = "animatediff_subtle",
     style_prompt: str = "dark fairy tale, gothic storybook art, atmospheric, moody",
+    model: str | None = None,
+    resolution: str | None = None,
 ) -> Path | None:
     """Generate a motion clip from a still image via Replicate I2V.
 
     Kept under its old name so `animation.py` and `video_assembly.py` don't
     need to be rewired. Returns the path to a directory of PNG frames, or
     None on failure (which the caller treats as a depthflow fallback).
+    ``model``/``resolution`` override the configured story defaults (reels
+    use Seedance at 480p).
     """
     import replicate as _replicate
+    from PIL import Image as _PILImage
 
     if not config.REPLICATE_API_TOKEN:
         log.error("[I2V] REPLICATE_API_TOKEN missing — cannot run I2V")
         return None
 
+    model = model or config.REPLICATE_I2V_MODEL
+    resolution = resolution or config.I2V_RESOLUTION
     motion_prompt = _build_motion_prompt(prompt, motion_preset, style_prompt)
+    with _PILImage.open(image_path) as _im:
+        aspect_ratio = "9:16" if _im.height > _im.width else "16:9"
 
     clip_dir = output_dir / f"animatediff_s{scene_index:04d}_i{img_index}"
     clip_dir.mkdir(parents=True, exist_ok=True)
 
     log.info(
-        f"[I2V] Scene {scene_index} img {img_index}: model={config.REPLICATE_I2V_MODEL}, "
+        f"[I2V] Scene {scene_index} img {img_index}: model={model}, "
         f"preset={motion_preset}, duration={config.I2V_DURATION_SECONDS}s, "
-        f"resolution={config.I2V_RESOLUTION}"
+        f"resolution={resolution}"
     )
 
     try:
@@ -301,12 +336,13 @@ async def generate_animatediff_clip(
         # container's image fetch to fail with E006 "input was invalid").
         data_url = _image_to_data_url(image_path)
 
-        inp = _build_i2v_input(config.REPLICATE_I2V_MODEL, data_url, motion_prompt, seed)
+        inp = _build_i2v_input(model, data_url, motion_prompt, seed,
+                               resolution=resolution, aspect_ratio=aspect_ratio)
 
         loop = asyncio.get_event_loop()
         output = await loop.run_in_executor(
             None,
-            lambda: _replicate.run(config.REPLICATE_I2V_MODEL, input=inp),
+            lambda: _replicate.run(model, input=inp),
         )
 
         video_url = _extract_video_url(output)

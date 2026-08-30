@@ -30,6 +30,7 @@ from moviepy import (
     VideoFileClip,
     AudioFileClip,
     CompositeVideoClip,
+    concatenate_audioclips,
     concatenate_videoclips,
 )
 
@@ -509,6 +510,92 @@ def render_short(
 
 
 # ── stills renderer (fallback / no final.mp4) ──────────────────
+
+def _cover_crop(clip):
+    """Scale a clip to fill SW×SH and centre-crop the overflow."""
+    scale = max(SW / clip.w, SH / clip.h)
+    nw, nh = max(SW, round(clip.w * scale)), max(SH, round(clip.h * scale))
+    clip = clip.resized(new_size=(nw, nh))
+    return clip.cropped(x1=(nw - SW) // 2, y1=(nh - SH) // 2, width=SW, height=SH)
+
+
+def render_reel(script: dict, project_dir: Path, output_path: Path) -> tuple[Path, float]:
+    """Render a recipe reel: every scene's I2V clip cut to its narration (played
+    once at native speed, then frozen on the last frame if the narration runs
+    longer), continuous voiceover, karaoke captions, hook headline and CTA.
+    Scenes without a clip fall back to a Ken Burns move on their still.
+    Returns (path, duration)."""
+    scenes = [s for s in script.get("scenes") or [] if s.get("audio_path")]
+    if not scenes:
+        raise RuntimeError("Reel has no narrated scenes — run the voice step first")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    opened: list = []
+    try:
+        segments, audios, caption_layers = [], [], []
+        t = 0.0
+        for sc in scenes:
+            audio = AudioFileClip(str(project_dir / sc["audio_path"]))
+            opened.append(audio)
+            dur = audio.duration
+            clip_rel = sc.get("reel_clip_path")
+            if clip_rel and (project_dir / clip_rel).exists():
+                src = VideoFileClip(str(project_dir / clip_rel))
+                opened.append(src)
+                video = _cover_crop(src.without_audio())
+                if video.duration >= dur:
+                    video = video.subclipped(0, dur)
+                else:
+                    freeze = video.to_ImageClip(t=max(0.0, video.duration - 0.05))
+                    video = concatenate_videoclips(
+                        [video, freeze.with_duration(dur - video.duration)]
+                    )
+            else:
+                video = _ken_burns_vertical(project_dir / sc["image_path"], dur, "zoom_in")
+            segments.append(video.with_duration(dur))
+            audios.append(audio)
+            for layer in _build_caption_layers(sc, project_dir, dur):
+                caption_layers.append(layer.with_start(layer.start + t))
+            t += dur
+        total = t
+
+        # No vignette: food reels want the bright, clean look of the stills;
+        # the caption stroke carries legibility on its own.
+        layers = [concatenate_videoclips(segments)]
+        hook = (script.get("hook") or "").strip()
+        if hook:
+            layers.append(_headline_clip(hook, min(3.5, total)))
+        layers.extend(caption_layers)
+        cta = (script.get("cta") or "").strip()
+        if cta:
+            cta_dur = min(3.0, total)
+            layers.append(_cta_clip(cta, cta_dur).with_start(total - cta_dur))
+
+        final = (
+            CompositeVideoClip(layers, size=(SW, SH))
+            .with_duration(total)
+            .with_audio(concatenate_audioclips(audios))
+            .with_fps(FPS)
+        )
+        opened.append(final)
+        log.info("Rendering reel (%d beats, %.1fs) -> %s", len(scenes), total, output_path.name)
+        final.write_videofile(
+            str(output_path),
+            codec=config.SHORT_VIDEO_CODEC,
+            audio_codec=config.SHORT_AUDIO_CODEC,
+            fps=FPS,
+            preset="veryfast",
+            threads=0,
+            logger=None,
+        )
+        return output_path, round(total, 2)
+    finally:
+        for c in opened:
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001
+                pass
+
 
 def render_short_from_stills(
     scene: dict,

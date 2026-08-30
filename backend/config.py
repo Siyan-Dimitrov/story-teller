@@ -316,6 +316,16 @@ I2V_PROMPT_EXPANSION = os.getenv("I2V_PROMPT_EXPANSION", "1").strip() in ("1", "
 # Keep the downloaded source.mp4 on disk when frame extraction yields 0 frames,
 # so failures can be inspected instead of vanishing. Set to "1" to always delete.
 I2V_DELETE_SOURCE_MP4 = os.getenv("I2V_DELETE_SOURCE_MP4", "0").strip() in ("1", "true", "True", "yes")
+
+# ── Recipe reels ─────────────────────────────────────────────
+# Short vertical food videos: one Seedance clip per narrated beat. Seedance 2.5
+# won the 2026-08-30 food bake-off (test_food_i2v_ab.py); 480p (484x846) is
+# indistinguishable from 720p at phone size and costs $0.51 vs $1.16 per 5 s
+# clip. The reel renderer needs the clip's source.mp4, so keep
+# I2V_DELETE_SOURCE_MP4 off.
+REEL_I2V_MODEL = os.getenv("REEL_I2V_MODEL", "bytedance/seedance-2.5")
+REEL_I2V_RESOLUTION = os.getenv("REEL_I2V_RESOLUTION", "480p")
+REEL_TARGET_SECONDS = float(os.getenv("REEL_TARGET_SECONDS", "25"))
 # Frame loading still uses 8 fps for the assembly ping-pong cadence;
 # `_animatediff_clip` in video_assembly.py reads this.
 ANIMATEDIFF_DEFAULT_FPS = I2V_OUTPUT_FPS

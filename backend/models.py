@@ -29,6 +29,7 @@ class Scene(BaseModel):
     narration: str = ""
     image_prompt: str = ""
     image_prompts: list[str] = Field(default_factory=list)  # Multiple prompts per scene
+    motion_prompt: str = ""  # reels: the single I2V action for this beat
     characters: list[str] = Field(default_factory=list)  # cast ids appearing in this scene
     mood: str = "neutral"
     duration_hint: float = 10.0
@@ -55,6 +56,8 @@ class Script(BaseModel):
     title: str = ""
     synopsis: str = ""
     visual_style: str = ""  # per-story art direction, derived from the story itself
+    hook: str = ""  # reels: on-screen headline
+    cta: str = ""  # reels: closing on-screen question
     cast: list[CastMember] = Field(default_factory=list)  # recurring characters
     scenes: list[Scene] = Field(default_factory=list)
     target_minutes: float = 5.0
@@ -67,6 +70,9 @@ class Script(BaseModel):
 class ProjectState(BaseModel):
     project_id: str = ""
     step: str = "created"  # created | scripted | voiced | illustrated | animated | assembled
+    kind: str = "story"  # story | reel (reel: scripted | voiced | building_reel | reel_assembled)
+    target_seconds: Optional[float] = None  # reels only
+    reel: Optional[dict] = None  # {"path", "duration"} once a reel is rendered
     error: Optional[str] = None
     title: str = ""
     source_tale: str = ""
@@ -94,7 +100,9 @@ class ProjectState(BaseModel):
 
 class CreateProjectRequest(BaseModel):
     source_tale: str = ""
-    custom_prompt: str = ""
+    custom_prompt: str = ""  # for kind="reel": the recipe text
+    kind: str = "story"  # story | reel
+    target_seconds: Optional[float] = None  # reels only
     target_minutes: float = 5.0
     claude_model: Optional[str] = None  # base Claude model (used as default for all 3 roles)
     pipeline_writer_model: Optional[str] = None
@@ -278,6 +286,7 @@ class ProjectSummary(BaseModel):
     suggested_length: Optional[str] = None
     estimated_duration: float = 5.0  # Calculated from source text char count
     char_count: int = 0  # Source text character count
+    kind: str = "story"
 
 
 class BulkDeleteRequest(BaseModel):

@@ -23,6 +23,7 @@ export interface Scene {
   narration: string
   image_prompt: string
   image_prompts?: string[]
+  motion_prompt?: string
   characters?: string[]
   mood: string
   duration_hint: number
@@ -48,6 +49,9 @@ export interface Scene {
 export interface Script {
   title: string
   synopsis: string
+  visual_style?: string
+  hook?: string
+  cta?: string
   cast?: CastMember[]
   scenes: Scene[]
   target_minutes?: number
@@ -88,9 +92,26 @@ export interface ShortsProgress {
   stage?: string
 }
 
+export interface ReelResult {
+  path: string
+  duration: number
+}
+
+export interface ReelProgress {
+  active: boolean
+  stage: string
+  done: number
+  total: number
+  error: string | null
+  reel?: ReelResult | null
+}
+
 export interface ProjectState {
   project_id: string
   step: string
+  kind?: string
+  target_seconds?: number | null
+  reel?: ReelResult | null
   error?: string | null
   title: string
   source_tale: string
@@ -126,6 +147,7 @@ export interface ProjectSummary {
   suggested_length?: string
   estimated_duration: number
   char_count: number
+  kind?: string
 }
 
 export interface Tale {
@@ -365,7 +387,7 @@ export const api = {
   batchResume: (groupId: string) =>
     post<{ status: string }>(`/api/batch/${groupId}/resume`, {}),
 
-  createProject: (body: { source_tale: string; custom_prompt?: string; target_minutes: number; claude_model?: string; pipeline_writer_model?: string; pipeline_critic_model?: string; pipeline_reviser_model?: string; tone?: string }) =>
+  createProject: (body: { source_tale: string; custom_prompt?: string; kind?: string; target_seconds?: number; target_minutes: number; claude_model?: string; pipeline_writer_model?: string; pipeline_critic_model?: string; pipeline_reviser_model?: string; tone?: string }) =>
     post<ProjectState>('/api/projects', body),
   getProject: (id: string) => request<ProjectState>(`/api/projects/${id}`),
   duplicateProject: (id: string) => post<ProjectState>(`/api/projects/${id}/duplicate`),
@@ -450,4 +472,10 @@ export const api = {
     request<{ shorts: ShortItem[]; progress: ShortsProgress }>(`/api/projects/${id}/shorts`),
   shortsProgress: (id: string) =>
     request<ShortsProgress>(`/api/projects/${id}/shorts/progress`),
+
+  // ── Recipe reels ────────────────────────────────────────────
+  buildReel: (id: string) =>
+    post<{ status: string }>(`/api/projects/${id}/reel`, {}),
+  reelProgress: (id: string) =>
+    request<ReelProgress>(`/api/projects/${id}/reel/progress`),
 }

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import {
-  Scroll, Mic, ImageIcon, Sparkles, Film, Scissors,
+  Scroll, Mic, ImageIcon, Sparkles, Film, Scissors, Clapperboard,
   Check, Loader2, AlertCircle,
 } from 'lucide-react'
 import type { ProjectState } from '../api'
@@ -22,6 +22,7 @@ import ImagePanel from './ImagePanel'
 import AnimationPanel from './AnimationPanel'
 import VideoPanel from './VideoPanel'
 import ShortsPanel from './ShortsPanel'
+import ReelPanel from './ReelPanel'
 
 interface Props {
   project: ProjectState
@@ -37,7 +38,14 @@ const STEPS = [
   { key: 'shorts', label: 'Shorts', icon: Scissors },
 ] as const
 
-type StepKey = typeof STEPS[number]['key']
+// Recipe reels: stills + motion + render happen in one build step.
+const REEL_STEPS = [
+  { key: 'script', label: 'Script', icon: Scroll },
+  { key: 'voice', label: 'Voice', icon: Mic },
+  { key: 'reel', label: 'Reel', icon: Clapperboard },
+] as const
+
+type StepKey = typeof STEPS[number]['key'] | typeof REEL_STEPS[number]['key']
 
 const STEP_ORDER: Record<string, number> = {
   created: 0,
@@ -51,6 +59,8 @@ const STEP_ORDER: Record<string, number> = {
   animated: 4,
   assembled: 5,
   assembling: 4,
+  building_reel: 2,
+  reel_assembled: 3,
 }
 
 function stepDone(projectStep: string, tabIndex: number): boolean {
@@ -62,12 +72,15 @@ function stepActive(projectStep: string, tabIndex: number): boolean {
   const order = STEP_ORDER[projectStep] ?? 0
   return order === tabIndex && (
     projectStep.startsWith('generating') || projectStep === 'assembling' || projectStep === 'animating'
+    || projectStep === 'building_reel'
   )
 }
 
 export default function StoryWizard({ project, onRefresh }: Props) {
   const [activeTab, setActiveTab] = useState<StepKey>('script')
-  const canEditSettings = project.step === 'created'
+  const isReel = project.kind === 'reel'
+  const steps = isReel ? REEL_STEPS : STEPS
+  const canEditSettings = project.step === 'created' && !isReel
 
   const updateSetting = (updates: { tone?: string; target_minutes?: number; suggested_length?: string }) => {
     api.updateSettings(project.project_id, updates).then(() => onRefresh()).catch(() => {})
@@ -79,7 +92,7 @@ export default function StoryWizard({ project, onRefresh }: Props) {
       <div className="mb-4">
         <h2 className="text-xl font-semibold">{project.title || 'Untitled Story'}</h2>
         <div className="flex items-center gap-3 text-sm text-[var(--text-muted)] mt-1">
-          <span>{project.source_tale || 'Custom story'}</span>
+          <span>{isReel ? 'Recipe reel' : (project.source_tale || 'Custom story')}</span>
           {project.char_count && project.char_count > 0 && (
             <>
               <span>&middot;</span>
@@ -128,6 +141,8 @@ export default function StoryWizard({ project, onRefresh }: Props) {
                 ))}
               </select>
             </>
+          ) : isReel ? (
+            <span>~{project.target_seconds ?? 25}s target · 9:16</span>
           ) : (
             <span>{project.target_minutes} min target{project.suggested_length ? ` · ${project.suggested_length}` : ''}{project.tone ? ` · ${project.tone}` : ''}</span>
           )}
@@ -148,7 +163,7 @@ export default function StoryWizard({ project, onRefresh }: Props) {
 
       {/* Step tabs */}
       <div className="flex gap-1 mb-6 p-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border)]">
-        {STEPS.map((step, i) => {
+        {steps.map((step, i) => {
           const done = stepDone(project.step, i)
           const running = stepActive(project.step, i)
           const Icon = step.icon
@@ -180,7 +195,10 @@ export default function StoryWizard({ project, onRefresh }: Props) {
         <ScriptPanel project={project} onRefresh={onRefresh} onNext={() => setActiveTab('voice')} />
       )}
       {activeTab === 'voice' && (
-        <VoicePanel project={project} onRefresh={onRefresh} onNext={() => setActiveTab('images')} />
+        <VoicePanel project={project} onRefresh={onRefresh} onNext={() => setActiveTab(isReel ? 'reel' : 'images')} />
+      )}
+      {activeTab === 'reel' && (
+        <ReelPanel project={project} onRefresh={onRefresh} />
       )}
       {activeTab === 'images' && (
         <ImagePanel project={project} onRefresh={onRefresh} onNext={() => setActiveTab('animate')} />
