@@ -54,6 +54,7 @@ async def _generate_minimax_scene(
     voice_id: str,
     emotion: str,
     language: str,
+    speed: float | None = None,
 ) -> bytes:
     """Generate one scene's speech via MiniMax on Replicate. Returns WAV bytes."""
     import replicate as _replicate
@@ -62,7 +63,7 @@ async def _generate_minimax_scene(
         "text": _clean_for_minimax(text),
         "voice_id": voice_id,
         "emotion": emotion if emotion in voice_director.EMOTIONS else "auto",
-        "speed": config.MINIMAX_SPEED,
+        "speed": speed or config.MINIMAX_SPEED,
         "audio_format": "wav",
         "sample_rate": config.MINIMAX_SAMPLE_RATE,
         "language_boost": MINIMAX_LANGUAGE_BOOST.get(language, "Automatic"),
@@ -151,14 +152,19 @@ async def generate_all_scenes(
     language: str,
     project_dir: Path,
     script_meta: dict | None = None,
+    speed: float | None = None,
+    trailing_silence: float | None = None,
 ) -> list[dict]:
     """Generate voice for all scenes.
 
     profile_id "auto" (or empty) lets the voice director pick the narrator
     voice; a concrete voice_id pins it and the director only assigns
-    per-scene emotions. Returns updated scenes with audio_path,
-    audio_duration, voice_id and emotion.
+    per-scene emotions. ``speed``/``trailing_silence`` override the story
+    defaults (reels talk faster with almost no gap between beats). Returns
+    updated scenes with audio_path, audio_duration, voice_id and emotion.
     """
+    if trailing_silence is None:
+        trailing_silence = SCENE_TRAILING_SILENCE
     audio_dir = project_dir / "audio"
     audio_dir.mkdir(exist_ok=True)
 
@@ -196,11 +202,11 @@ async def generate_all_scenes(
                 scene["line_durations"] = line_durations
             else:
                 wav_bytes = await _generate_minimax_scene(
-                    text, voice_id, emotion, language
+                    text, voice_id, emotion, language, speed=speed
                 )
                 scene.pop("line_durations", None)
             output_path.write_bytes(wav_bytes)
-            duration = _append_trailing_silence(output_path, SCENE_TRAILING_SILENCE)
+            duration = _append_trailing_silence(output_path, trailing_silence)
             scene["audio_path"] = str(output_path.relative_to(project_dir))
             scene["audio_duration"] = duration
             scene["voice_id"] = voice_id

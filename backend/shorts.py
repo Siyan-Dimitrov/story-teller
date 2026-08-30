@@ -315,7 +315,57 @@ def _build_caption_layers(scene: dict, project_dir: Path, body_dur: float) -> li
     return layers
 
 
-def _cta_clip(text: str, duration: float) -> VideoClip:
+def _reel_word_layers(scene: dict, project_dir: Path, body_dur: float) -> list[VideoClip]:
+    """Reference-reel captions: ONE word at a time, big, bold-italic, mid-frame,
+    white with a heavy black stroke. Each word holds until the next starts."""
+    narration = (scene.get("narration") or "").strip()
+    if not narration or body_dur <= 0:
+        return []
+    audio_rel = scene.get("audio_path")
+    audio_path = (project_dir / audio_rel) if audio_rel else None
+    speech_dur = max(1.0, body_dur - config.REEL_TRAILING_SILENCE)
+    words = captions.get_word_timings(narration, audio_path, speech_dur)
+    if not words:
+        return []
+
+    stroke = config.SHORT_CAPTION_STROKE + 2
+    max_w = int(SW * 0.86)
+    layers: list[VideoClip] = []
+    for wi, w in enumerate(words):
+        text = w["word"].upper()
+        size = config.REEL_CAPTION_FONT_SIZE
+        font = _load_caption_font(size)
+        probe = ImageDraw.Draw(Image.new("RGBA", (8, 8)))
+        while size > 40 and probe.textbbox((0, 0), text, font=font, stroke_width=stroke)[2] > max_w:
+            size -= 6
+            font = _load_caption_font(size)
+        bbox = probe.textbbox((0, 0), text, font=font, stroke_width=stroke)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        shear = 0.18
+        pad = int(th * shear) + 4
+        word_img = Image.new("RGBA", (tw + pad * 2, th + 8), (0, 0, 0, 0))
+        ImageDraw.Draw(word_img).text(
+            (pad - bbox[0], 4 - bbox[1]), text, font=font, fill=(255, 255, 255, 255),
+            stroke_width=stroke, stroke_fill=(0, 0, 0, 240),
+        )
+        # Fake italic: shear right by `shear` (x' = x + shear*y, re-centred).
+        word_img = word_img.transform(
+            word_img.size, Image.AFFINE, (1, shear, -shear * word_img.height / 2, 0, 1, 0),
+            resample=Image.BICUBIC,
+        )
+        frame = Image.new("RGBA", (SW, SH), (0, 0, 0, 0))
+        frame.paste(word_img, ((SW - word_img.width) // 2,
+                               int(SH * config.REEL_CAPTION_Y) - word_img.height // 2))
+        start = w["start"]
+        end = words[wi + 1]["start"] if wi + 1 < len(words) else min(body_dur, w["end"] + 0.35)
+        if start >= body_dur - 0.05:
+            break
+        dur = max(0.08, min(end, body_dur) - start)
+        layers.append(_static_overlay_clip(np.array(frame), dur).with_start(start))
+    return layers
+
+
+def _cta_clip(text: str, duration: float, y: float = 0.5) -> VideoClip:
     img = Image.new("RGBA", (SW, SH), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     font = _load_font(52, bold=True)
@@ -325,7 +375,7 @@ def _cta_clip(text: str, duration: float) -> VideoClip:
     panel_w = tw + pad_x * 2
     panel_h = th + pad_y * 2 + 6
     panel_x = (SW - panel_w) // 2
-    panel_y = int(SH * 0.5) - panel_h // 2
+    panel_y = int(SH * y) - panel_h // 2
     accent = ImageColor.getrgb(ACCENT) + (255,)
     draw.rounded_rectangle(
         [(panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h)],
@@ -554,7 +604,7 @@ def render_reel(script: dict, project_dir: Path, output_path: Path) -> tuple[Pat
                 video = _ken_burns_vertical(project_dir / sc["image_path"], dur, "zoom_in")
             segments.append(video.with_duration(dur))
             audios.append(audio)
-            for layer in _build_caption_layers(sc, project_dir, dur):
+            for layer in _reel_word_layers(sc, project_dir, dur):
                 caption_layers.append(layer.with_start(layer.start + t))
             t += dur
         total = t
@@ -569,7 +619,8 @@ def render_reel(script: dict, project_dir: Path, output_path: Path) -> tuple[Pat
         cta = (script.get("cta") or "").strip()
         if cta:
             cta_dur = min(3.0, total)
-            layers.append(_cta_clip(cta, cta_dur).with_start(total - cta_dur))
+            # Above the mid-frame word captions.
+            layers.append(_cta_clip(cta, cta_dur, y=0.32).with_start(total - cta_dur))
 
         final = (
             CompositeVideoClip(layers, size=(SW, SH))

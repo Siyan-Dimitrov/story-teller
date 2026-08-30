@@ -9,8 +9,7 @@ interface Props {
 }
 
 const STAGE_LABEL: Record<string, string> = {
-  stills: 'Rendering 9:16 stills',
-  clips: 'Animating clips (Seedance)',
+  beats: 'Building beats in order (still → Seedance clip → next still)',
   render: 'Cutting to narration + captions',
 }
 
@@ -78,9 +77,9 @@ export default function ReelPanel({ project, onRefresh }: Props) {
           <div>
             <h3 className="text-sm font-medium text-[var(--text-primary)]">Build reel</h3>
             <p className="text-xs text-[var(--text-muted)] mt-0.5">
-              One photoreal 9:16 still per beat (Nano Banana), one 5 s motion clip per still (Seedance 2.5 @ 480p),
-              cut to the voiceover with karaoke captions. About $0.55 per beat — {scenes.length} beats ≈ ${(scenes.length * 0.55).toFixed(2)}.
-              Re-runs only regenerate beats whose prompts changed.
+              One continuous take: each beat's 9:16 still is an edit of the previous clip's last frame (Nano Banana), then a 5 s motion clip (Seedance 2.5 @ 480p),
+              cut to the voiceover with one-word captions. About $0.55 and ~4 min per beat — {scenes.length} beats ≈ ${(scenes.length * 0.55).toFixed(2)}.
+              Re-runs regenerate from the first beat whose prompt changed.
             </p>
           </div>
           <button
@@ -102,9 +101,17 @@ export default function ReelPanel({ project, onRefresh }: Props) {
         )}
 
         {busy && progress && (
-          <div className="text-xs text-[var(--accent)]">
-            {STAGE_LABEL[progress.stage] || 'Working'}…
-            {progress.stage !== 'render' && progress.total > 0 && <> {progress.done}/{progress.total}</>}
+          <div className="space-y-1.5">
+            <div className="text-xs text-[var(--accent)]">
+              {STAGE_LABEL[progress.stage] || 'Working'}…
+              {progress.stage !== 'render' && progress.total > 0 && <> {progress.done}/{progress.total}</>}
+            </div>
+            <div className="h-1.5 rounded-full bg-[var(--bg-tertiary)] overflow-hidden">
+              <div
+                className="h-full rounded-full bg-[var(--accent)] transition-all duration-700"
+                style={{ width: `${progress.stage === 'render' ? 95 : progress.total ? Math.round((progress.done / (progress.total + 1)) * 100) : 5}%` }}
+              />
+            </div>
           </div>
         )}
         {progress?.error && !busy && (

@@ -601,15 +601,19 @@ def _build_nano_banana_prompt(
     has_refs: bool,
     ref_labels: list[str] | None = None,
     style_reference_only: bool = False,
+    directive: str | None = None,
 ) -> str:
     """Compose the Nano Banana prompt: style art-direction + scene + an
-    explicit reference directive (identity-bound when labels are known)."""
+    explicit reference directive (identity-bound when labels are known;
+    ``directive`` replaces the built-in ones when the caller knows better)."""
     if style_prompt and prompt:
         full = f"{style_prompt}. {prompt}"
     else:
         full = style_prompt or prompt
     if not has_refs:
         return full
+    if directive:
+        return full + directive
     if style_reference_only:
         return full + _STYLE_ANCHOR_DIRECTIVE
     if ref_labels:
@@ -646,6 +650,7 @@ async def generate_image_nano_banana(
     lora_keys: list[str] | None = None,  # accepted+ignored for call-site uniformity
     reference_labels: list[str] | None = None,
     style_reference_only: bool = False,
+    reference_directive: str | None = None,
 ) -> Path:
     """Generate an image with Google's Nano Banana model on Replicate.
 
@@ -671,6 +676,7 @@ async def generate_image_nano_banana(
             "prompt": _build_nano_banana_prompt(
                 scene_text, style_prompt, bool(refs),
                 ref_labels=labels, style_reference_only=style_reference_only,
+                directive=reference_directive,
             ),
             "output_format": config.NANO_BANANA_OUTPUT_FORMAT,
             "aspect_ratio": aspect_ratio or _flux_aspect_ratio(),

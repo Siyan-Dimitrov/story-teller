@@ -36,7 +36,15 @@ MOTION_SUFFIX = (
     "Photoreal, natural light, realistic hands with five fingers, "
     "no text, no captions, no watermark."
 )
-CLIP_CONCURRENCY = 3  # Replicate throttles creation bursts on low-credit accounts
+# Each still after the first is an edit of the previous clip's last frame, so
+# the reel reads as one continuous take where every step adds to the picture.
+CONTINUITY_DIRECTIVE = (
+    " The reference image is the previous shot of this exact scene. Keep the "
+    "same camera angle, framing, kitchen, counter, bowl, tray, utensils, "
+    "lighting and hands. Change ONLY what this prompt describes — the food's "
+    "new state and the action — so the image reads as the next moment of the "
+    "same continuous take."
+)
 
 
 async def generate_script(
@@ -49,7 +57,7 @@ async def generate_script(
     if not recipe_text:
         raise ValueError("A recipe reel needs the recipe text (ingredients + steps)")
     system = (config.CLAUDE_PROMPTS_DIR / "reel_writer_system.md").read_text(encoding="utf-8")
-    words = int(target_seconds * config.NARRATION_WPM / 60)
+    words = int(target_seconds * config.REEL_NARRATION_WPM / 60)
     user = (
         f"Target: about {target_seconds:.0f} seconds of narration ≈ {words} words "
         f"total across all beats.\n\nRECIPE:\n{recipe_text}"
@@ -68,7 +76,7 @@ async def generate_script(
         sc["motion_prompt"] = (sc.get("motion_prompt") or "").strip()
         sc.setdefault("mood", "upbeat")
         n_words = len((sc.get("narration") or "").split())
-        sc["duration_hint"] = round(n_words / config.NARRATION_WPM * 60, 1)
+        sc["duration_hint"] = round(n_words / config.REEL_NARRATION_WPM * 60, 1)
     script["visual_style"] = (script.get("visual_style") or "").strip() or DEFAULT_STYLE
     script["target_seconds"] = target_seconds
     return script
@@ -111,8 +119,8 @@ def start_build(
         if _tasks.get(project_id, {}).get("active"):
             return False
         _tasks[project_id] = {
-            "active": True, "stage": "stills", "done": 0,
-            "total": len(script.get("scenes") or []), "error": None,
+            "active": True, "stage": "beats", "done": 0,
+            "total": 2 * len(script.get("scenes") or []), "error": None,
         }
 
     def _run():
@@ -137,59 +145,54 @@ async def _build(project_id: str, script: dict, project_dir: Path) -> dict:
     images_dir = project_dir / "images"
     clips_dir = project_dir / "clips"
 
-    # 1. Stills — beat 1 first, the rest anchored on it so props/light match.
-    #    A still is only re-rendered when its prompt changed (re-runs are free).
-    _set(project_id, stage="stills", done=0, total=len(scenes))
-    anchor: Path | None = None
-    changed: set[int] = set()
+    # 1. Beats, strictly in order: still → clip → next still. Every still after
+    #    the first is an edit of the previous clip's LAST FRAME, so each step
+    #    visibly adds to the same picture. A beat is only regenerated when its
+    #    prompt changed — and then every beat after it, since they chain.
+    _set(project_id, stage="beats", done=0, total=2 * len(scenes))
+    prev_frame: Path | None = None
+    dirty = False
     for i, sc in enumerate(scenes):
-        out = images_dir / f"scene_{i:04d}_img_0.png"
-        if not out.exists() or sc.get("reel_still_prompt") != sc["image_prompt"]:
+        still = images_dir / f"scene_{i:04d}_img_0.png"
+        if dirty or not still.exists() or sc.get("reel_still_prompt") != sc["image_prompt"]:
             await image_gen.generate_image_nano_banana(
-                sc["image_prompt"], style, out, aspect_ratio="9:16",
-                reference_images=[anchor] if anchor else None,
-                style_reference_only=anchor is not None,
+                sc["image_prompt"], style, still, aspect_ratio="9:16",
+                reference_images=[prev_frame] if prev_frame else None,
+                reference_directive=CONTINUITY_DIRECTIVE if prev_frame else None,
             )
             sc["reel_still_prompt"] = sc["image_prompt"]
-            changed.add(i)
-        sc["image_path"] = out.relative_to(project_dir).as_posix()
+            dirty = True
+        sc["image_path"] = still.relative_to(project_dir).as_posix()
         sc["image_paths"] = [sc["image_path"]]
-        anchor = anchor or out
-        _set(project_id, done=i + 1)
+        _set(project_id, done=2 * i + 1)
 
-    # 2. Clips — Seedance, a few at a time.
-    _set(project_id, stage="clips", done=0, total=len(scenes))
-    sem = asyncio.Semaphore(CLIP_CONCURRENCY)
-    finished = 0
+        clip_dir = clips_dir / f"animatediff_s{i:04d}_i0"
+        mp4 = clip_dir / "source.mp4"
+        prompt = f"{sc.get('motion_prompt') or sc['image_prompt']}. {MOTION_SUFFIX}"
+        if dirty or not mp4.exists() or sc.get("reel_clip_prompt") != prompt:
+            await generate_animatediff_clip(
+                image_path=still, prompt=prompt,
+                output_dir=clips_dir, scene_index=i, img_index=0,
+                motion_preset=None, style_prompt="",
+                model=config.REEL_I2V_MODEL, resolution=config.REEL_I2V_RESOLUTION,
+            )
+            sc["reel_clip_prompt"] = prompt
+            dirty = True
+        frames = sorted(clip_dir.glob("frame_*.png")) if clip_dir.exists() else []
+        if mp4.exists() and frames:
+            sc["reel_clip_path"] = mp4.relative_to(project_dir).as_posix()
+            sc.pop("reel_clip_error", None)
+            prev_frame = frames[-1]
+        else:
+            sc["reel_clip_error"] = (
+                getattr(generate_animatediff_clip, "last_error", None) or "I2V failed"
+            )
+            log.warning("Reel beat %d has no clip (%s) — using the still",
+                        i, sc["reel_clip_error"])
+            prev_frame = still
+        _set(project_id, done=2 * i + 2)
 
-    async def _clip(i: int, sc: dict) -> None:
-        nonlocal finished
-        async with sem:
-            mp4 = clips_dir / f"animatediff_s{i:04d}_i0" / "source.mp4"
-            prompt = f"{sc.get('motion_prompt') or sc['image_prompt']}. {MOTION_SUFFIX}"
-            if i in changed or not mp4.exists() or sc.get("reel_clip_prompt") != prompt:
-                await generate_animatediff_clip(
-                    image_path=project_dir / sc["image_path"], prompt=prompt,
-                    output_dir=clips_dir, scene_index=i, img_index=0,
-                    motion_preset=None, style_prompt="",
-                    model=config.REEL_I2V_MODEL, resolution=config.REEL_I2V_RESOLUTION,
-                )
-                sc["reel_clip_prompt"] = prompt
-            if mp4.exists():
-                sc["reel_clip_path"] = mp4.relative_to(project_dir).as_posix()
-                sc.pop("reel_clip_error", None)
-            else:
-                sc["reel_clip_error"] = (
-                    getattr(generate_animatediff_clip, "last_error", None) or "I2V failed"
-                )
-                log.warning("Reel beat %d has no clip (%s) — using the still",
-                            i, sc["reel_clip_error"])
-            finished += 1
-            _set(project_id, done=finished)
-
-    await asyncio.gather(*[_clip(i, sc) for i, sc in enumerate(scenes)])
-
-    # 3. Render.
+    # 2. Render.
     _set(project_id, stage="render")
     path, duration = await asyncio.to_thread(
         shorts.render_reel, script, project_dir, project_dir / "reel.mp4"

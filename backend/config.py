@@ -326,6 +326,15 @@ I2V_DELETE_SOURCE_MP4 = os.getenv("I2V_DELETE_SOURCE_MP4", "0").strip() in ("1",
 REEL_I2V_MODEL = os.getenv("REEL_I2V_MODEL", "bytedance/seedance-2.5")
 REEL_I2V_RESOLUTION = os.getenv("REEL_I2V_RESOLUTION", "480p")
 REEL_TARGET_SECONDS = float(os.getenv("REEL_TARGET_SECONDS", "25"))
+# Reels talk faster than the audiobook narrator and don't pause between beats.
+# Measured on the first reel (2026-08-30): 68 words in 32.8 s of speech at
+# MINIMAX_SPEED=0.96 with emotions → ~124 wpm; 1.15 ≈ 1.2x → ~145 wpm.
+REEL_SPEECH_SPEED = float(os.getenv("REEL_SPEECH_SPEED", "1.15"))
+REEL_TRAILING_SILENCE = float(os.getenv("REEL_TRAILING_SILENCE", "0.25"))
+REEL_NARRATION_WPM = float(os.getenv("REEL_NARRATION_WPM", "145"))
+# Reel captions: one word at a time, big, mid-frame (reference-reel style).
+REEL_CAPTION_FONT_SIZE = int(os.getenv("REEL_CAPTION_FONT_SIZE", "130"))
+REEL_CAPTION_Y = float(os.getenv("REEL_CAPTION_Y", "0.5"))
 # Frame loading still uses 8 fps for the assembly ping-pong cadence;
 # `_animatediff_clip` in video_assembly.py reads this.
 ANIMATEDIFF_DEFAULT_FPS = I2V_OUTPUT_FPS

@@ -705,11 +705,14 @@ async def run_voice(project_id: str, req: RunVoiceRequest):
         script["scenes"] = await localize.localize_scenes(
             script["scenes"], req.language, state.get("narration_style", "")
         )
+        is_reel = state.get("kind") == "reel"
         scenes = await voice_gen.generate_all_scenes(
             scenes=script["scenes"],
             profile_id=req.profile_id,
             language=req.language,
             project_dir=pdir,
+            speed=config.REEL_SPEECH_SPEED if is_reel else None,
+            trailing_silence=config.REEL_TRAILING_SILENCE if is_reel else None,
             script_meta={
                 "title": script.get("title", ""),
                 "synopsis": script.get("synopsis", ""),
